@@ -1,0 +1,10 @@
+cover.out
+*.coverprofile
+/coverage/
+/bin/
+web/admin/node_modules/
+web/admin/dist/app/
+.env
+/site/
+.venv/
+.claude/scheduled_tasks.lock

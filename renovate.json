@@ -1,0 +1,145 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Australia/Melbourne",
+  "schedule": [
+    "before 9am on monday"
+  ],
+  "prConcurrentLimit": 2,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Testcontainers images are Go string constants, so no built-in manager reads them.",
+      "managerFilePatterns": [
+        "/^internal/testenv/.+\\.go$/"
+      ],
+      "matchStrings": [
+        "Image = \"(?<depName>[^:\"]+):(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "scripts/ci/lint.sh pins the golangci-lint image in a shell variable.",
+      "managerFilePatterns": [
+        "/^scripts/ci/lint\\.sh$/"
+      ],
+      "matchStrings": [
+        "golangci_image=\"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "scripts/ci/ui.sh pins Node in a shell variable.",
+      "managerFilePatterns": [
+        "/^scripts/ci/ui\\.sh$/"
+      ],
+      "matchStrings": [
+        "node_version=\"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "node-version"
+    },
+    {
+      "customType": "regex",
+      "description": "go run tool@version in scripts/ci (govulncheck).",
+      "managerFilePatterns": [
+        "/^scripts/ci/.+\\.sh$/"
+      ],
+      "matchStrings": [
+        "go run (?<depName>[^@\\s]+?)(?:/cmd/[^@\\s]+)?@(?<currentValue>v[0-9][^\\s]*)"
+      ],
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "Images built from dockerfile_inline in compose, which the docker-compose manager does not parse.",
+      "managerFilePatterns": [
+        "/(^|/)compose\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "FROM (?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Every non-major update lands in one weekly branch.",
+      "groupName": "all non-major dependencies",
+      "groupSlug": "all-non-major",
+      "matchPackageNames": [
+        "*"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ]
+    },
+    {
+      "description": "Major updates land in a second branch so one that needs a migration never blocks routine bumps.",
+      "groupName": "all major dependencies",
+      "groupSlug": "all-major",
+      "matchPackageNames": [
+        "*"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ]
+    },
+    {
+      "description": "Every Node pin moves together: scripts/ci/ui.sh, the GitHub ui job and the admin image. ui.sh also pins the tarball sha256 per architecture, which Renovate cannot compute, so this PR fails GitLab's ui job (GitHub uses setup-node) until those two hashes are updated by hand from nodejs.org SHASUMS256.txt.",
+      "matchDepNames": [
+        "node"
+      ],
+      "groupName": "node runtime",
+      "groupSlug": "node-runtime"
+    },
+    {
+      "description": "Wait before raising PRs so a bad release is caught upstream first.",
+      "matchPackageNames": [
+        "*"
+      ],
+      "minimumReleaseAge": "7 days",
+      "internalChecksFilter": "strict"
+    },
+    {
+      "description": "gcr.io and ghcr.io return no release timestamps and distroless tags are unversioned, so the age check would hold these digests forever.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "gcr.io/distroless/**",
+        "ghcr.io/astral-sh/uv"
+      ],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    },
+    {
+      "description": "Last on purpose. config:recommended marks runtime dependency bumps as fix, which release-please would turn into a patch release for every bump.",
+      "matchPackageNames": [
+        "*"
+      ],
+      "semanticCommitType": "chore"
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 9am on monday"
+    ]
+  }
+}

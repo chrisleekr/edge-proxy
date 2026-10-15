@@ -1,0 +1,33 @@
+name: nightly
+
+# The full load profile: nightly, and on demand before a
+# release with profile=release.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: local (20k IPs, 5m streams) or release (1M IPs, 1h streams)
+        default: local
+
+permissions:
+  contents: read
+
+jobs:
+  load-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: ./scripts/ci/load-full.sh
+        env:
+          PROFILE: ${{ inputs.profile || 'local' }}
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: load-full-results
+          path: loadtest/results/
+          retention-days: 14

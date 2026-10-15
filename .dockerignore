@@ -1,0 +1,14 @@
+.git
+**/node_modules
+web/admin/dist/app
+web/admin/test-results
+web/admin/playwright-report
+cover.out
+.venv
+site
+.env
+.claude
+loadtest/results
+*.coverprofile
+coverage
+bin

@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("{\"rules\":[{\"field\":\"http.request.uri\",\"operAtor\":\"wildcard\",\"rules\":[]}]}")
+string("0")
+string("0")

@@ -1,0 +1,85 @@
+site_name: Edge Proxy
+site_description: A Go reverse proxy that enforces rate limits, JWT, CORS and header policy behind your CDN, with tested, canaried and audited changes.
+site_url: https://chrisleekr.github.io/edge-proxy/
+repo_url: https://github.com/chrisleekr/edge-proxy
+repo_name: chrisleekr/edge-proxy
+edit_uri: edit/main/docs/
+strict: true
+
+# strict only halts on warnings. Orphan pages and dead anchors default to info,
+# so they are promoted here to make the docs build a link and nav gate.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+
+# The milestone plan is a build record, not reader documentation.
+exclude_docs: |
+  implementation-plan.md
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: '(prefers-color-scheme: light)'
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: '(prefers-color-scheme: dark)'
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Get started: get-started.md
+  - Use:
+      - Policy: use/policy.md
+      - Rate limiting: use/rate-limiting.md
+      - Publish and roll back: use/publishing.md
+      - Dashboard: use/dashboard.md
+  - Deploy:
+      - deploy/index.md
+      - Edge settings: deploy/edge.md
+      - Admin settings: deploy/admin.md
+      - Capacity planning: deploy/capacity.md
+  - Operate:
+      - Monitoring: operate/monitoring.md
+      - Runbooks: operate/runbooks.md
+  - Reference:
+      - Expressions: reference/expressions.md
+      - Admin API: reference/api.md
+      - Compared with vendors: vendor-comparison.md
+  - Build:
+      - Development: build/development.md
+      - Design: design.md

@@ -1,0 +1,1016 @@
+package snapshot
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/language"
+
+	"github.com/chrisleekr/edge-proxy/internal/expr"
+)
+
+// Deployment is what validation needs from deployment config (env and
+// flags). Admin users can't edit any of it.
+type Deployment struct {
+	// Upstreams are the names defined in UPSTREAMS.
+	Upstreams []string
+	// ViewerFields are the viewer fields with a configured trusted source,
+	// e.g. "ip.src.country".
+	ViewerFields []string
+	// SourceHeaders are the client-IP, viewer and ingress secret headers.
+	// The edge strips them, so rules can neither read nor set them.
+	SourceHeaders []string
+	// AllowRegex enables the "matches" operator.
+	AllowRegex bool
+}
+
+// Fingerprint identifies d. Edges report theirs, and admin refuses to
+// publish while a live edge's differs from its own: every edge would reject
+// a config validated against another deployment.
+func (d Deployment) Fingerprint() string {
+	sorted := func(xs []string, fold bool) []string {
+		out := make([]string, 0, len(xs))
+		for _, x := range xs {
+			if fold {
+				x = strings.ToLower(x)
+			}
+			out = append(out, x)
+		}
+		slices.Sort(out)
+		return out
+	}
+	b, _ := json.Marshal([]any{sorted(d.Upstreams, false), sorted(d.ViewerFields, false), sorted(d.SourceHeaders, true), d.AllowRegex}) // strings and a bool
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
+// Compiled is a validated config ready for the request path. Slices are
+// parallel to the rule lists in Config.
+type Compiled struct {
+	Config *Config
+	// Deployment is what the config was validated against. Config tests
+	// read the source headers from it, which the edge strips.
+	Deployment     Deployment
+	ConfigRules    []expr.Matcher
+	RateLimitRules []expr.Matcher
+	// SiteWide holds the indexes of rate-limit rules whose expression is
+	// true; they are always evaluated.
+	SiteWide    []int
+	HeaderRules []expr.Matcher
+	// HeaderValues[i][k] is the parsed value of rule i, op k (set and append).
+	HeaderValues [][]Template
+	Responses    map[string]Template
+	// Locale is nil when no locales are supported.
+	Locale language.Matcher
+}
+
+// Limits on one config.
+const (
+	// A build reads every config schema from MinSchema to SupportedSchema,
+	// so an edge upgraded first still loads versions saved under older
+	// schemas. Raising MinSchema needs admin to upgrade stored versions.
+	MinSchema        = 1
+	SupportedSchema  = 1
+	MaxConfigBytes   = 8 << 20
+	MaxRulesPerPhase = 200
+	MaxSiteWide      = 2
+	MaxKeyParts      = 5
+	// MaxListLen bounds every other list and map: origins, header names,
+	// issuers, audiences, locales, templates, policies, ops.
+	MaxListLen      = 100
+	MaxBodyTemplate = 32 << 10
+	MaxHeaderValue  = 4096
+	MaxNameArg      = 256
+	// MaxNameLen bounds rule and issuer IDs, and template and CORS policy names.
+	MaxNameLen     = 64
+	MaxCount       = 1_000_000_000
+	MaxBackstopIPs = 10_000_000
+	MaxRulePeriod  = 24 * time.Hour
+	// MaxExact bounds burst × period in ms for token and leaky buckets,
+	// leaving headroom under 2^53 for the scripts' intermediate sums.
+	MaxExact         = 1 << 51
+	MaxServerTimeout = time.Hour
+)
+
+// statusOf is the status each response kind must use.
+var statusOf = map[string]int{
+	"bad_request":       400,
+	"unauthorized":      401,
+	"misdirected":       421,
+	"payload_too_large": 413,
+	"rate_limited":      429,
+	"bad_gateway":       502,
+	"unavailable":       503,
+	"overloaded":        503,
+	"gateway_timeout":   504,
+}
+
+var contentTypes = map[string]bool{
+	"application/json":          true,
+	"application/problem+json":  true,
+	"text/html; charset=utf-8":  true,
+	"text/plain; charset=utf-8": true,
+}
+
+// ResponseStatuses returns each response kind and the status it must use.
+// The edge keeps its own kind table; its tests check the two agree.
+func ResponseStatuses() map[string]int { return maps.Clone(statusOf) }
+
+// Algorithms are the rate-limit algorithms validation accepts. ratelimit
+// keeps its enum in agreement, checked by its tests.
+var Algorithms = []string{"fixed_window", "sliding_window", "token_bucket", "leaky_bucket"}
+
+// KeyKinds are the rate-limit key characteristics validation accepts.
+// header, cookie, query and jwt_claim take a name; the rest take none.
+// ratelimit keeps its part table in agreement, checked by its tests.
+var KeyKinds = []string{"ip", "header", "cookie", "query", "jwt_claim", "host", "method", "country", "asnum", "locale", "constant"}
+
+// The other names validation accepts, in the order its errors list them.
+// Each consumer's tests check it handles every one, so a name added here
+// can't fall through to some other behavior.
+var (
+	OnMissingKeys    = []string{"skip", "fallback_ip", "reject"}
+	Actions          = []string{"block", "log"}
+	FailModes        = []string{"open", "closed", "local"}
+	AuthModes        = []string{"none", "optional", "required"}
+	ForwardModes     = []string{"all", "allowlist", "denylist"}
+	HeaderOps        = []string{"set", "append", "remove", "copy", "rename", "forward"}
+	PlaceholderNames = []string{"header", "client_ip", "jwt_claim", "country", "locale", "request_id"}
+)
+
+// orList writes names as "a, b or c".
+func orList(names []string) string {
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+// jwtAlgorithms are the asymmetric algorithms golang-jwt v5 verifies. HMAC
+// is excluded: the key would have to be a shared secret in the snapshot.
+var jwtAlgorithms = map[string]bool{
+	"RS256": true, "RS384": true, "RS512": true,
+	"PS256": true, "PS384": true, "PS512": true,
+	"ES256": true, "ES384": true, "ES512": true,
+	"EdDSA": true,
+}
+
+// reserved are request headers no rule may target. Lowercase.
+var reserved = map[string]bool{
+	"host": true, "content-length": true, "transfer-encoding": true,
+	"connection": true, "keep-alive": true, "proxy-connection": true,
+	"proxy-authenticate": true, "proxy-authorization": true, "te": true,
+	"trailer": true, "upgrade": true, "forwarded": true, "x-request-id": true,
+}
+
+// Reserved reports a header the edge or the HTTP framing manages, which no
+// rule may target. The edge's forward filter always keeps these.
+func Reserved(name string) bool { return reserved[strings.ToLower(name)] }
+
+// clientControlled fields can be set to anything by the client, so a rate
+// limit must not use them to exclude traffic.
+var clientControlled = map[string]bool{
+	"http.request.headers": true, "http.request.cookies": true, "http.cookie": true,
+	"http.request.uri.args": true, "http.request.uri.query": true,
+	"http.x_forwarded_for": true, "http.user_agent": true, "http.referer": true,
+}
+
+// Compile validates c against d and builds the request-path structures. It
+// is the only validation path: admin runs it on every save and publish, the
+// edge before activation. It returns the compiled config, or nil and every
+// error found. Warnings are returned either way.
+func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
+	v := &validator{
+		d: d, c: c,
+		out:       &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}},
+		upstreams: setOf(d.Upstreams, caseSensitive),
+		viewer:    setOf(d.ViewerFields, caseSensitive),
+		sources:   setOf(d.SourceHeaders, foldCase),
+		issuers:   map[string]bool{},
+		locales:   map[string]bool{},
+		ruleIDs:   map[string]bool{},
+	}
+	v.config()
+	if len(v.errs) > 0 {
+		return nil, v.warns, v.errs
+	}
+	return v.out, v.warns, nil
+}
+
+// CheckExpression validates one expression as Compile would for a rule in
+// phase of c, so the admin rule builder and save can't disagree. It reads
+// only c's supported locales.
+func CheckExpression(n expr.Node, phase expr.Phase, c *Config, d Deployment) (errs, warns []expr.Issue) {
+	v := &validator{d: d, c: c, viewer: setOf(d.ViewerFields, caseSensitive), sources: setOf(d.SourceHeaders, foldCase), locales: setOf(c.Global.Locale.Supported, caseSensitive)}
+	v.expression("", n, phase)
+	trim := func(is []expr.Issue) []expr.Issue {
+		for i := range is {
+			is[i].Path = strings.TrimPrefix(is[i].Path, ".")
+		}
+		return is
+	}
+	return trim(v.errs), trim(v.warns)
+}
+
+type validator struct {
+	d                          Deployment
+	c                          *Config
+	out                        *Compiled
+	errs, warns                []expr.Issue
+	upstreams, viewer, sources map[string]bool
+	issuers, locales, ruleIDs  map[string]bool
+	siteWideIP                 bool
+}
+
+func (v *validator) err(path, format string, args ...any) {
+	v.errs = append(v.errs, expr.Issue{Path: path, Msg: fmt.Sprintf(format, args...)})
+}
+
+func (v *validator) warn(path, format string, args ...any) {
+	v.warns = append(v.warns, expr.Issue{Path: path, Msg: fmt.Sprintf(format, args...)})
+}
+
+func (v *validator) config() {
+	c := v.c
+	if c.Schema < MinSchema || c.Schema > SupportedSchema {
+		v.err("schema", "schema %d is not supported; this build reads schemas %d to %d", c.Schema, MinSchema, SupportedSchema)
+	}
+	if c.Version < 1 {
+		v.err("version", "must be at least 1")
+	}
+	// Marshaling a decoded Config can't fail: every type in it marshals.
+	if b, _ := json.Marshal(c); len(b) > MaxConfigBytes {
+		v.err("", "config is %d bytes as JSON; at most %d are allowed", len(b), MaxConfigBytes)
+	}
+	v.global()
+	v.auth()
+	v.configRules()
+	v.rateLimitRules()
+	v.headerRules()
+}
+
+func (v *validator) global() {
+	g := v.c.Global
+	b := g.Backstop
+	v.count("global.backstop.limit", b.Limit)
+	v.period("global.backstop.period", b.Period, time.Hour)
+	v.count("global.backstop.burst", b.Burst)
+	if b.MaxEntries < 1 || b.MaxEntries > MaxBackstopIPs {
+		v.err("global.backstop.max_entries", "must be 1 to %d", MaxBackstopIPs)
+	}
+
+	v.templates(g.Responses)
+	d := g.Defaults
+	if d.BodyLimit < 1 {
+		v.err("global.defaults.body_limit", "must be at least 1 byte")
+	}
+	v.timeout("global.defaults.body_read_timeout", d.BodyReadTimeout)
+	v.timeout("global.defaults.upstream_timeout", d.UpstreamTimeout)
+	v.responseMap("global.defaults.responses", d.Responses)
+	for _, kind := range slices.Sorted(maps.Keys(statusOf)) {
+		if _, ok := d.Responses[kind]; !ok {
+			v.err("global.defaults.responses", "needs a template for %q; the edge can send it on any request", kind)
+		}
+	}
+
+	v.cors(g.CORSPolicies)
+	v.locale(g.Locale, d.Locale)
+	v.forward("global.request_headers.forward", g.RequestHeaders.Forward)
+}
+
+func (v *validator) templates(rs map[string]Response) {
+	if len(rs) > MaxListLen {
+		v.err("global.responses", "has %d templates; at most %d are allowed", len(rs), MaxListLen)
+	}
+	samples := map[string]string{"retry_after": "1", "request_id": "r1", "status": "429"}
+	for _, name := range slices.Sorted(maps.Keys(rs)) {
+		r := rs[name]
+		p := fmt.Sprintf("global.responses[%q]", name)
+		v.name(p, name)
+		if r.Status < 400 || r.Status > 599 {
+			v.err(p+".status", "must be 400 to 599")
+		}
+		if !contentTypes[r.ContentType] {
+			v.err(p+".content_type", "must be one of %s", strings.Join(slices.Sorted(maps.Keys(contentTypes)), ", "))
+		}
+		if len(r.Body) > MaxBodyTemplate {
+			v.err(p+".body", "is %d bytes; at most %d are allowed", len(r.Body), MaxBodyTemplate)
+		}
+		t, err := parseTemplate(r.Body)
+		if err != nil {
+			v.err(p+".body", "%v", err)
+			continue
+		}
+		bad := false
+		for _, ph := range t.Placeholders() {
+			if _, ok := samples[ph.Name]; !ok || ph.Arg != "" {
+				v.err(p+".body", "unknown placeholder {{%s}}; use {{retry_after}}, {{request_id}} or {{status}}", ph.Name)
+				bad = true
+			}
+		}
+		if !bad && strings.HasSuffix(r.ContentType, "json") {
+			if out := t.Render(nil, func(ph Placeholder) string { return samples[ph.Name] }); !json.Valid(out) {
+				v.err(p+".body", "is not valid JSON after filling placeholders with sample values")
+			}
+		}
+		v.out.Responses[name] = t
+	}
+}
+
+// responseMap checks a kind -> template map, used by defaults and rules.
+func (v *validator) responseMap(path string, m map[string]string) {
+	for _, kind := range slices.Sorted(maps.Keys(m)) {
+		status, ok := statusOf[kind]
+		if !ok {
+			v.err(path, "unknown response kind %q", kind)
+			continue
+		}
+		r, ok := v.c.Global.Responses[m[kind]]
+		switch {
+		case !ok:
+			v.err(path, "%s uses template %q, which doesn't exist", kind, m[kind])
+		case r.Status != status:
+			v.err(path, "%s needs a template with status %d; %q has %d", kind, status, m[kind], r.Status)
+		}
+	}
+}
+
+func (v *validator) cors(ps map[string]CORSPolicy) {
+	if len(ps) > MaxListLen {
+		v.err("global.cors_policies", "has %d policies; at most %d are allowed", len(ps), MaxListLen)
+	}
+	for _, name := range slices.Sorted(maps.Keys(ps)) {
+		cp := ps[name]
+		p := fmt.Sprintf("global.cors_policies[%q]", name)
+		v.name(p, name)
+		if len(cp.Origins) == 0 {
+			v.err(p+".origins", "needs at least one origin")
+		}
+		v.list(p+".origins", cp.Origins, caseSensitive, func(o string) string {
+			if o == "*" {
+				if cp.Credentials {
+					return `"*" can't be used with credentials (Fetch standard)`
+				}
+				return ""
+			}
+			return originProblem(o)
+		})
+		v.list(p+".methods", cp.Methods, caseSensitive, func(m string) string {
+			if !expr.IsToken(m) || strings.ToUpper(m) != m {
+				return "must be an uppercase method name"
+			}
+			return ""
+		})
+		headerList := func(h string) string {
+			if h == "*" && cp.Credentials {
+				return `"*" can't be used with credentials (Fetch standard)`
+			}
+			if h != "*" && !expr.IsToken(h) {
+				return "is not a valid header name"
+			}
+			return ""
+		}
+		v.list(p+".request_headers", cp.RequestHeaders, foldCase, headerList)
+		v.list(p+".exposed_headers", cp.ExposedHeaders, foldCase, headerList)
+		if cp.MaxAge != 0 {
+			v.period(p+".max_age", cp.MaxAge, 24*time.Hour)
+		}
+	}
+}
+
+// originProblem checks a serialized origin: scheme://host[:port], lowercase,
+// nothing else, because browsers send exactly that form.
+func originProblem(o string) string {
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+		u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || strings.HasSuffix(o, "?") || strings.HasSuffix(o, "#") {
+		return "must be an origin such as https://app.example.com"
+	}
+	if strings.ToLower(o) != o {
+		return "must be lowercase; browsers send origins in lowercase"
+	}
+	return ""
+}
+
+func (v *validator) locale(l Locale, defaultOn bool) {
+	if len(l.Supported) == 0 {
+		if l.Default != "" || l.OutputHeader != "" || defaultOn {
+			v.err("global.locale.supported", "needs at least one locale when locale is used")
+		}
+		return
+	}
+	var tags []language.Tag
+	v.list("global.locale.supported", l.Supported, caseSensitive, func(s string) string {
+		t, err := language.Parse(s)
+		if err != nil {
+			return "is not a BCP 47 language tag"
+		}
+		if t.String() != s {
+			return fmt.Sprintf("must be written in canonical form %q", t.String())
+		}
+		tags = append(tags, t)
+		v.locales[s] = true
+		return ""
+	})
+	if !v.locales[l.Default] {
+		v.err("global.locale.default", "must be one of the supported locales")
+	}
+	if l.OutputHeader != "" && (!expr.IsToken(l.OutputHeader) || !strings.HasPrefix(strings.ToLower(l.OutputHeader), "x-edge-")) {
+		v.err("global.locale.output_header", "must be a header name starting with X-Edge-, so clients can't send it")
+	}
+	v.out.Locale = language.NewMatcher(tags)
+}
+
+func (v *validator) forward(path string, f Forward) {
+	if !slices.Contains(ForwardModes, f.Mode) {
+		v.err(path+".mode", "must be %s", orList(ForwardModes))
+		return
+	}
+	if f.Mode == "all" {
+		if len(f.Names) > 0 {
+			v.err(path+".names", "must be empty when mode is all")
+		}
+		return
+	}
+	if len(f.Names) == 0 {
+		v.err(path+".names", "needs at least one header name")
+	}
+	v.list(path+".names", f.Names, foldCase, v.targetProblem)
+	if f.Mode == "allowlist" {
+		for _, h := range []string{"Authorization", "Cookie", "Content-Type"} {
+			if !slices.ContainsFunc(f.Names, func(n string) bool { return strings.EqualFold(n, h) }) {
+				v.warn(path+".names", "allowlist drops %s", h)
+			}
+		}
+	}
+}
+
+func (v *validator) auth() {
+	a := v.c.Auth
+	if len(a.Issuers) > MaxListLen {
+		v.err("auth.issuers", "has %d issuers; at most %d are allowed", len(a.Issuers), MaxListLen)
+	}
+	iss := map[string]bool{}
+	for i, is := range a.Issuers {
+		p := fmt.Sprintf("auth.issuers[%d]", i)
+		v.name(p+".id", is.ID)
+		if v.issuers[is.ID] {
+			v.err(p+".id", "duplicate issuer id %q", is.ID)
+		}
+		v.issuers[is.ID] = true
+		if is.Issuer == "" || len(is.Issuer) > MaxNameArg || expr.HasControl(is.Issuer) {
+			v.err(p+".issuer", "must be 1 to %d characters with no control characters", MaxNameArg)
+		}
+		// The token's iss picks the issuer, so two issuers can't share one.
+		if iss[is.Issuer] {
+			v.err(p+".issuer", "another issuer already uses %q", is.Issuer)
+		}
+		iss[is.Issuer] = true
+		if len(is.Audiences) == 0 {
+			v.err(p+".audiences", "needs at least one audience")
+		}
+		v.list(p+".audiences", is.Audiences, caseSensitive, func(s string) string {
+			if s == "" || len(s) > MaxNameArg || expr.HasControl(s) {
+				return fmt.Sprintf("must be 1 to %d characters with no control characters", MaxNameArg)
+			}
+			return ""
+		})
+		if u, err := url.Parse(is.JWKSURL); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
+			v.err(p+".jwks_url", "must be an https URL with a host and no credentials or fragment")
+		}
+		if !jwtAlgorithms[is.Algorithm] {
+			v.err(p+".algorithm", "must be one of %s", strings.Join(slices.Sorted(maps.Keys(jwtAlgorithms)), ", "))
+		}
+	}
+	v.issuerList("auth.default_accepted", a.DefaultAccepted)
+}
+
+func (v *validator) issuerList(path string, ids []string) {
+	v.list(path, ids, caseSensitive, func(id string) string {
+		if !v.issuers[id] {
+			return fmt.Sprintf("issuer %q doesn't exist", id)
+		}
+		return ""
+	})
+}
+
+func (v *validator) configRules() {
+	rs := v.c.ConfigRules
+	v.ruleCount("config_rules", len(rs))
+	v.out.ConfigRules = make([]expr.Matcher, len(rs))
+	for i, r := range rs {
+		p := fmt.Sprintf("config_rules[%d]", i)
+		v.ruleID(p, r.ID)
+		v.out.ConfigRules[i] = v.expression(p, r.Expression, expr.PhaseConfig)
+		v.settings(p+".settings", r.Settings)
+	}
+	// A rule whose every setting a later "true" rule sets again never has an effect.
+	for i, r := range rs {
+		later := map[string]bool{}
+		for _, l := range rs[i+1:] {
+			if expr.Normalize(l.Expression).IsTrue() {
+				for _, n := range settingNames(l.Settings) {
+					later[n] = true
+				}
+			}
+		}
+		names := settingNames(r.Settings)
+		if len(names) > 0 && !slices.ContainsFunc(names, func(n string) bool { return !later[n] }) {
+			v.warn(fmt.Sprintf("config_rules[%d]", i), "every setting is overwritten by a later rule that matches all requests")
+		}
+	}
+}
+
+func settingNames(s Settings) []string {
+	var ns []string
+	add := func(set bool, n string) {
+		if set {
+			ns = append(ns, n)
+		}
+	}
+	add(s.Auth != nil, "auth")
+	add(s.CORSPolicy != nil, "cors_policy")
+	add(s.Locale != nil, "locale")
+	for _, k := range slices.Sorted(maps.Keys(s.Responses)) {
+		ns = append(ns, "responses."+k)
+	}
+	add(s.BodyLimit != nil, "body_limit")
+	add(s.Upstream != nil, "upstream")
+	add(s.UpstreamTimeout != nil, "upstream_timeout")
+	add(s.RateLimitHeaders != nil, "ratelimit_headers")
+	return ns
+}
+
+func (v *validator) settings(p string, s Settings) {
+	if len(settingNames(s)) == 0 {
+		v.err(p, "sets nothing; add at least one setting")
+	}
+	if a := s.Auth; a != nil {
+		switch {
+		case !slices.Contains(AuthModes, a.Mode):
+			v.err(p+".auth.mode", "must be %s", orList(AuthModes))
+		case a.Mode == "none":
+			if len(a.Accepted) > 0 {
+				v.err(p+".auth.accepted", "must be empty when mode is none")
+			}
+		case len(a.Accepted) == 0 && len(v.c.Auth.DefaultAccepted) == 0:
+			v.err(p+".auth.accepted", "no issuers are accepted: set accepted or auth.default_accepted")
+		}
+		v.issuerList(p+".auth.accepted", a.Accepted)
+	}
+	if s.CORSPolicy != nil && *s.CORSPolicy != "" {
+		if _, ok := v.c.Global.CORSPolicies[*s.CORSPolicy]; !ok {
+			v.err(p+".cors_policy", "CORS policy %q doesn't exist", *s.CORSPolicy)
+		}
+	}
+	if s.Locale != nil && *s.Locale && len(v.c.Global.Locale.Supported) == 0 {
+		v.err(p+".locale", "locale is not configured in global.locale")
+	}
+	v.responseMap(p+".responses", s.Responses)
+	if s.BodyLimit != nil && *s.BodyLimit < 1 {
+		v.err(p+".body_limit", "must be at least 1 byte")
+	}
+	if s.Upstream != nil && !v.upstreams[*s.Upstream] {
+		v.err(p+".upstream", "upstream %q is not defined in deployment config", *s.Upstream)
+	}
+	if s.UpstreamTimeout != nil {
+		v.timeout(p+".upstream_timeout", *s.UpstreamTimeout)
+	}
+}
+
+func (v *validator) rateLimitRules() {
+	rs := v.c.RateLimitRules
+	v.ruleCount("rate_limit_rules", len(rs))
+	v.out.RateLimitRules = make([]expr.Matcher, len(rs))
+	for i, r := range rs {
+		if expr.Normalize(r.Expression).IsTrue() {
+			v.out.SiteWide = append(v.out.SiteWide, i)
+			v.siteWideIP = v.siteWideIP || slices.Contains(r.Key, "ip")
+		}
+	}
+	if len(v.out.SiteWide) > MaxSiteWide {
+		v.err("rate_limit_rules", "has %d rules matching all requests; at most %d are allowed", len(v.out.SiteWide), MaxSiteWide)
+	}
+	for i, r := range rs {
+		p := fmt.Sprintf("rate_limit_rules[%d]", i)
+		v.ruleID(p, r.ID)
+		v.out.RateLimitRules[i] = v.expression(p, r.Expression, expr.PhaseRateLimit)
+		v.spoofableExclusion(p, r.Expression)
+		if !slices.Contains(Algorithms, r.Algorithm) {
+			v.err(p+".algorithm", "must be one of %s", strings.Join(Algorithms, ", "))
+		}
+		v.count(p+".limit", r.Limit)
+		v.period(p+".period", r.Period, MaxRulePeriod)
+		if r.Algorithm == "token_bucket" || r.Algorithm == "leaky_bucket" {
+			v.count(p+".burst", r.Burst)
+			// Valkey's Lua numbers are doubles; the bucket scripts work in
+			// burst × period milliseconds and must stay exact.
+			if ms := int64(time.Duration(r.Period) / time.Millisecond); ms > 0 && r.Burst > MaxExact/ms {
+				v.err(p+".burst", "burst × period is too large: at most %d per %s", MaxExact/ms, time.Duration(r.Period))
+			}
+		} else if r.Burst != 0 {
+			v.err(p+".burst", "applies only to token_bucket and leaky_bucket")
+		}
+		v.key(p+".key", r.Key)
+		if !slices.Contains(OnMissingKeys, r.OnMissingKey) {
+			v.err(p+".on_missing_key", "must be %s", orList(OnMissingKeys))
+		}
+		if !slices.Contains(Actions, r.Action) {
+			v.err(p+".action", "must be %s", orList(Actions))
+		}
+		if r.Penalty != 0 {
+			v.period(p+".penalty", r.Penalty, MaxRulePeriod)
+		}
+		if !slices.Contains(FailModes, r.FailMode) {
+			v.err(p+".fail_mode", "must be %s", orList(FailModes))
+		}
+	}
+}
+
+// key checks rate-limit key characteristics.
+func (v *validator) key(p string, parts []string) {
+	if len(parts) < 1 || len(parts) > MaxKeyParts {
+		v.err(p, "needs 1 to %d characteristics", MaxKeyParts)
+		return
+	}
+	attacker, partner := false, false
+	v.list(p, parts, caseSensitive, func(k string) string {
+		kind, arg, hasArg := strings.Cut(k, ":")
+		if !slices.Contains(KeyKinds, kind) {
+			return "must be ip, header:<n>, cookie:<n>, query:<n>, jwt_claim:<n>, host, method, country, asnum, locale or constant"
+		}
+		switch kind {
+		case "ip", "jwt_claim":
+			partner = true
+		case "header", "cookie", "query", "host", "method":
+			// Any uppercase token is a valid method, and any Host reaches
+			// a rule when a config rule routes every host.
+			attacker = true
+		}
+		switch kind {
+		case "header", "cookie":
+			if !expr.IsToken(arg) {
+				return fmt.Sprintf("%s needs a valid name, e.g. %s:x-api-key", kind, kind)
+			}
+			if kind == "header" {
+				if msg := v.managedProblem(arg); msg != "" {
+					return msg
+				}
+			}
+		case "query", "jwt_claim":
+			if arg == "" || len(arg) > MaxNameArg || expr.HasControl(arg) || !utf8.ValidString(arg) {
+				return fmt.Sprintf("%s needs a name of 1 to %d characters, e.g. %s:user_id", kind, MaxNameArg, kind)
+			}
+		default:
+			if hasArg {
+				return fmt.Sprintf("%s takes no name", kind)
+			}
+		}
+		switch {
+		case kind == "country" && !v.viewer["ip.src.country"], kind == "asnum" && !v.viewer["ip.src.asnum"]:
+			return fmt.Sprintf("%s has no trusted source configured in this deployment", kind)
+		case kind == "locale" && len(v.locales) == 0:
+			return "locale is not configured in global.locale"
+		case kind == "constant" && len(parts) > 1:
+			return "constant can't be combined with other characteristics"
+		}
+		return ""
+	})
+	// Clients rotate header, cookie and query values to get fresh buckets.
+	if attacker && !partner && !v.siteWideIP {
+		v.err(p, "keys only on client-controlled values; add ip or jwt_claim, or add a rule matching all requests keyed on ip")
+	}
+}
+
+func (v *validator) headerRules() {
+	rs := v.c.RequestHeaderRules
+	v.ruleCount("request_header_rules", len(rs))
+	v.out.HeaderRules = make([]expr.Matcher, len(rs))
+	v.out.HeaderValues = make([][]Template, len(rs))
+	for i, r := range rs {
+		p := fmt.Sprintf("request_header_rules[%d]", i)
+		v.ruleID(p, r.ID)
+		v.out.HeaderRules[i] = v.expression(p, r.Expression, expr.PhaseRequestHeaders)
+		if len(r.Ops) < 1 || len(r.Ops) > MaxListLen {
+			v.err(p+".ops", "needs 1 to %d operations", MaxListLen)
+		}
+		v.out.HeaderValues[i] = make([]Template, len(r.Ops))
+		for k, op := range r.Ops {
+			v.out.HeaderValues[i][k] = v.op(fmt.Sprintf("%s.ops[%d]", p, k), op)
+		}
+	}
+	// Copy and rename read the forwarded headers, after the forward filter.
+	// Which filter applies depends on the request, so any that can drop
+	// the source is worth a warning.
+	filters := []Forward{v.c.Global.RequestHeaders.Forward}
+	for _, r := range rs {
+		for _, op := range r.Ops {
+			if op.Op == "forward" {
+				filters = append(filters, Forward{Mode: op.Mode, Names: op.Names})
+			}
+		}
+	}
+	for i, r := range rs {
+		for k, op := range r.Ops {
+			if (op.Op == "copy" || op.Op == "rename") && slices.ContainsFunc(filters, func(f Forward) bool { return drops(f, op.From) }) {
+				v.warn(fmt.Sprintf("request_header_rules[%d].ops[%d].from", i, k), "%s can be dropped by a forward filter first; the copy then removes %s", http.CanonicalHeaderKey(op.From), http.CanonicalHeaderKey(op.To))
+			}
+		}
+	}
+}
+
+func drops(f Forward, name string) bool {
+	listed := slices.ContainsFunc(f.Names, func(n string) bool { return strings.EqualFold(n, name) })
+	return f.Mode == "allowlist" && !listed || f.Mode == "denylist" && listed
+}
+
+func (v *validator) op(p string, op HeaderOp) Template {
+	// used lists the fields this op takes; any other field set is an error.
+	var used []string
+	var t Template
+	if !slices.Contains(HeaderOps, op.Op) {
+		v.err(p+".op", "must be %s", orList(HeaderOps))
+		return t
+	}
+	switch op.Op {
+	case "set", "append":
+		used = []string{"name", "value"}
+		v.target(p+".name", op.Name)
+		t = v.headerValue(p+".value", op.Value)
+	case "remove":
+		used = []string{"name"}
+		v.target(p+".name", op.Name)
+	case "copy", "rename":
+		used = []string{"from", "to"}
+		v.target(p+".from", op.From)
+		v.target(p+".to", op.To)
+	case "forward":
+		used = []string{"mode", "names"}
+		v.forward(p, Forward{Mode: op.Mode, Names: op.Names})
+	}
+	set := map[string]bool{"name": op.Name != "", "value": op.Value != "", "from": op.From != "", "to": op.To != "", "mode": op.Mode != "", "names": op.Names != nil}
+	for _, f := range slices.Sorted(maps.Keys(set)) {
+		if set[f] && !slices.Contains(used, f) {
+			v.err(p+"."+f, "doesn't apply to %s", op.Op)
+		}
+	}
+	return t
+}
+
+func (v *validator) target(p, name string) {
+	if msg := v.targetProblem(name); msg != "" {
+		v.err(p, "%s", msg)
+	}
+}
+
+// targetProblem rejects invalid header names and those managedProblem rejects.
+func (v *validator) targetProblem(name string) string {
+	if !expr.IsToken(name) {
+		return fmt.Sprintf("%q is not a valid header name", name)
+	}
+	return v.managedProblem(name)
+}
+
+// managedProblem rejects header names no rule may read or write, on every
+// path that names a header (ops, placeholders, keys, expressions): the edge
+// manages, strips or frames them. Reading matters too: a client
+// can forge X-Edge-* before the edge replaces it, and source headers can
+// carry the ingress secret.
+func (v *validator) managedProblem(name string) string {
+	l := strings.ToLower(name)
+	if reserved[l] || v.sources[l] || strings.HasPrefix(l, "x-edge-") || strings.HasPrefix(l, "x-forwarded-") {
+		return fmt.Sprintf("%s is managed by the edge and can't be used in rules", http.CanonicalHeaderKey(name))
+	}
+	return ""
+}
+
+func (v *validator) headerValue(p, s string) Template {
+	// CR or LF in a value would split the header; other controls are invalid (RFC 9110 §5.5).
+	if len(s) > MaxHeaderValue || expr.HasControl(s) || !utf8.ValidString(s) {
+		v.err(p, "must be at most %d bytes of valid UTF-8 with no control characters", MaxHeaderValue)
+		return Template{}
+	}
+	t, err := parseTemplate(s)
+	if err != nil {
+		v.err(p, "%v", err)
+		return t
+	}
+	for _, ph := range t.Placeholders() {
+		if msg := v.placeholderProblem(ph); msg != "" {
+			v.err(p, "{{%s}}: %s", ph.Name, msg)
+		}
+	}
+	return t
+}
+
+func (v *validator) placeholderProblem(ph Placeholder) string {
+	if !slices.Contains(PlaceholderNames, ph.Name) {
+		return "unknown placeholder; use " + orList(PlaceholderNames)
+	}
+	switch ph.Name {
+	case "header":
+		if !expr.IsToken(ph.Arg) {
+			return "needs a header name, e.g. {{header:user-agent}}"
+		}
+		return v.managedProblem(ph.Arg)
+	case "jwt_claim":
+		if ph.Arg == "" || len(ph.Arg) > MaxNameArg {
+			return "needs a claim name, e.g. {{jwt_claim:sub}}"
+		}
+		return ""
+	}
+	switch {
+	case ph.Arg != "":
+		return "takes no name"
+	case ph.Name == "country" && !v.viewer["ip.src.country"]:
+		return "country has no trusted source configured in this deployment"
+	case ph.Name == "locale" && len(v.locales) == 0:
+		return "locale is not configured in global.locale"
+	}
+	return ""
+}
+
+// expression compiles n for phase and checks locale values against the
+// supported list, since the edge only ever produces supported locales.
+func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Matcher {
+	m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(f string) bool { return v.viewer[f] }, AllowRegex: v.d.AllowRegex})
+	for _, is := range issues {
+		v.errs = append(v.errs, expr.Issue{Path: p + "." + is.Path, Msg: is.Msg})
+	}
+	walk(n, false, func(r expr.Node, _ bool) {
+		if r.Field == "http.request.headers" && expr.IsToken(r.Key) {
+			if msg := v.managedProblem(r.Key); msg != "" {
+				v.err(p+".expression", "%s", msg)
+			}
+		}
+		if r.Field != "edge.locale" {
+			return
+		}
+		if len(v.locales) == 0 {
+			v.err(p+".expression", "uses edge.locale, but locale is not configured in global.locale")
+			return
+		}
+		if r.Operator != "eq" && r.Operator != "ne" && r.Operator != "in" && r.Operator != "not_in" {
+			return
+		}
+		vals := r.Value.List
+		if !r.Value.IsList {
+			vals = []string{r.Value.One}
+		}
+		// "" is the value when locale is off for the request.
+		for _, val := range vals {
+			if val != "" && !v.locales[val] {
+				v.err(p+".expression", "edge.locale is never %q; supported locales are %s", val, strings.Join(v.c.Global.Locale.Supported, ", "))
+			}
+		}
+	})
+	if unsatisfiable(expr.Normalize(n)) {
+		v.warn(p+".expression", "contains conditions that can never all be true")
+	}
+	return m
+}
+
+func (v *validator) spoofableExclusion(p string, n expr.Node) {
+	warned := false
+	walk(n, false, func(r expr.Node, neg bool) {
+		op, _ := expr.LookupOp(r.Operator)
+		if !warned && clientControlled[r.Field] && neg != (op.Negates != "") {
+			v.warn(p+".expression", "excludes traffic using client-controlled %s; clients can set it to skip this limit. Exclude by ip.src or a verified claim", r.Field)
+			warned = true
+		}
+	})
+}
+
+// walk calls f for every rule in n with whether an odd number of group
+// negations encloses it.
+func walk(n expr.Node, neg bool, f func(r expr.Node, neg bool)) {
+	if !n.IsGroup() {
+		f(n, neg)
+		return
+	}
+	for _, c := range n.Rules {
+		walk(c, neg != n.Not, f)
+	}
+}
+
+// unsatisfiable finds an "and" group requiring one single-valued field to
+// equal two different values.
+func unsatisfiable(n expr.Node) bool {
+	if !n.IsGroup() {
+		return false
+	}
+	if n.Combinator == "and" && !n.Not {
+		seen := map[string]string{}
+		for _, r := range n.Rules {
+			if r.IsGroup() || r.Operator != "eq" || r.Key != "" {
+				continue
+			}
+			if prev, ok := seen[r.Field]; ok && prev != r.Value.One {
+				return true
+			}
+			seen[r.Field] = r.Value.One
+		}
+	}
+	return slices.ContainsFunc(n.Rules, unsatisfiable)
+}
+
+// Shared field checks.
+
+func (v *validator) ruleCount(p string, n int) {
+	if n > MaxRulesPerPhase {
+		v.err(p, "has %d rules; at most %d are allowed", n, MaxRulesPerPhase)
+	}
+}
+
+// ruleID requires IDs unique across all phases: rate-limit keys and stats use them.
+func (v *validator) ruleID(p, id string) {
+	v.name(p+".id", id)
+	if v.ruleIDs[id] {
+		v.err(p+".id", "duplicate rule id %q", id)
+	}
+	v.ruleIDs[id] = true
+}
+
+func (v *validator) name(p, s string) {
+	if !isName(s) {
+		v.err(p, "%q must be 1 to %d lowercase letters, digits, - or _, starting with a letter or digit", s, MaxNameLen)
+	}
+}
+
+func (v *validator) count(p string, n int64) {
+	if n < 1 || n > MaxCount {
+		v.err(p, "must be 1 to %d", MaxCount)
+	}
+}
+
+// period requires whole seconds: rate-limit keys and windows use seconds.
+func (v *validator) period(p string, d Duration, maxD time.Duration) {
+	t := time.Duration(d)
+	if t < time.Second || t > maxD || t%time.Second != 0 {
+		v.err(p, "must be whole seconds from 1s to %s", maxD)
+	}
+}
+
+func (v *validator) timeout(p string, d Duration) {
+	if t := time.Duration(d); t < time.Second || t > MaxServerTimeout {
+		v.err(p, "must be from 1s to %s", MaxServerTimeout)
+	}
+}
+
+// list checks length and duplicates, then each item. foldCase makes "X-A"
+// and "x-a" duplicates, for header names.
+// Case handling for list and setOf: header names compare case-insensitively.
+const (
+	caseSensitive = false
+	foldCase      = true
+)
+
+func (v *validator) list(p string, items []string, fold bool, problem func(string) string) {
+	if len(items) > MaxListLen {
+		v.err(p, "has %d items; at most %d are allowed", len(items), MaxListLen)
+	}
+	seen := map[string]bool{}
+	for i, s := range items {
+		ip := fmt.Sprintf("%s[%d]", p, i)
+		k := s
+		if fold {
+			k = strings.ToLower(s)
+		}
+		if seen[k] {
+			v.err(ip, "duplicate %q", s)
+		}
+		seen[k] = true
+		if msg := problem(s); msg != "" {
+			v.err(ip, "%s", msg)
+		}
+	}
+}
+
+func setOf(items []string, fold bool) map[string]bool {
+	m := make(map[string]bool, len(items))
+	for _, s := range items {
+		if fold {
+			s = strings.ToLower(s)
+		}
+		m[s] = true
+	}
+	return m
+}
+
+func isName(s string) bool {
+	if s == "" || len(s) > MaxNameLen || s[0] == '-' || s[0] == '_' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte("abcdefghijklmnopqrstuvwxyz0123456789-_", s[i]) < 0 {
+			return false
+		}
+	}
+	return true
+}

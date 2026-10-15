@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Edge stream check</title>
+</head>
+<body>
+<!-- Served by the upstream in TestBrowserStreams, through the edge. Each
+     button runs one check; browser/streams.spec.ts calls the same functions. -->
+<h1>Edge stream check</h1>
+<p>
+  <button onclick="run('sse')">SSE</button>
+  <button onclick="run('sseRejected')">SSE rejected</button>
+  <button onclick="run('ndjson')">Streaming fetch</button>
+  <button onclick="run('ws')">WebSocket</button>
+  <button onclick="run('wsRejected')">WebSocket rejected</button>
+</p>
+<pre id="log"></pre>
+<script>
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// SSE: the first stream ends after one event, the browser reconnects with
+// Last-Event-ID, and the upstream answers from where it left off.
+window.sse = () => new Promise((resolve, reject) => {
+  const got = [];
+  const es = new EventSource('/sse');
+  es.onmessage = (e) => {
+    got.push(e.data);
+    if (got.length === 2) { es.close(); resolve(got); }
+  };
+  setTimeout(() => { es.close(); reject(new Error('got ' + JSON.stringify(got))); }, 5000);
+});
+
+// An edge rejection (here a 400 for an ambiguous path) must close the
+// EventSource for good: a non-200 answer is not retried.
+window.sseRejected = () => new Promise((resolve) => {
+  const es = new EventSource('/sse%2Fx');
+  es.onerror = async () => { await wait(500); resolve(es.readyState); es.close(); };
+});
+
+// A streamed fetch body arrives chunk by chunk: the upstream sends the
+// second line only after the page has read the first and asked for more.
+window.ndjson = async () => {
+  const res = await fetch('/ndjson');
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  const first = dec.decode((await reader.read()).value);
+  await fetch('/next', { method: 'POST' });
+  const second = dec.decode((await reader.read()).value);
+  return [first, second];
+};
+
+window.ws = () => new Promise((resolve, reject) => {
+  const ws = new WebSocket('/ws', ['chat']);
+  ws.onopen = () => ws.send('hello');
+  ws.onmessage = (e) => { resolve({ data: e.data, protocol: ws.protocol }); ws.close(); };
+  ws.onerror = () => reject(new Error('WebSocket error'));
+});
+
+// A refused upgrade reaches the page as an abnormal close (1006).
+window.wsRejected = () => new Promise((resolve) => {
+  const ws = new WebSocket('/ws%2Fx');
+  ws.onclose = (e) => resolve(e.code);
+});
+
+async function run(name) {
+  const log = document.getElementById('log');
+  try {
+    log.textContent += name + ': ' + JSON.stringify(await window[name]()) + '\n';
+  } catch (e) {
+    log.textContent += name + ' failed: ' + e.message + '\n';
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+# Same gates as .github/workflows/ci.yml; both call scripts/ci/*.sh.
+stages: [check, publish]
+
+default:
+  image: golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8
+  # Lets auto-cancel stop a superseded pipeline.
+  interruptible: true
+
+lint:
+  stage: check
+  image: golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f
+  script:
+    - ./scripts/ci/lint.sh
+
+# Docker for testcontainers: tests and Valkey benchmarks start real Valkey.
+.docker: &docker
+  services:
+    - name: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+      alias: docker
+      # TLS off so dind starts without certificates (testcontainers GitLab guide).
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+
+test:
+  stage: check
+  <<: *docker
+  script:
+    - ./scripts/ci/test.sh
+
+fuzz:
+  stage: check
+  script:
+    - ./scripts/ci/fuzz.sh
+
+bench:
+  stage: check
+  <<: *docker
+  script:
+    - ./scripts/ci/bench.sh
+
+vuln:
+  stage: check
+  script:
+    - ./scripts/ci/vuln.sh
+
+commits:
+  stage: check
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    PR_TITLE: $CI_MERGE_REQUEST_TITLE
+    BASE: $CI_MERGE_REQUEST_DIFF_BASE_SHA
+    HEAD: $CI_COMMIT_SHA
+    GIT_DEPTH: 0
+  script:
+    - ./scripts/ci/commits.sh
+
+docs:
+  stage: check
+  image: ghcr.io/astral-sh/uv:0.12.19-python3.12-alpine@sha256:23ab7187a462696e85e168d2a042493d45c8d06c8a90d9aa820b8b83da09f118
+  script:
+    - ./scripts/ci/docs.sh
+
+# ui.sh installs its pinned Node when the image has none.
+ui:
+  stage: check
+  <<: *docker
+  script:
+    - ./scripts/ci/ui.sh
+
+# Image and load jobs drive Docker directly; the docker image ships the
+# compose plugin, and the scripts are POSIX sh for it.
+container:
+  stage: check
+  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  <<: *docker
+  script:
+    - ./scripts/ci/image.sh
+
+load:
+  stage: check
+  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  <<: *docker
+  script:
+    - ./scripts/ci/load.sh
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths: [loadtest/results/]
+
+# Full load profile on scheduled pipelines only; set PROFILE=release on the
+# schedule before a release.
+load-full:
+  stage: check
+  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  <<: *docker
+  timeout: 3h
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - ./scripts/ci/load-full.sh
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths: [loadtest/results/]
+
+
+# Rolling latest from main to this project's registry; no version tags (those
+# come from release-please on GitHub). Branches only run the container job's
+# local build and smoke test, so no dev tags are pushed.
+publish-latest:
+  stage: publish
+  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  interruptible: false
+  # Its own TLS daemon: this job sends registry credentials, unlike the test
+  # jobs that share the plain-TCP one.
+  services:
+    - name: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # buildx refuses the default context when its TLS settings come from env.
+    - docker context create dind
+    - docker buildx create --use --driver docker-container dind
+    - ./scripts/ci/publish.sh "$CI_REGISTRY_IMAGE/edge-proxy" latest

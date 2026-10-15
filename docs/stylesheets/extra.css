@@ -1,0 +1,11 @@
+/* Reading width. The default content column squeezes three-column tables into
+   one or two words per line. */
+.md-grid {
+  max-width: 68rem;
+}
+
+/* Screenshots are UI, not illustrations. A border separates them from the page. */
+.md-typeset img[src*='/screenshots/'] {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 4px;
+}

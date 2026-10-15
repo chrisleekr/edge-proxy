@@ -1,0 +1,203 @@
+{
+  "config": {
+    "schema": 1,
+    "kill_switch": {
+      "rate_limit": false,
+      "auth": false
+    },
+    "global": {
+      "backstop": {
+        "limit": 5000,
+        "period": "1s",
+        "burst": 10000,
+        "max_entries": 1000000
+      },
+      "defaults": {
+        "locale": false,
+        "body_limit": 1048576,
+        "body_read_timeout": "30s",
+        "upstream_timeout": "30s",
+        "responses": {
+          "bad_request": "bad_request",
+          "unauthorized": "unauthorized",
+          "misdirected": "misdirected",
+          "payload_too_large": "payload_too_large",
+          "rate_limited": "rate_limited",
+          "bad_gateway": "bad_gateway",
+          "unavailable": "unavailable",
+          "overloaded": "overloaded",
+          "gateway_timeout": "gateway_timeout"
+        }
+      },
+      "cors_policies": {},
+      "responses": {
+        "bad_request": {
+          "status": 400,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":400,\"title\":\"Bad Request\"}"
+        },
+        "unauthorized": {
+          "status": 401,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":401,\"title\":\"Unauthorized\"}"
+        },
+        "misdirected": {
+          "status": 421,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":421,\"title\":\"Misdirected Request\"}"
+        },
+        "payload_too_large": {
+          "status": 413,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":413,\"title\":\"Request Entity Too Large\"}"
+        },
+        "rate_limited": {
+          "status": 429,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":429,\"title\":\"Too Many Requests\"}"
+        },
+        "bad_gateway": {
+          "status": 502,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":502,\"title\":\"Bad Gateway\"}"
+        },
+        "unavailable": {
+          "status": 503,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":503,\"title\":\"Service Unavailable\"}"
+        },
+        "overloaded": {
+          "status": 503,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":503,\"title\":\"Service Unavailable\"}"
+        },
+        "gateway_timeout": {
+          "status": 504,
+          "content_type": "application/problem+json",
+          "body": "{\"status\":504,\"title\":\"Gateway Timeout\"}"
+        }
+      },
+      "locale": {
+        "supported": [],
+        "default": "",
+        "output_header": ""
+      },
+      "request_headers": {
+        "forward": {
+          "mode": "all"
+        }
+      }
+    },
+    "auth": {
+      "issuers": [
+        {
+          "id": "idp",
+          "issuer": "https://idp",
+          "audiences": [
+            "loadtest"
+          ],
+          "jwks_url": "https://idp:8443/jwks.json",
+          "algorithm": "ES256"
+        }
+      ],
+      "default_accepted": [
+        "idp"
+      ]
+    },
+    "config_rules": [
+      {
+        "id": "private-needs-auth",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/private/"
+            }
+          ]
+        },
+        "settings": {
+          "auth": {
+            "mode": "required"
+          }
+        }
+      }
+    ],
+    "rate_limit_rules": [
+      {
+        "id": "login",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "eq",
+              "value": "/login"
+            }
+          ]
+        },
+        "algorithm": "sliding_window",
+        "limit": 100,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "fail_mode": "open"
+      },
+      {
+        "id": "api-per-ip",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/api/"
+            }
+          ]
+        },
+        "algorithm": "token_bucket",
+        "limit": 1000,
+        "period": "1s",
+        "burst": 1000,
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "fail_mode": "open"
+      }
+    ],
+    "request_header_rules": []
+  },
+  "tests": [
+    {
+      "name": "login is limited per IP",
+      "request": {
+        "method": "POST",
+        "host": "api.example.com",
+        "path": "/login"
+      },
+      "expect": {
+        "rate_limit_rules": [
+          "login"
+        ]
+      }
+    },
+    {
+      "name": "private paths need a token",
+      "request": {
+        "host": "api.example.com",
+        "path": "/private/x"
+      },
+      "expect": {
+        "config_rules": [
+          "private-needs-auth"
+        ]
+      }
+    }
+  ]
+}

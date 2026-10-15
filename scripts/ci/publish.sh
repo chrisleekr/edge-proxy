@@ -1,0 +1,30 @@
+#!/bin/sh
+# Release images: builds the edge and admin images for amd64 and arm64 and
+# pushes them as <prefix> (the proxy) and <prefix>-admin with every given tag.
+# A leading v is dropped, so release-please's v1.2.3 becomes 1.2.3.
+# Needs docker buildx with a multi-platform builder and a registry login.
+# POSIX sh for the docker image GitLab uses.
+set -eu
+cd "$(dirname "$0")/../.."
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: publish.sh <repository prefix> <tag> [tag ...]" >&2
+  exit 64
+fi
+prefix=$1
+shift
+version=${1#v}
+
+for app in edge admin; do
+  repo=${prefix}
+  [ "${app}" = admin ] && repo=${prefix}-admin
+  tags=""
+  for tag in "$@"; do
+    tags="${tags} --tag ${repo}:${tag#v}"
+  done
+  # Word splitting of $tags is intended: tags never contain spaces.
+  # shellcheck disable=SC2086
+  docker buildx build --platform linux/amd64,linux/arm64 --push \
+    --label "org.opencontainers.image.version=${version}" \
+    -f "build/${app}.Dockerfile" ${tags} .
+done

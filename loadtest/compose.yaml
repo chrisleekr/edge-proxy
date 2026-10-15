@@ -1,0 +1,167 @@
+# Local load-test environment: 3 edges, admin, Postgres,
+# Valkey, a mock upstream and a mock IdP. Run with scripts/ci/load.sh.
+# Credentials here are for this throwaway environment only. Files go into
+# images rather than bind mounts, which docker-in-docker CI can't see.
+
+x-trust: &trust
+  CLIENT_IP_SOURCE: cloudfront
+  # k6 sends the CloudFront viewer header itself, standing in for the CDN.
+  # make demo widens this so curl on the host can stand in for the CDN.
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.77.0.0/24}
+  UPSTREAMS: app=http://upstream:8080
+  UPSTREAM_HOSTS: api.example.com=app
+  JWKS_ALLOWED_HOSTS: idp
+  SSL_CERT_FILE: /shared/ca.pem
+
+x-admin-env: &admin-env
+  <<: *trust
+  DATABASE_URL: postgres://edge_app:app@postgres/edge_admin?sslmode=disable
+  AUDIT_HMAC_KEY_ID: loadtest
+  AUDIT_HMAC_KEY: bG9hZHRlc3QtYXVkaXQta2V5LW5vdC1hLXNlY3JldC0wMDAw
+  ADMIN_API: http://admin:8081
+
+x-edge: &edge
+  image: edge-proxy/edge:dev
+  build: { context: .., dockerfile: build/edge.Dockerfile }
+  depends_on:
+    seed: { condition: service_completed_successfully }
+    valkey: { condition: service_healthy }
+  volumes: [shared:/shared:ro]
+  # Room for DRAIN_DELAY plus SHUTDOWN_TIMEOUT before Docker kills it.
+  stop_grace_period: 45s
+
+x-edge-env: &edge-env
+  <<: *trust
+  ADMIN_URL: http://admin:8081
+  EDGE_SERVICE_TOKEN_FILE: /shared/edge-token
+  # VALKEY_URL selects the 3-shard cluster with COMPOSE_PROFILES=cluster.
+  VALKEY_URL: ${VALKEY_URL:-redis://valkey:6379}
+  EXPECTED_REPLICAS: "3"
+  # The mock LB checks /readyz every second, so 5s is enough to leave it.
+  # 10k streams over three edges, with room to lose one.
+  # Streams also hold an upstream slot, so the per-upstream cap needs room
+  # for them on top of ordinary requests.
+  MAX_STREAMS: "6000"
+  MAX_UPSTREAM_INFLIGHT: "8000"
+  DRAIN_DELAY: 5s
+  SHUTDOWN_TIMEOUT: 30s
+  # Unsampled logs at load-test rates would measure the log pipe.
+  LOG_SAMPLE_RATE: "0.01"
+  STATS_INTERVAL: 5s
+
+networks:
+  default:
+    ipam:
+      config: [{ subnet: 10.77.0.0/24 }]
+
+volumes:
+  shared:
+
+services:
+  postgres:
+    image: edge-proxy/postgres:dev
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        COPY postgres-init.sql /docker-entrypoint-initdb.d/init.sql
+    environment: { POSTGRES_PASSWORD: postgres }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d edge_admin"]
+      interval: 1s
+      retries: 30
+
+  valkey:
+    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    # Rate-limit state has TTLs and needs no persistence.
+    command: [valkey-server, --save, "", --appendonly, "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 1s
+      retries: 30
+
+  upstream:
+    image: edge-proxy/tools:dev
+    build: { context: .., dockerfile: build/tools.Dockerfile }
+    command: [upstream]
+
+  idp:
+    image: edge-proxy/tools:dev
+    command: [idp]
+    environment: { SHARED: /shared }
+    volumes: [shared:/shared]
+
+  migrate:
+    image: edge-proxy/admin:dev
+    build: { context: .., dockerfile: build/admin.Dockerfile }
+    command: [migrate]
+    environment:
+      MIGRATION_DATABASE_URL: postgres://edge_owner:owner@postgres/edge_admin?sslmode=disable
+      DB_RUNTIME_ROLE: edge_app
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  admin:
+    image: edge-proxy/admin:dev
+    environment: *admin-env
+    ports: ["127.0.0.1:8081:8081"]
+    volumes: [shared:/shared:ro]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      idp: { condition: service_started }
+
+  seed:
+    image: edge-proxy/tools:dev
+    command: [seed]
+    environment:
+      <<: *admin-env
+      SHARED: /shared
+    volumes: [shared:/shared]
+    depends_on:
+      admin: { condition: service_started }
+
+  edge-1:
+    <<: *edge
+    environment: { <<: *edge-env, INSTANCE: edge-1 }
+    ports: ["127.0.0.1:8080:8080"]
+  edge-2:
+    <<: *edge
+    environment: { <<: *edge-env, INSTANCE: edge-2 }
+  edge-3:
+    <<: *edge
+    environment: { <<: *edge-env, INSTANCE: edge-3 }
+
+  # Stands in for the cloud LB in front of the edges.
+  lb:
+    image: edge-proxy/tools:dev
+    command: [lb, -backends, "http://edge-1:8080,http://edge-2:8080,http://edge-3:8080"]
+    depends_on: [edge-1, edge-2, edge-3]
+
+  # Three-shard Valkey cluster, fixed IPs because nodes
+  # announce addresses, not names.
+  valkey-c1: &cluster-node
+    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    profiles: [cluster]
+    command: [valkey-server, --cluster-enabled, "yes", --cluster-require-full-coverage, "no", --save, "", --appendonly, "no"]
+    networks: { default: { ipv4_address: 10.77.0.21 } }
+  valkey-c2:
+    <<: *cluster-node
+    networks: { default: { ipv4_address: 10.77.0.22 } }
+  valkey-c3:
+    <<: *cluster-node
+    networks: { default: { ipv4_address: 10.77.0.23 } }
+  valkey-cluster-init:
+    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    profiles: [cluster]
+    depends_on: [valkey-c1, valkey-c2, valkey-c3]
+    command: [sh, -c, "sleep 2 && valkey-cli --cluster create 10.77.0.21:6379 10.77.0.22:6379 10.77.0.23:6379 --cluster-replicas 0 --cluster-yes"]
+
+  k6:
+    image: edge-proxy/k6:dev
+    build:
+      context: ./k6
+      dockerfile_inline: |
+        FROM grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34
+        COPY . /scripts
+    profiles: [k6]
+    depends_on: [edge-1, edge-2, edge-3]
