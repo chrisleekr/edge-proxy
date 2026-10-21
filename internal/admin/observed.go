@@ -341,11 +341,11 @@ func (s *Server) routePatterns(ctx context.Context) ([]routePattern, error) {
 	if p := s.patterns.Load(); p != nil {
 		return *p, nil
 	}
-	return s.loadPatterns(ctx)
+	return s.loadPatterns(ctx, s.db)
 }
 
-func (s *Server) loadPatterns(ctx context.Context) ([]routePattern, error) {
-	rows, err := s.db.Query(ctx, "SELECT id, host, pattern, created_at FROM route_patterns")
+func (s *Server) loadPatterns(ctx context.Context, q querier) ([]routePattern, error) {
+	rows, err := q.Query(ctx, "SELECT id, host, pattern, created_at FROM route_patterns")
 	if err != nil {
 		return nil, err
 	}
@@ -472,7 +472,18 @@ func (a *routeAggregator) take() map[hourRoute]*routeTotals {
 func (s *Server) flushRoutes(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, flushTimeout)
 	defer cancel()
-	pats, err := s.loadPatterns(ctx)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// SHARE conflicts with createPattern's SHARE ROW EXCLUSIVE but not with
+	// other flushes, so no pattern is created between loading the patterns
+	// and writing routes it would have merged.
+	if _, err := tx.Exec(ctx, "LOCK TABLE route_patterns IN SHARE MODE"); err != nil {
+		return err
+	}
+	pats, err := s.loadPatterns(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -499,8 +510,8 @@ func (s *Server) flushRoutes(ctx context.Context) error {
 	if err := s.capRoutes(ctx, held); err != nil {
 		return fmt.Errorf("route flush dropped %d route hours: %w", len(held), err)
 	}
-	// A batch is one transaction; rows are locked in one order on every
-	// replica, so concurrent flushes never deadlock.
+	// Rows are locked in byte order on every replica, as mergeIntoPattern
+	// locks them, so flushes and pattern creates never deadlock.
 	b := &pgx.Batch{}
 	for _, k := range slices.SortedFunc(maps.Keys(held), func(a, b hourRoute) int {
 		return cmp.Or(cmp.Compare(a.route.host, b.route.host), cmp.Compare(a.route.method, b.route.method),
@@ -522,7 +533,10 @@ func (s *Server) flushRoutes(ctx context.Context) error {
 			k.route.host, k.route.method, k.route.template, t.first, t.last,
 			k.hour, t.requests, t.versioned, t.status[:], t.latency, t.decisions, t.config, t.rateLimit, t.shapes, t.estimated, t.errorsOnly())
 	}
-	if err := s.db.SendBatch(ctx, b).Close(); err != nil {
+	if err := tx.SendBatch(ctx, b).Close(); err != nil {
+		return fmt.Errorf("route flush dropped %d route hours: %w", len(held), err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("route flush dropped %d route hours: %w", len(held), err)
 	}
 	return nil
@@ -884,7 +898,7 @@ func (s *Server) deleteAllObserved(w http.ResponseWriter, r *http.Request, p *pr
 // --- Patterns ---
 
 func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request, _ *principal) error {
-	pats, err := s.loadPatterns(r.Context())
+	pats, err := s.loadPatterns(r.Context(), s.db)
 	if err != nil {
 		return err
 	}
@@ -928,7 +942,7 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request, p *princi
 	if err != nil {
 		return err
 	}
-	if _, err := s.loadPatterns(ctx); err != nil {
+	if _, err := s.loadPatterns(ctx, s.db); err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusCreated, map[string]int64{"id": pat.ID})
@@ -946,7 +960,7 @@ func patternName(p routePattern) string {
 func mergeIntoPattern(ctx context.Context, tx pgx.Tx, pat routePattern) (int, error) {
 	// A route moves only if ingest would now group it under pat: a more
 	// specific pattern keeps its routes. Rows are locked in the order flushes
-	// lock them.
+	// lock them: byte order, whatever the database collation.
 	prows, err := tx.Query(ctx, "SELECT id, host, pattern, created_at FROM route_patterns")
 	if err != nil {
 		return 0, err
@@ -956,7 +970,8 @@ func mergeIntoPattern(ctx context.Context, tx pgx.Tx, pat routePattern) (int, er
 		return 0, err
 	}
 	sortPatterns(pats)
-	rows, err := tx.Query(ctx, "SELECT id, host, method, template FROM observed_routes WHERE ($1 = '' OR host = $1) AND template <> '*' ORDER BY host, method, template FOR UPDATE", pat.Host)
+	rows, err := tx.Query(ctx, `SELECT id, host, method, template FROM observed_routes WHERE ($1 = '' OR host = $1) AND template <> '*'
+		ORDER BY host COLLATE "C", method COLLATE "C", template COLLATE "C" FOR UPDATE`, pat.Host)
 	if err != nil {
 		return 0, err
 	}
@@ -1020,7 +1035,7 @@ func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request, p *princi
 	if err != nil {
 		return err
 	}
-	if _, err := s.loadPatterns(r.Context()); err != nil {
+	if _, err := s.loadPatterns(r.Context(), s.db); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
