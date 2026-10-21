@@ -377,8 +377,10 @@ export function VersionDetail({ version, can }: { version: number; can: (p: stri
 
 export function Compare() {
   const params = new URLSearchParams(window.location.search);
-  const [a, setA] = useState(params.get('a') ?? '');
-  const [b, setB] = useState(params.get('b') ?? 'draft');
+  // Both go into the API path, so only a version number or "draft" is taken.
+  const side = (v: string | null) => (v && /^(\d+|draft)$/.test(v) ? v : undefined);
+  const [a, setA] = useState(side(params.get('a')) ?? '');
+  const [b, setB] = useState(side(params.get('b')) ?? 'draft');
   const [raw, setRaw] = useState(false);
   const versions = useVersions();
   // From starts at the active version: the usual question is what the

@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { api, type Diff, type Json } from '../api';
 import { Badge, Button, download, ErrorBox, Hint, Notice, Input, Page, Table, ago, when, who } from '../ui';
@@ -109,6 +109,7 @@ const example = {
 };
 
 export function Audit() {
+  const qc = useQueryClient();
   const [typed, setTyped] = useState({ actor: '', action: '', target: '', mentions: '' });
   // Filters apply once typing pauses, not on every keystroke.
   const [filter, setFilter] = useState(typed);
@@ -144,9 +145,12 @@ export function Audit() {
         broken_at?: number;
         reason?: string;
       }>('POST', '/api/audit/verify'),
+    // Verify and export each write an audit row, which the badge and list show.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['audit'] }),
   });
   const exportAll = useMutation({
     mutationFn: async () => download(await api('POST', '/api/audit/export'), 'audit-export.json'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['audit'] }),
   });
   const v = verify.data;
   // Suggestions come from the latest 100 events, whatever the filters.

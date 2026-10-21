@@ -106,7 +106,8 @@ function useData(can: (p: string) => boolean) {
     // Attention reads the whole picked range, not a zoom into it.
     span: ranges.find(([m]) => m === range.minutes)?.[1] ?? 'last hour',
     versions: config ? versions : undefined,
-    live: config ? live : undefined,
+    // With nothing published there is no live config to check.
+    live: config && liveVersion !== undefined ? live : undefined,
     canary: config ? canary : undefined,
     liveVersion,
     canaryVersion,
@@ -193,12 +194,13 @@ function Attention({ d }: { d: Data }) {
   const checked: string[] = [];
   const cfg = d.live?.data?.config;
   // A check counts only once its data is in, so the panel never says
-  // nothing needs attention about something it has not read yet.
+  // nothing needs attention about something it has not read yet. A failed
+  // read is settled too, and shows its own error, so it can't wait forever.
   let waiting = false;
-  const check = (q: { data?: unknown } | undefined, name: string) => {
+  const check = (q: { data?: unknown; isError?: boolean } | undefined, name: string) => {
     if (!q) return;
-    if (q.data === undefined) waiting = true;
-    else checked.push(name);
+    if (q.data !== undefined) checked.push(name);
+    else if (!q.isError) waiting = true;
   };
   check(d.live, 'kill switch');
   if (cfg?.kill_switch.rate_limit)

@@ -3,7 +3,7 @@ import type { Field } from './ui';
 
 // Each phase's rule list in the config, what it is for, the fields a new
 // rule starts with, and a reference for its Then block. Examples must pass
-// validation against a config with no CORS policies or locales.
+// validation against a config with no CORS policies, locales or issuers.
 export const phases: {
   phase: Phase;
   key: 'config_rules' | 'rate_limit_rules' | 'request_header_rules';
@@ -30,7 +30,7 @@ export const phases: {
       ['responses', 'Templates to use for these requests, by kind, such as {"rate_limited": "my-429"}.'],
       ['ratelimit_headers', 'true to send RateLimit and RateLimit-Policy response headers.'],
     ],
-    example: { settings: { auth: { mode: 'required' }, upstream_timeout: '10s', body_limit: 1048576 } },
+    example: { settings: { upstream_timeout: '10s', body_limit: 1048576, ratelimit_headers: true } },
   },
   {
     phase: 'rate_limit',

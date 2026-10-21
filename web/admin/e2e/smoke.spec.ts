@@ -184,6 +184,19 @@ test('each mistake in a rate limit shows by its field and keeps Apply off until 
   await confirm('Discard changes');
 });
 
+test('a penalty typed in seconds stays in seconds as it passes a whole minute', async () => {
+  const limits = page.getByRole('list', { name: 'Rate limit rules' }).locator('..');
+  await limits.getByRole('button', { name: 'Add rate limit rule' }).click();
+  const penalty = page.locator('label').filter({ has: page.getByText('Penalty', { exact: true }) });
+  await penalty.getByLabel('Unit').selectOption('s');
+  await penalty.getByRole('spinbutton').pressSequentially('605');
+  await expect(penalty.getByRole('spinbutton')).toHaveValue('605');
+  await expect(penalty.getByLabel('Unit')).toHaveValue('s');
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('heading', { name: 'Rules', exact: true })).toBeVisible();
+});
+
 test('a CORS policy explains each typical mistake by its field and keeps Save off until fixed', async () => {
   await nav('CORS');
   await page.getByLabel('New policy name').fill('web');

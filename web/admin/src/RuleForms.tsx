@@ -161,8 +161,10 @@ const toMillis = (v: string) => {
   return rest === '' && v !== '' ? total : undefined;
 };
 
-// Amount picks the largest unit the value is a whole number of, so "1m0s"
-// shows as 1 minutes and stays a number and a unit, never free text.
+// Amount shows the value as a number and a unit, never free text. It opens
+// on the largest unit the value is a whole number of, so "1m0s" shows as 1
+// minutes, then keeps that unit while it still fits: re-picking it on every
+// keystroke would turn 60 seconds into 1 minute and the next digit into 15m.
 export function Amount({
   value,
   onChange,
@@ -177,15 +179,17 @@ export function Amount({
   duration: boolean;
 }) {
   const base = duration ? (typeof value === 'string' ? toMillis(value) : undefined) : typeof value === 'number' ? value : undefined;
-  // The unit picked before a number is typed, which no value records yet.
-  const [picked, setPicked] = useState(fallback);
-  const unit = (base !== undefined && units.find(([, , n]) => base > 0 && base % n === 0)?.[0]) || picked;
-  const size = units.find(([u]) => u === unit)![2];
+  const largest = (b: number | undefined) => (b !== undefined && units.find(([, , n]) => b > 0 && b % n === 0)?.[0]) || undefined;
+  const sizeOf = (u: string) => units.find(([x]) => x === u)![2];
+  const [picked, setPicked] = useState(() => largest(base) ?? fallback);
+  // A value from outside, such as a reverted draft, may not fit the kept unit.
+  const unit = base === undefined || base % sizeOf(picked) === 0 ? picked : (largest(base) ?? picked);
+  const size = sizeOf(unit);
   const amount = base === undefined ? '' : base / size;
   const write = (n: string, u: string) => {
     if (n === '') return onChange(undefined);
     const k = Math.trunc(Number(n));
-    onChange(duration ? `${k}${u}` : k * units.find(([x]) => x === u)![2]);
+    onChange(duration ? `${k}${u}` : k * sizeOf(u));
   };
   return (
     <span className="flex max-w-md gap-2">
@@ -391,7 +395,7 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
         label="Token check"
         info="Checks a JWT bearer token against the issuers' keys. Optional lets requests without a token through, but a token that is sent and fails still gets 401. Required answers 401 to any request without a valid token."
         issues={at('settings.auth')}>
-        <Choice value={auth?.mode} options={choices.auth_modes} empty={unset} onChange={(m) => set('auth', m === undefined ? undefined : { ...auth, mode: m })} />
+        <Choice value={auth?.mode} options={choices.auth_modes} empty={unset} onChange={(m) => set('auth', m === undefined ? undefined : m === 'none' ? { mode: m } : { ...auth, mode: m })} />
       </Labeled>
       {auth && auth.mode !== 'none' && issuers.length > 0 && (
         <fieldset className="flex flex-col gap-1 text-sm">
@@ -549,7 +553,7 @@ function HeaderOpsForm({ value, onChange, choices, at }: { value: JsonObject; on
           {op.op === 'forward' && (
             <>
               <Labeled label="Forward" issues={at(`ops[${i}].mode`)}>
-                <Choice value={op.mode as string | undefined} options={choices.forward_modes} onChange={(m) => setOp(i, setField(op, 'mode', m))} />
+                <Choice value={op.mode as string | undefined} options={choices.forward_modes} onChange={(m) => setOp(i, setField(m === 'all' ? without(op, 'names') : op, 'mode', m))} />
               </Labeled>
               {op.mode !== 'all' && (
                 <Labeled label="Headers" hint="Names separated by commas, such as accept, authorization." issues={at(`ops[${i}].names`)}>

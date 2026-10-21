@@ -110,6 +110,7 @@ const decisionWords: Record<string, string> = {
   streams_overloaded: 'Shed: too many open streams',
   upstream_timeout: 'Upstream did not answer in time',
   upstream_error: 'Upstream could not be reached',
+  upstream_tls: 'Upstream TLS handshake failed',
   client_gone: 'Client left before the answer',
   panic: 'Edge error',
   untrusted_peer: 'Refused: not from a trusted proxy',
@@ -137,10 +138,14 @@ const ranges = [
   [720, 'last 30 days'],
 ] as const;
 
+// Decisions that are not the edge refusing or shedding: the request was
+// forwarded, or limited (its own column), or the upstream or client failed it.
+const notRefused = new Set(['allow', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
+
 // Derived figures for one route, shared by the list and the detail page.
 function figures(r: RouteStats) {
   const limited = r.decisions.rate_limited ?? 0;
-  const rejected = Object.entries(r.decisions).reduce((n, [d, c]) => (d === 'allow' || d === 'rate_limited' ? n : n + c), 0);
+  const rejected = Object.entries(r.decisions).reduce((n, [d, c]) => (notRefused.has(d) ? n : n + c), 0);
   return {
     errors: r.status[5] ?? 0,
     limited,
@@ -978,7 +983,8 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
     title: string;
     body: ReactNode;
     seen?: string | undefined;
-    stop?: boolean;
+    // What the sample lacks when the simulation refuses it at this step.
+    stop?: string | undefined;
   }[] = [
     {
       title: 'A request arrives',
@@ -1022,7 +1028,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
             ? `A token is checked when one is sent${s.accepted.length ? ` (from ${s.accepted.join(', ')})` : ''}; requests without one go through.`
             : 'No token is checked.',
       seen: share(d.auth) && `${share(d.auth)} were refused for a missing or invalid token`,
-      stop: rejected === 'auth',
+      stop: rejected === 'auth' ? 'a token' : undefined,
     },
     {
       title: 'Rate limits',
@@ -1033,7 +1039,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
         </div>
       ),
       seen: share(d.rate_limited) && `${share(d.rate_limited)} were blocked by a rate limit`,
-      stop: rejected === 'rate_limit_key',
+      stop: rejected === 'rate_limit_key' ? 'a part of a rate limit key' : undefined,
     },
     {
       title: 'Header rules shape what the upstream receives',
@@ -1059,8 +1065,10 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
       }`,
     },
   ];
-  // A request the simulation refuses stops at that step.
-  const stopAt = rejected && rejected !== 'auth' && rejected !== 'rate_limit_key' ? 0 : steps.findIndex((x) => x.stop);
+  // The sample carries no token or claims, so a refusal for a missing token
+  // or key part is noted on its step and the later steps still show: real
+  // traffic on the route usually carries them. Any other refusal ends the flow.
+  const stopAt = rejected && !steps.some((x) => x.stop) ? 0 : -1;
   return (
     <ol className="flex flex-col">
       {(stopAt >= 0 ? steps.slice(0, stopAt + 1) : steps).map((step, i, list) => (
@@ -1073,6 +1081,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
             <h3 className="font-medium text-heading">{step.title}</h3>
             <div className="text-sm text-body">{step.body}</div>
             {step.seen && <p className="text-sm text-heading">Logged: {step.seen}.</p>}
+            {step.stop && <Notice tone="amber">This sample request has no {step.stop}, so it stops here. Requests that carry one go on to the next steps.</Notice>}
           </div>
         </li>
       ))}
