@@ -42,6 +42,13 @@ if [ "${cpus}" -lt 8 ]; then
   echo "The Docker VM has ${cpus} CPUs; compose.capacity.yaml pins work to 8." >&2
   exit 1
 fi
+# The container limits add up to about 5 GiB and k6 may grow to its 8 GiB
+# GOMEMLIMIT; below that, an OOM kill would read as a failed step.
+mem="$(docker info --format '{{.MemTotal}}')"
+if [ "${mem}" -lt $((14 * 1024 * 1024 * 1024)) ]; then
+  echo "The Docker VM has $((mem / 1024 / 1024)) MiB of memory; the capacity run needs at least 14 GiB." >&2
+  exit 1
+fi
 
 compose --profile k6 build --quiet
 compose up -d --wait edge-1 catalog orders account content delay-valkey delay-catalog delay-orders delay-account delay-content >/dev/null 2>&1 ||

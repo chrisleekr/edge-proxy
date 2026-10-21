@@ -54,7 +54,9 @@ const mix = [
   [3, 'private page without a token: 401', () => http.get(`${edge}/private/account`, { headers: client() })],
   [2, 'private page with a token', () => http.get(`${edge}/private/account`, { headers: { ...client(), Authorization: `Bearer ${token('user')}` } })],
   [2, 'partner API: API key and partner issuer', () => http.get(`${edge}/api/partner/orders`, { headers: { ...client(), Authorization: `Bearer ${token('partner')}`, 'X-Api-Key': `key-${__VU % 5}` } })],
-  [1, 'partner API with the legacy key header, renamed', () => http.get(`${edge}/api/partner/orders`, { headers: { ...client(), Authorization: `Bearer ${token('partner')}`, 'X-Legacy-Key': 'key-legacy' } })],
+  // Rate limits read the client's own X-Api-Key before header rules run, so
+  // the legacy header alone is refused; sent beside it, the rename shows.
+  [1, 'partner API with the legacy key header too, renamed', () => http.get(`${edge}/api/partner/orders`, { headers: { ...client(), Authorization: `Bearer ${token('partner')}`, 'X-Api-Key': `key-${__VU % 5}`, 'X-Legacy-Key': 'key-legacy' } })],
   [1, 'partner API without a key: rejected', () => http.get(`${edge}/api/partner/orders`, { headers: { ...client(), Authorization: `Bearer ${token('partner')}` } })],
   [2, 'bad token: auth failure', () => http.get(`${edge}/api/orders`, { headers: { ...client(), Authorization: 'Bearer not-a-real-token' } })],
   [2, 'upstream errors', () => http.get(`${edge}/api/items?status=${pick([500, 502, 503])}`, { headers: client() })],
