@@ -20,9 +20,32 @@ export interface OpDef {
   types: string[];
 }
 
+// RuleChoices are the values a rule's settings take, as the server accepts them.
+export interface RuleChoices {
+  algorithms: string[];
+  key_kinds: { name: string; named: boolean }[];
+  max_key_parts: number;
+  on_missing_keys: string[];
+  actions: string[];
+  fail_modes: string[];
+  auth_modes: string[];
+  forward_modes: string[];
+  header_ops: string[];
+  response_kinds: { name: string; status: number }[];
+  content_types: string[];
+  jwt_algorithms: string[];
+  methods: string[];
+}
+
 export interface Schema {
   fields: FieldDef[];
   operators: OpDef[];
+  rules: RuleChoices;
+}
+
+export interface Checked {
+  errors: Issue[];
+  warnings: Issue[];
 }
 
 export interface Issue {
@@ -66,7 +89,7 @@ export interface Config {
   version: number;
   kill_switch: { rate_limit: boolean; auth: boolean };
   global: JsonObject & { defaults: JsonObject };
-  auth: { issuers: Json[]; default_accepted: string[] | null };
+  auth: { issuers: Json[] | null; default_accepted: string[] | null };
   config_rules: Rule[] | null;
   rate_limit_rules: Rule[] | null;
   request_header_rules: Rule[] | null;
@@ -103,12 +126,23 @@ export interface Version {
   status: string;
   change_summary: string;
   override_reason: string | null;
-  guard_outcome: { at: string; decision: string; signals?: Record<string, Json> } | null;
+  guard_outcome: { at: string; decision: string; baseline_version?: number | undefined; signals?: Record<string, Json> } | null;
   guard_override_reason?: string | null;
+  abort_reason: string | null;
+}
+
+// The guard fields the UI reads to explain a canary's gate and whether it can roll back.
+export interface GuardGate {
+  step_min_time: string;
+  min_requests: number;
+  enabled: boolean;
+  max_auto_rollbacks_per_publish: number;
+  signals: Record<string, { mode: string }>;
 }
 
 export interface VersionDetail extends Version {
   config: Config;
+  guard_override?: GuardGate | null;
   tests: Json[] | null;
   test_results: TestResult[] | null;
 }
