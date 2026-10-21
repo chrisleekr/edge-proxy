@@ -21,6 +21,7 @@ var (
 // its segment, as the gateway behind the edge routes it when it leaves
 // escaped slashes unchanged (Envoy KEEP_UNCHANGED, its default). Encodings
 // upstreams disagree on, and ".." segments, are rejected rather than guessed.
+// A gateway that decodes twice is not modeled: %252e%252e matches as "%2e%2e".
 func matchPath(r *http.Request) (string, error) {
 	p := r.URL.Path
 	if !strings.HasPrefix(p, "/") {

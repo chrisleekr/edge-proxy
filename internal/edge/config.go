@@ -260,8 +260,10 @@ func (p *envParser) trustedProxies(c *Config) {
 
 func (p *envParser) upstream(c *Config) {
 	u, err := url.Parse(p.Str("UPSTREAM_URL", ""))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-		p.Fail("UPSTREAM_URL", "is required: the http(s)://host[:port][/path] of the load balancer or gateway that routes your apps")
+	// SetURL joins a query here to every request's, so none is allowed.
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		p.Fail("UPSTREAM_URL", "is required: the http(s)://host[:port][/path] of the load balancer or gateway that routes your apps, with no query or fragment")
 		return
 	}
 	if u.Port() == "" {

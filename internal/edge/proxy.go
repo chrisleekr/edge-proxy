@@ -32,7 +32,7 @@ func newTransport(c *Config) *http.Transport {
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return d.DialContext(ctx, network, addr)
 		},
-		TLSClientConfig: &tls.Config{RootCAs: upstreamRoots},
+		TLSClientConfig: &tls.Config{RootCAs: upstreamRoots, MinVersion: tls.VersionTLS12},
 		// Pools are per Host for an https upstream, and a client picks the
 		// Host, so the total is capped too.
 		MaxIdleConns:          c.MaxIdleConns,

@@ -50,7 +50,16 @@ func newGateway(spec string) (http.Handler, error) {
 		}
 		p := &httputil.ReverseProxy{
 			// Headers pass through as the edge set them, Host included.
-			Rewrite:   func(r *httputil.ProxyRequest) { r.SetURL(u); r.Out.Host = r.In.Host },
+			// ReverseProxy drops X-Forwarded-* before Rewrite; a real LB keeps them.
+			Rewrite: func(r *httputil.ProxyRequest) {
+				r.SetURL(u)
+				r.Out.Host = r.In.Host
+				for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+					if v := r.In.Header.Values(h); len(v) > 0 {
+						r.Out.Header[h] = v
+					}
+				}
+			},
 			Transport: t,
 		}
 		rs = append(rs, gatewayRoute{prefix, p})

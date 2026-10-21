@@ -159,6 +159,8 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"upstream without a scheme", map[string]string{"UPSTREAM_URL": "lb:8080"}, "UPSTREAM_URL: is required"},
 		{"no upstream", map[string]string{"UPSTREAM_URL": ""}, "UPSTREAM_URL: is required"},
 		{"upstream with credentials", map[string]string{"UPSTREAM_URL": "https://u:s3cret@lb.internal"}, "UPSTREAM_URL: is required"},
+		{"upstream with a query joined to every request", map[string]string{"UPSTREAM_URL": "https://lb.internal/?token=x"}, "UPSTREAM_URL: is required"},
+		{"upstream with a fragment", map[string]string{"UPSTREAM_URL": "https://lb.internal/#x"}, "UPSTREAM_URL: is required"},
 		{"stats interval too long for admin's fleet count", map[string]string{"STATS_INTERVAL": "1m"}, "STATS_INTERVAL: must be at most 30s"},
 		{"admin URL that isn't http", map[string]string{"ADMIN_URL": "ftp://admin"}, "ADMIN_URL: must be an http or https URL"},
 		{"no snapshot source at all", map[string]string{"ADMIN_URL": "", "SNAPSHOT_CACHE_PATH": "", "BOOTSTRAP_PATH": ""}, "set at least one of"},

@@ -238,6 +238,7 @@ func upgrade(c *Config) *Config {
 	if c.Schema != 1 {
 		return c
 	}
+	// u shares c's maps and slices; change only the fields cloned here.
 	u := *c
 	u.Schema = 2
 	u.Global.Defaults.Responses = maps.Clone(c.Global.Defaults.Responses)
