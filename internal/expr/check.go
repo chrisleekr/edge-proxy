@@ -229,13 +229,19 @@ func literalProblem(f FieldDef, op OpDef, s string, inList bool) string {
 	return ""
 }
 
-// neverMatches reports a literal that a case-sensitive comparison can never
-// match, because of how the edge delivers the field. Regex and
-// case-insensitive wildcard are exempt: they don't compare letters exactly.
+// neverMatches reports a literal that a comparison can never match, because
+// of how the edge delivers the field. Regex and case-insensitive wildcard are
+// exempt from the letter checks: they don't compare letters exactly.
 func neverMatches(f FieldDef, op OpDef, s string) string {
 	name := op.Name
 	if op.Negates != "" {
 		name = op.Negates
+	}
+	// These compare from the first character, and a pattern without a
+	// leading * must match it too.
+	anchored := name == "eq" || name == "in" || name == "starts_with" || ((name == "wildcard" || name == "strict_wildcard") && !strings.HasPrefix(s, "*"))
+	if f.Slash && anchored && !strings.HasPrefix(s, "/") {
+		return fmt.Sprintf("%q can never match: paths start with \"/\", such as %q", s, "/"+s)
 	}
 	if name == "matches" || name == "wildcard" {
 		return ""

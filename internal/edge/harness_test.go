@@ -40,7 +40,7 @@ func testConfig(version int64) *snapshot.Config {
 		defaults[k] = k
 	}
 	return &snapshot.Config{
-		Schema: 1, Version: version,
+		Schema: snapshot.SupportedSchema, Version: version,
 		Global: snapshot.Global{
 			Backstop:       snapshot.Backstop{Limit: 100, Period: dur(time.Second), Burst: 100, MaxEntries: 1000},
 			Defaults:       snapshot.Defaults{BodyLimit: 1024, BodyReadTimeout: dur(time.Second), UpstreamTimeout: dur(2 * time.Second), Responses: defaults},
@@ -48,7 +48,7 @@ func testConfig(version int64) *snapshot.Config {
 			RequestHeaders: snapshot.RequestHeaders{Forward: snapshot.Forward{Mode: "all"}},
 		},
 		ConfigRules: []snapshot.ConfigRule{
-			{ID: "admin-route", Expression: mustParse(`starts_with(http.request.uri.path, "/admin/")`), Settings: snapshot.Settings{Upstream: new("admin"), UpstreamTimeout: new(dur(time.Second))}},
+			{ID: "admin-route", Expression: mustParse(`starts_with(http.request.uri.path, "/admin/")`), Settings: snapshot.Settings{UpstreamTimeout: new(dur(time.Second))}},
 			{ID: "uploads", Expression: mustParse(`starts_with(http.request.uri.path, "/upload")`), Settings: snapshot.Settings{BodyLimit: new(int64(1 << 20))}},
 		},
 	}
@@ -88,24 +88,24 @@ func (s *syncBuffer) lines(msg string) []map[string]any {
 	return out
 }
 
-// harness is one edge replica behind a loopback "CDN" with two upstreams.
+// harness is one edge replica behind a loopback "CDN", forwarding to app.
 type harness struct {
-	t          *testing.T
-	srv        *Server
-	front      *httptest.Server
-	app, admin *httptest.Server
-	logs       *syncBuffer
-	// appHandler and adminHandler are swapped by tests; default echo 200.
-	appHandler, adminHandler http.HandlerFunc
-	mu                       sync.Mutex
-	lastApp                  *http.Request
+	t     *testing.T
+	srv   *Server
+	front *httptest.Server
+	app   *httptest.Server
+	logs  *syncBuffer
+	// appHandler is swapped by tests; default echo 200.
+	appHandler http.HandlerFunc
+	mu         sync.Mutex
+	lastApp    *http.Request
 }
 
 func newHarness(t *testing.T, set map[string]string) *harness {
 	t.Helper()
 	h := &harness{t: t, logs: &syncBuffer{}}
 	ok := func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "upstream ok") }
-	h.appHandler, h.adminHandler = ok, ok
+	h.appHandler = ok
 	h.app = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		h.lastApp = r
@@ -113,15 +113,12 @@ func newHarness(t *testing.T, set map[string]string) *harness {
 		h.mu.Unlock()
 		fn(w, r)
 	}))
-	h.admin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.adminHandler(w, r) }))
 	t.Cleanup(h.app.Close)
-	t.Cleanup(h.admin.Close)
 
 	e := map[string]string{
 		"CLIENT_IP_SOURCE": "cloudfront",
 		"TRUSTED_PROXIES":  "127.0.0.1/32,::1/128",
-		"UPSTREAMS":        "app=" + h.app.URL + ",admin=" + h.admin.URL,
-		"UPSTREAM_HOSTS":   "api.example.com=app",
+		"UPSTREAM_URL":     h.app.URL,
 		"BOOTSTRAP_PATH":   t.TempDir() + "/bootstrap.json",
 	}
 	maps.Copy(e, set)
@@ -206,7 +203,7 @@ func readBody(t *testing.T, resp *http.Response) string {
 func newTestLogger(w io.Writer) *slog.Logger { return slog.New(slog.NewJSONHandler(w, nil)) }
 
 func testDeployment() snapshot.Deployment {
-	return snapshot.Deployment{Upstreams: []string{"app", "admin"}, ViewerFields: []string{"ip.src.country"}}
+	return snapshot.Deployment{ViewerFields: []string{"ip.src.country"}}
 }
 
 // echoUpgrade is an upstream that accepts an upgrade and echoes bytes.

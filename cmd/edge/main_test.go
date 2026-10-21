@@ -39,7 +39,7 @@ func TestE2EBinary(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"LISTEN_ADDR="+pub, "INTERNAL_ADDR="+in,
 		"CLIENT_IP_SOURCE=cloudfront", "TRUSTED_PROXIES=127.0.0.1/32",
-		"UPSTREAMS=app="+upstream.URL, "UPSTREAM_HOSTS=api.example.com=app",
+		"UPSTREAM_URL="+upstream.URL,
 		"BOOTSTRAP_PATH="+boot, "DRAIN_DELAY=10ms", "SHUTDOWN_TIMEOUT=1s",
 	)
 	var logs strings.Builder
@@ -91,7 +91,7 @@ func writeBootstrap(t *testing.T, path string) {
 	t.Helper()
 	responses := map[string]snapshot.Response{}
 	defaults := map[string]string{}
-	for kind, status := range map[string]int{"bad_request": 400, "unauthorized": 401, "misdirected": 421, "payload_too_large": 413, "rate_limited": 429, "bad_gateway": 502, "unavailable": 503, "overloaded": 503, "gateway_timeout": 504} {
+	for kind, status := range map[string]int{"bad_request": 400, "unauthorized": 401, "payload_too_large": 413, "rate_limited": 429, "bad_gateway": 502, "unavailable": 503, "overloaded": 503, "gateway_timeout": 504} {
 		responses[kind] = snapshot.Response{Status: status, ContentType: "text/plain; charset=utf-8", Body: kind}
 		defaults[kind] = kind
 	}

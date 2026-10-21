@@ -293,16 +293,16 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, p *principal
 	if err := readJSON(w, r, &in); err != nil {
 		return err
 	}
-	id, err := CreateUser(r.Context(), s.db, s.cfg, p.actor, in.Username, in.Email, in.Password, in.Roles)
+	id, err := CreateUser(r.Context(), s.db, s.cfg, s.now, p.actor, in.Username, in.Email, in.Password, in.Roles)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
-// CreateUser adds a local user. The CLI uses it to create the first admin,
-// so there are no default credentials.
-func CreateUser(ctx context.Context, db *pgxpool.Pool, cfg *Config, actor, username, email, password string, roles []string) (string, error) {
+// CreateUser adds a local user, dated by now. The CLI uses it to create the
+// first admin, so there are no default credentials.
+func CreateUser(ctx context.Context, db *pgxpool.Pool, cfg *Config, now func() time.Time, actor, username, email, password string, roles []string) (string, error) {
 	username = strings.ToLower(username)
 	var errs []expr.Issue
 	if why := passwordProblem(password, username, cfg.Blocklist); why != "" {
@@ -315,19 +315,27 @@ func CreateUser(ctx context.Context, db *pgxpool.Pool, cfg *Config, actor, usern
 		return "", &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid user", Errors: errs}
 	}
 	var id string
-	err := dbProblem(pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, "INSERT INTO users (username, email) VALUES ($1, $2) RETURNING id", username, email).Scan(&id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, "INSERT INTO local_credentials (user_id, hash) VALUES ($1, $2)", id, hashPassword(password)); err != nil {
-			return err
-		}
-		if err := insertRoles(ctx, tx, id, roles); err != nil {
-			return err
-		}
-		return admindb.Audit(ctx, tx, cfg.Audit, admindb.Event{Actor: actor, Action: "user.create", Target: username, Details: map[string]any{"id": id, "roles": roles}})
+	err := dbProblem(pgx.BeginFunc(ctx, db, func(tx pgx.Tx) (err error) {
+		id, err = insertUser(ctx, tx, cfg, now, actor, username, email, password, roles)
+		return err
 	}))
 	return id, err
+}
+
+// insertUser writes a validated user, its credential, roles and audit row,
+// dated by now.
+func insertUser(ctx context.Context, tx pgx.Tx, cfg *Config, now func() time.Time, actor, username, email, password string, roles []string) (string, error) {
+	var id string
+	if err := tx.QueryRow(ctx, "INSERT INTO users (username, email, created_at) VALUES ($1, $2, $3) RETURNING id", username, email, now()).Scan(&id); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO local_credentials (user_id, hash) VALUES ($1, $2)", id, hashPassword(password)); err != nil {
+		return "", err
+	}
+	if err := insertRoles(ctx, tx, id, roles); err != nil {
+		return "", err
+	}
+	return id, admindb.Audit(ctx, tx, cfg.Audit, now, admindb.Event{Actor: actor, Action: "user.create", Target: username, Details: map[string]any{"id": id, "roles": roles}})
 }
 
 func insertRoles(ctx context.Context, tx pgx.Tx, userID string, roles []string) error {
@@ -365,6 +373,9 @@ func (s *Server) setRoles(w http.ResponseWriter, r *http.Request, p *principal) 
 		if err := insertRoles(ctx, tx, id, in.Roles); err != nil {
 			return admindb.Event{}, err
 		}
+		if err := keepUserManager(ctx, tx); err != nil {
+			return admindb.Event{}, err
+		}
 		_, err = tx.Exec(ctx, "UPDATE sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL", s.now(), id)
 		return admindb.Event{Action: "user.roles", Target: name, Details: map[string]any{"id": id, "before": before, "after": in.Roles}}, err
 	})
@@ -377,23 +388,51 @@ func (s *Server) setRoles(w http.ResponseWriter, r *http.Request, p *principal) 
 
 func (s *Server) disableUser(w http.ResponseWriter, r *http.Request, p *principal) error {
 	id := r.PathValue("id")
+	if id == p.userID {
+		return fail(http.StatusConflict, "you can't disable your own account")
+	}
 	ctx := r.Context()
 	err := s.change(ctx, p.actor, func(tx pgx.Tx) (admindb.Event, error) {
-		tag, err := tx.Exec(ctx, "UPDATE users SET disabled = true WHERE id = $1", id)
-		if err == nil && tag.RowsAffected() == 0 {
+		// The username is the target, as for the user's other events, so one
+		// filter finds them all.
+		var name string
+		err := tx.QueryRow(ctx, "UPDATE users SET disabled = true WHERE id = $1 RETURNING username", id).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
 			err = fail(http.StatusNotFound, "no such user")
 		}
 		if err != nil {
 			return admindb.Event{}, err
 		}
+		if err := keepUserManager(ctx, tx); err != nil {
+			return admindb.Event{}, err
+		}
 		_, err = tx.Exec(ctx, "UPDATE sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL", s.now(), id)
-		return admindb.Event{Action: "user.disable", Target: id}, err
+		return admindb.Event{Action: "user.disable", Target: name, Details: map[string]any{"id": id}}, err
 	})
 	if err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+// userAdminLock serializes role and disable changes, so two managers
+// removing each other at once can't both pass keepUserManager.
+const userAdminLock = 0x75736572 // "user"
+
+// keepUserManager refuses a change that leaves no enabled user with
+// users.manage: recovering from that needs the CLI.
+func keepUserManager(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", userAdminLock); err != nil {
+		return err
+	}
+	var ok bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users u JOIN user_roles r ON r.user_id = u.id
+		JOIN role_permissions p ON p.role = r.role WHERE NOT u.disabled AND p.permission = 'users.manage')`).Scan(&ok)
+	if err == nil && !ok {
+		err = fail(http.StatusConflict, "refused: no enabled user could manage users after this change")
+	}
+	return err
 }
 
 type tokenView struct {
@@ -490,11 +529,12 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, p *principa
 func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request, p *principal) error {
 	id := r.PathValue("id")
 	err := s.change(r.Context(), p.actor, func(tx pgx.Tx) (admindb.Event, error) {
-		tag, err := tx.Exec(r.Context(), "UPDATE api_tokens SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL", s.now(), id)
-		if err == nil && tag.RowsAffected() == 0 {
+		var name string
+		err := tx.QueryRow(r.Context(), "UPDATE api_tokens SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL RETURNING name", s.now(), id).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
 			err = fail(http.StatusNotFound, "no such active token")
 		}
-		return admindb.Event{Action: "token.revoke", Target: id}, err
+		return admindb.Event{Action: "token.revoke", Target: id, Details: map[string]any{"name": name}}, err
 	})
 	if err != nil {
 		return err

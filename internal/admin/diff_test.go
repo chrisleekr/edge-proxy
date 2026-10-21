@@ -23,7 +23,7 @@ func TestSemanticDiff(t *testing.T) {
 	if cr := d.Phases["config_rules"]; !slices.Equal(cr.Added, []string{"uploads"}) || cr.Reordered {
 		t.Fatalf("config diff %+v", cr)
 	}
-	if len(d.Sections) != 1 || d.Sections[0].Path != "global.defaults.body_limit" || d.summary() != "+1 rules, ~1 changed, -0, 1 settings changed" {
+	if len(d.Sections) != 1 || d.Sections[0].Path != "global.defaults.body_limit" || d.summary() != "1 rule added, 1 rule changed, 1 setting changed" {
 		t.Fatalf("sections %+v, %s", d.Sections, d.summary())
 	}
 	c := testConfig()
@@ -32,6 +32,31 @@ func TestSemanticDiff(t *testing.T) {
 	e.ConfigRules[0], e.ConfigRules[1] = e.ConfigRules[1], e.ConfigRules[0]
 	if !semanticDiff(c, e).Phases["config_rules"].Reordered {
 		t.Fatal("reorder not reported")
+	}
+}
+
+// The version list shows the summary, so each kind of change reads as it
+// is, in the same words as the UI's draft status.
+func TestVersionSummary(t *testing.T) {
+	base := testConfig()
+	base.ConfigRules = append(base.ConfigRules, snapshot.ConfigRule{ID: "z", Expression: mustParse(`true`)})
+	cases := []struct {
+		name   string
+		change func(c *snapshot.Config)
+		want   string
+	}{
+		{"republishing the same config says no changes", func(*snapshot.Config) {}, "no changes"},
+		{"a reorder alone is a change", func(c *snapshot.Config) { c.ConfigRules[0], c.ConfigRules[1] = c.ConfigRules[1], c.ConfigRules[0] }, "rules reordered"},
+		{"two removed rules read in the plural", func(c *snapshot.Config) { c.ConfigRules = c.ConfigRules[:len(c.ConfigRules)-2] }, "2 rules removed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			next := clone(base)
+			tc.change(next)
+			if got := semanticDiff(base, next).summary(); got != tc.want {
+				t.Fatalf("summary %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

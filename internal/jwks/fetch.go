@@ -54,6 +54,10 @@ func NewClient(allowedHosts []string, timeout time.Duration, roots *x509.CertPoo
 	}}
 }
 
+// ErrNonPublic marks a fetch the SSRF guard refused, so callers can say so
+// in words rather than as a dial error.
+var ErrNonPublic = errors.New("non-public address")
+
 var (
 	cgnat = netip.MustParsePrefix("100.64.0.0/10") // shared address space, internal in many clouds
 	nat64 = netip.MustParsePrefix("64:ff9b::/96")  // embeds an IPv4 address
@@ -64,7 +68,7 @@ func guard(_, address string, _ syscall.RawConn) error {
 	// address, which blocked refuses.
 	ap, _ := netip.ParseAddrPort(address)
 	if blocked(ap.Addr()) {
-		return fmt.Errorf("jwks fetch to non-public address %s refused", ap.Addr())
+		return fmt.Errorf("jwks fetch to %w %s refused", ErrNonPublic, ap.Addr())
 	}
 	return nil
 }

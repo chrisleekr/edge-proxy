@@ -95,8 +95,7 @@ func TestWebSocket(t *testing.T) {
 	got := make(chan http.Header, 2)
 	h.appHandler = func(w http.ResponseWriter, r *http.Request) { got <- r.Header.Clone(); wsUpstream(w, r) }
 	addr := h.front.Listener.Addr().String()
-	app := h.srv.edge.upstreams["app"]
-	closed := func() bool { return h.srv.m.streams.Load() == 0 && app.inflight.Load() == 0 }
+	closed := func() bool { return h.srv.m.streams.Load() == 0 }
 
 	for _, tc := range []struct {
 		name   string
@@ -121,8 +120,8 @@ func TestWebSocket(t *testing.T) {
 				t.Fatalf("upstream handshake headers: %v", up)
 			}
 			echo(t, conn, br, "ping")
-			if h.srv.m.streams.Load() != 1 || h.srv.m.inflight.Load() != 0 || app.inflight.Load() != 1 {
-				t.Fatalf("open WebSocket: streams %d, inflight %d, upstream %d", h.srv.m.streams.Load(), h.srv.m.inflight.Load(), app.inflight.Load())
+			if h.srv.m.streams.Load() != 1 || h.srv.m.inflight.Load() != 0 {
+				t.Fatalf("open WebSocket: streams %d, inflight %d", h.srv.m.streams.Load(), h.srv.m.inflight.Load())
 			}
 			tc.hangUp(t, conn, br)
 			waitFor(t, closed)
@@ -222,7 +221,6 @@ func readLine(t *testing.T, br *bufio.Reader) string {
 func TestSSE(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
-	app := h.srv.edge.upstreams["app"]
 
 	// Each write reaches the client at once: SSE by content type, any
 	// response of unknown length because it may be a stream too.
@@ -269,7 +267,7 @@ func TestSSE(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("upstream kept streaming to a client that left")
 		}
-		waitFor(t, func() bool { return h.srv.m.streams.Load() == 0 && app.inflight.Load() == 0 })
+		waitFor(t, func() bool { return h.srv.m.streams.Load() == 0 })
 	})
 
 	// LLM-style APIs POST a body and stream the answer. The body read

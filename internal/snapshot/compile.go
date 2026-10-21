@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -21,8 +22,6 @@ import (
 // Deployment is what validation needs from deployment config (env and
 // flags). Admin users can't edit any of it.
 type Deployment struct {
-	// Upstreams are the names defined in UPSTREAMS.
-	Upstreams []string
 	// ViewerFields are the viewer fields with a configured trusted source,
 	// e.g. "ip.src.country".
 	ViewerFields []string
@@ -48,7 +47,7 @@ func (d Deployment) Fingerprint() string {
 		slices.Sort(out)
 		return out
 	}
-	b, _ := json.Marshal([]any{sorted(d.Upstreams, false), sorted(d.ViewerFields, false), sorted(d.SourceHeaders, true), d.AllowRegex}) // strings and a bool
+	b, _ := json.Marshal([]any{sorted(d.ViewerFields, false), sorted(d.SourceHeaders, true), d.AllowRegex}) // strings and a bool
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
 }
@@ -79,7 +78,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema        = 1
-	SupportedSchema  = 1
+	SupportedSchema  = 2
 	MaxConfigBytes   = 8 << 20
 	MaxRulesPerPhase = 200
 	MaxSiteWide      = 2
@@ -105,7 +104,6 @@ const (
 var statusOf = map[string]int{
 	"bad_request":       400,
 	"unauthorized":      401,
-	"misdirected":       421,
 	"payload_too_large": 413,
 	"rate_limited":      429,
 	"bad_gateway":       502,
@@ -114,12 +112,8 @@ var statusOf = map[string]int{
 	"gateway_timeout":   504,
 }
 
-var contentTypes = map[string]bool{
-	"application/json":          true,
-	"application/problem+json":  true,
-	"text/html; charset=utf-8":  true,
-	"text/plain; charset=utf-8": true,
-}
+// ContentTypes are the content types a response template may use.
+var ContentTypes = []string{"application/json", "application/problem+json", "text/html; charset=utf-8", "text/plain; charset=utf-8"}
 
 // ResponseStatuses returns each response kind and the status it must use.
 // The edge keeps its own kind table; its tests check the two agree.
@@ -133,6 +127,9 @@ var Algorithms = []string{"fixed_window", "sliding_window", "token_bucket", "lea
 // header, cookie, query and jwt_claim take a name; the rest take none.
 // ratelimit keeps its part table in agreement, checked by its tests.
 var KeyKinds = []string{"ip", "header", "cookie", "query", "jwt_claim", "host", "method", "country", "asnum", "locale", "constant"}
+
+// NamedKeyKinds are the KeyKinds written kind:name.
+var NamedKeyKinds = []string{"header", "cookie", "query", "jwt_claim"}
 
 // The other names validation accepts, in the order its errors list them.
 // Each consumer's tests check it handles every one, so a name added here
@@ -152,14 +149,9 @@ func orList(names []string) string {
 	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
 }
 
-// jwtAlgorithms are the asymmetric algorithms golang-jwt v5 verifies. HMAC
+// JWTAlgorithms are the asymmetric algorithms golang-jwt v5 verifies. HMAC
 // is excluded: the key would have to be a shared secret in the snapshot.
-var jwtAlgorithms = map[string]bool{
-	"RS256": true, "RS384": true, "RS512": true,
-	"PS256": true, "PS384": true, "PS512": true,
-	"ES256": true, "ES384": true, "ES512": true,
-	"EdDSA": true,
-}
+var JWTAlgorithms = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
 
 // reserved are request headers no rule may target. Lowercase.
 var reserved = map[string]bool{
@@ -186,15 +178,15 @@ var clientControlled = map[string]bool{
 // edge before activation. It returns the compiled config, or nil and every
 // error found. Warnings are returned either way.
 func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
+	c = upgrade(c)
 	v := &validator{
 		d: d, c: c,
-		out:       &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}},
-		upstreams: setOf(d.Upstreams, caseSensitive),
-		viewer:    setOf(d.ViewerFields, caseSensitive),
-		sources:   setOf(d.SourceHeaders, foldCase),
-		issuers:   map[string]bool{},
-		locales:   map[string]bool{},
-		ruleIDs:   map[string]bool{},
+		out:     &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}},
+		viewer:  setOf(d.ViewerFields, caseSensitive),
+		sources: setOf(d.SourceHeaders, foldCase),
+		issuers: map[string]bool{},
+		locales: map[string]bool{},
+		ruleIDs: map[string]bool{},
 	}
 	v.config()
 	if len(v.errs) > 0 {
@@ -219,13 +211,13 @@ func CheckExpression(n expr.Node, phase expr.Phase, c *Config, d Deployment) (er
 }
 
 type validator struct {
-	d                          Deployment
-	c                          *Config
-	out                        *Compiled
-	errs, warns                []expr.Issue
-	upstreams, viewer, sources map[string]bool
-	issuers, locales, ruleIDs  map[string]bool
-	siteWideIP                 bool
+	d                         Deployment
+	c                         *Config
+	out                       *Compiled
+	errs, warns               []expr.Issue
+	viewer, sources           map[string]bool
+	issuers, locales, ruleIDs map[string]bool
+	siteWideIP                bool
 }
 
 func (v *validator) err(path, format string, args ...any) {
@@ -234,6 +226,28 @@ func (v *validator) err(path, format string, args ...any) {
 
 func (v *validator) warn(path, format string, args ...any) {
 	v.warns = append(v.warns, expr.Issue{Path: path, Msg: fmt.Sprintf(format, args...)})
+}
+
+// upgrade returns c in schema 2. Schema 1 routed each request to a named
+// upstream and answered 421 "misdirected" when none applied; schema 2
+// forwards everything to the one upstream, so that response kind is gone. A
+// schema 1 rule that set "upstream" fails to decode instead, because its
+// routing can't be kept. c itself is not changed: admin serves stored
+// versions as they were saved, so edges not yet upgraded still read them.
+func upgrade(c *Config) *Config {
+	if c.Schema != 1 {
+		return c
+	}
+	u := *c
+	u.Schema = 2
+	u.Global.Defaults.Responses = maps.Clone(c.Global.Defaults.Responses)
+	delete(u.Global.Defaults.Responses, "misdirected")
+	u.ConfigRules = slices.Clone(c.ConfigRules)
+	for i := range u.ConfigRules {
+		u.ConfigRules[i].Settings.Responses = maps.Clone(c.ConfigRules[i].Settings.Responses)
+		delete(u.ConfigRules[i].Settings.Responses, "misdirected")
+	}
+	return &u
 }
 
 func (v *validator) config() {
@@ -251,6 +265,7 @@ func (v *validator) config() {
 	v.global()
 	v.auth()
 	v.configRules()
+	v.unused()
 	v.rateLimitRules()
 	v.headerRules()
 }
@@ -262,7 +277,7 @@ func (v *validator) global() {
 	v.period("global.backstop.period", b.Period, time.Hour)
 	v.count("global.backstop.burst", b.Burst)
 	if b.MaxEntries < 1 || b.MaxEntries > MaxBackstopIPs {
-		v.err("global.backstop.max_entries", "must be 1 to %d", MaxBackstopIPs)
+		v.err("global.backstop.max_entries", "must be 1 to %s", thousands(MaxBackstopIPs))
 	}
 
 	v.templates(g.Responses)
@@ -296,8 +311,8 @@ func (v *validator) templates(rs map[string]Response) {
 		if r.Status < 400 || r.Status > 599 {
 			v.err(p+".status", "must be 400 to 599")
 		}
-		if !contentTypes[r.ContentType] {
-			v.err(p+".content_type", "must be one of %s", strings.Join(slices.Sorted(maps.Keys(contentTypes)), ", "))
+		if !slices.Contains(ContentTypes, r.ContentType) {
+			v.err(p+".content_type", "must be one of %s", strings.Join(ContentTypes, ", "))
 		}
 		if len(r.Body) > MaxBodyTemplate {
 			v.err(p+".body", "is %d bytes; at most %d are allowed", len(r.Body), MaxBodyTemplate)
@@ -372,7 +387,7 @@ func (v *validator) cors(ps map[string]CORSPolicy) {
 				return `"*" can't be used with credentials (Fetch standard)`
 			}
 			if h != "*" && !expr.IsToken(h) {
-				return "is not a valid header name"
+				return "is not a valid header name; use letters, digits and -, such as x-request-id"
 			}
 			return ""
 		}
@@ -484,8 +499,8 @@ func (v *validator) auth() {
 		if u, err := url.Parse(is.JWKSURL); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
 			v.err(p+".jwks_url", "must be an https URL with a host and no credentials or fragment")
 		}
-		if !jwtAlgorithms[is.Algorithm] {
-			v.err(p+".algorithm", "must be one of %s", strings.Join(slices.Sorted(maps.Keys(jwtAlgorithms)), ", "))
+		if !slices.Contains(JWTAlgorithms, is.Algorithm) {
+			v.err(p+".algorithm", "must be one of %s", strings.Join(JWTAlgorithms, ", "))
 		}
 	}
 	v.issuerList("auth.default_accepted", a.DefaultAccepted)
@@ -527,6 +542,48 @@ func (v *validator) configRules() {
 	}
 }
 
+// unused warns about a CORS policy, issuer or template nothing refers to:
+// it saves and publishes but changes no response.
+func (v *validator) unused() {
+	c := v.c
+	cors, issuers, templates := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, id := range c.Auth.DefaultAccepted {
+		issuers[id] = true
+	}
+	for _, name := range c.Global.Defaults.Responses {
+		templates[name] = true
+	}
+	for _, r := range c.ConfigRules {
+		s := r.Settings
+		if s.CORSPolicy != nil {
+			cors[*s.CORSPolicy] = true
+		}
+		if s.Auth != nil {
+			for _, id := range s.Auth.Accepted {
+				issuers[id] = true
+			}
+		}
+		for _, name := range s.Responses {
+			templates[name] = true
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Global.CORSPolicies)) {
+		if !cors[name] {
+			v.warn(fmt.Sprintf("global.cors_policies[%q]", name), `no config rule selects it, so it has no effect; set "cors_policy": %q in a config rule's settings`, name)
+		}
+	}
+	for i, is := range c.Auth.Issuers {
+		if !issuers[is.ID] {
+			v.warn(fmt.Sprintf("auth.issuers[%d]", i), `no config rule accepts it and it is not in default_accepted, so no request accepts its tokens; add %q to either`, is.ID)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Global.Responses)) {
+		if !templates[name] {
+			v.warn(fmt.Sprintf("global.responses[%q]", name), "nothing sends it; name it in global.defaults.responses or in a config rule's responses")
+		}
+	}
+}
+
 func settingNames(s Settings) []string {
 	var ns []string
 	add := func(set bool, n string) {
@@ -541,7 +598,6 @@ func settingNames(s Settings) []string {
 		ns = append(ns, "responses."+k)
 	}
 	add(s.BodyLimit != nil, "body_limit")
-	add(s.Upstream != nil, "upstream")
 	add(s.UpstreamTimeout != nil, "upstream_timeout")
 	add(s.RateLimitHeaders != nil, "ratelimit_headers")
 	return ns
@@ -575,9 +631,6 @@ func (v *validator) settings(p string, s Settings) {
 	v.responseMap(p+".responses", s.Responses)
 	if s.BodyLimit != nil && *s.BodyLimit < 1 {
 		v.err(p+".body_limit", "must be at least 1 byte")
-	}
-	if s.Upstream != nil && !v.upstreams[*s.Upstream] {
-		v.err(p+".upstream", "upstream %q is not defined in deployment config", *s.Upstream)
 	}
 	if s.UpstreamTimeout != nil {
 		v.timeout(p+".upstream_timeout", *s.UpstreamTimeout)
@@ -649,8 +702,8 @@ func (v *validator) key(p string, parts []string) {
 		case "ip", "jwt_claim":
 			partner = true
 		case "header", "cookie", "query", "host", "method":
-			// Any uppercase token is a valid method, and any Host reaches
-			// a rule when a config rule routes every host.
+			// Any uppercase token is a valid method, and the edge forwards
+			// any Host to the one upstream, so clients choose both.
 			attacker = true
 		}
 		switch kind {
@@ -772,7 +825,7 @@ func (v *validator) target(p, name string) {
 // targetProblem rejects invalid header names and those managedProblem rejects.
 func (v *validator) targetProblem(name string) string {
 	if !expr.IsToken(name) {
-		return fmt.Sprintf("%q is not a valid header name", name)
+		return fmt.Sprintf("%q is not a valid header name; use letters, digits and -, such as x-tenant", name)
 	}
 	return v.managedProblem(name)
 }
@@ -836,14 +889,20 @@ func (v *validator) placeholderProblem(ph Placeholder) string {
 	return ""
 }
 
-// expression compiles n for phase and checks locale values against the
-// supported list, since the edge only ever produces supported locales.
+// expression compiles n for phase. It rejects edge-managed headers and
+// locales the edge never produces, and warns on the raw URI fields, which
+// an encoded path slips past.
 func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Matcher {
 	m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(f string) bool { return v.viewer[f] }, AllowRegex: v.d.AllowRegex})
 	for _, is := range issues {
 		v.errs = append(v.errs, expr.Issue{Path: p + "." + is.Path, Msg: is.Msg})
 	}
+	rawWarned := false
 	walk(n, false, func(r expr.Node, _ bool) {
+		if !rawWarned && (r.Field == "http.request.uri" || r.Field == "http.request.full_uri") {
+			v.warn(p+".expression", "%s is not normalized, so an encoded path such as /%%61dmin can slip past it; match on http.request.uri.path or http.request.uri.args instead", r.Field)
+			rawWarned = true
+		}
 		if r.Field == "http.request.headers" && expr.IsToken(r.Key) {
 			if msg := v.managedProblem(r.Key); msg != "" {
 				v.err(p+".expression", "%s", msg)
@@ -945,7 +1004,7 @@ func (v *validator) name(p, s string) {
 
 func (v *validator) count(p string, n int64) {
 	if n < 1 || n > MaxCount {
-		v.err(p, "must be 1 to %d", MaxCount)
+		v.err(p, "must be 1 to %s", thousands(MaxCount))
 	}
 }
 
@@ -1013,4 +1072,14 @@ func isName(s string) bool {
 		}
 	}
 	return true
+}
+
+// thousands writes a positive n with comma separators, as the admin UI
+// shows numbers, so a limit reads 1,000,000,000 rather than 1000000000.
+func thousands(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }

@@ -161,6 +161,11 @@ func TestManagingUsers(t *testing.T) {
 		status(t, root.do("POST", "/api/users/"+id+"/disable", nil), 204)
 		status(t, ed.do("GET", "/api/auth/me", nil), 401)
 		status(t, h.client().do("POST", "/api/auth/login", map[string]string{"username": "ed", "password": goodPassword}), 401)
+		// The audit row names the user, so filtering by username finds it.
+		rows := decode[[]struct{ Action string }](t, root.do("GET", "/api/audit?target=ed&action=user.disable", nil))
+		if len(rows) != 1 {
+			t.Fatalf("audit %+v", rows)
+		}
 	})
 	cases := []struct {
 		name, method, path string
@@ -185,6 +190,50 @@ func TestManagingUsers(t *testing.T) {
 			}
 			status(t, resp, tc.status)
 		})
+	}
+}
+
+func TestUserManagersCantLockEveryoneOut(t *testing.T) {
+	h := newHarness(t)
+	rootID := h.user("root", "admin")
+	viewerID := h.user("vic", "viewer")
+	root := h.signedIn("root")
+	t.Run("disabling yourself is refused", func(t *testing.T) {
+		resp := root.do("POST", "/api/users/"+rootID+"/disable", nil)
+		if b := body(resp); resp.StatusCode != 409 || !strings.Contains(b, "can't disable your own account") {
+			t.Fatalf("%d %s", resp.StatusCode, b)
+		}
+	})
+	t.Run("dropping the last users.manage holder is refused", func(t *testing.T) {
+		resp := root.do("PUT", "/api/users/"+rootID+"/roles", map[string]any{"roles": []string{"viewer"}})
+		if b := body(resp); resp.StatusCode != 409 || !strings.Contains(b, "no enabled user could manage users") {
+			t.Fatalf("%d %s", resp.StatusCode, b)
+		}
+		status(t, root.do("GET", "/api/users", nil), 200)
+	})
+	t.Run("changing a user without users.manage still works", func(t *testing.T) {
+		status(t, root.do("PUT", "/api/users/"+viewerID+"/roles", map[string]any{"roles": []string{"editor"}}), 204)
+		root = h.signedIn("root")
+	})
+	t.Run("with a second manager, dropping your own users.manage works", func(t *testing.T) {
+		h.user("ann", "admin")
+		status(t, root.do("PUT", "/api/users/"+rootID+"/roles", map[string]any{"roles": []string{"viewer"}}), 204)
+	})
+	t.Run("disabling yourself is refused even with another manager", func(t *testing.T) {
+		ann := h.signedIn("ann")
+		status(t, ann.do("PUT", "/api/users/"+rootID+"/roles", map[string]any{"roles": []string{"admin"}}), 204)
+		status(t, h.signedIn("root").do("POST", "/api/users/"+rootID+"/disable", nil), 409)
+		status(t, ann.do("POST", "/api/users/"+rootID+"/disable", nil), 204)
+	})
+	var got []string
+	for _, a := range h.actions() {
+		if strings.HasPrefix(a, "user.") {
+			got = append(got, a)
+		}
+	}
+	want := []string{"user.create root", "user.create vic", "user.roles vic", "user.create ann", "user.roles root", "user.roles root", "user.disable root"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("audit %v", got)
 	}
 }
 
@@ -228,6 +277,12 @@ func TestAPITokens(t *testing.T) {
 		status(t, root.do("DELETE", "/api/tokens/"+tok["id"], nil), 204)
 		status(t, c.do("GET", "/api/auth/me", nil), 401)
 		status(t, root.do("DELETE", "/api/tokens/"+tok["id"], nil), 404)
+		// The revoke row carries the token's name, so a search by name finds
+		// it as well as the create row.
+		rows := decode[[]struct{ Action string }](t, root.do("GET", "/api/audit?mentions=%22ci%22", nil))
+		if len(rows) != 2 || rows[0].Action != "token.revoke" || rows[1].Action != "token.create" {
+			t.Fatalf("audit %+v", rows)
+		}
 	})
 	t.Run("a token loses what its owner loses", func(t *testing.T) {
 		h.user("pat", "admin")

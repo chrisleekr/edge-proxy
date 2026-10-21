@@ -48,14 +48,23 @@ func TestMatchPath(t *testing.T) {
 		{"/admin/secret/..;x", "", errAmbiguousPath},
 		{"/admin/secret/.;x/y", "", errAmbiguousPath},
 		{"/admin/secret/..%3Bx", "", errAmbiguousPath},
+		// %2F stays inside its segment, as a gateway that keeps escaped
+		// slashes routes it: GitLab reads group%2Fproject as one project.
+		{"/api/v4/projects/group%2Fproject/members", "/api/v4/projects/group%2Fproject/members", nil},
+		{"/api/v4/projects/1/repository/files/docs%2fREAD%4DE.md", "/api/v4/projects/1/repository/files/docs%2FREADME.md", nil},
 		// Go's EscapedPath re-encodes when the raw path has a character like
-		// { or |, which hid the encoded slash; the raw target is checked.
-		{"/a%2Fb{", "", errAmbiguousPath},
-		{"/admin%2F..%2Fsecret|", "", errAmbiguousPath},
+		// { or |, which would hide the encoded slash; RawPath keeps it.
+		{"/a%2Fb{", "/a%2Fb{", nil},
+		// Not dot-segments: each is one segment with %2F inside.
+		{"/admin%2F..%2Fsecret|", "/admin%2F..%2Fsecret|", nil},
+		{"/public/..%2Fadmin", "/public/..%2Fadmin", nil},
+		// %2F only in the userinfo of an absolute-form target: the path has
+		// none, so it is matched as usual.
+		{"http://u%2Fx@h/admin", "/admin", nil},
 		// Overlong UTF-8 for "/" decodes to invalid UTF-8; some servers read it as "/".
 		{"/%c0%afadmin", "", errAmbiguousPath},
-		{"/a%2Fb", "", errAmbiguousPath},
-		{"/a%2fb", "", errAmbiguousPath},
+		{"/a%2Fb", "/a%2Fb", nil},
+		{"/a%2fb", "/a%2Fb", nil},
 		{"/a%5Cb", "", errAmbiguousPath},
 		{"/a%00b", "", errAmbiguousPath},
 		{"*", "", errBadPath},
@@ -320,4 +329,25 @@ func TestBufferPoolRoundTripAllocatesNothing(t *testing.T) {
 	if n := testing.AllocsPerRun(100, func() { p.Put(p.Get()) }); n != 0 {
 		t.Fatalf("%v allocations per round trip", n)
 	}
+}
+
+// Whatever path a client sends, the escaped form decodes to the same path
+// and Go sends it as is, so the upstream routes what the edge matched.
+func FuzzEscapeRaw(f *testing.F) {
+	for _, s := range []string{"/admin%2F..%2Fsecret|", "/a%2fb{}", "/caf\xc3\xa9", `/a"b<c>`} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		decoded, err := url.PathUnescape(raw)
+		if err != nil {
+			return // the server rejects it before the edge sees it
+		}
+		esc := escapeRaw(raw)
+		if again, err := url.PathUnescape(esc); err != nil || again != decoded {
+			t.Fatalf("escapeRaw(%q) = %q decodes to %q, %v; want %q", raw, esc, again, err, decoded)
+		}
+		if got := (&url.URL{Path: decoded, RawPath: esc}).EscapedPath(); got != esc {
+			t.Fatalf("Go would send %q, not %q", got, esc)
+		}
+	})
 }

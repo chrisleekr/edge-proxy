@@ -86,6 +86,7 @@ func (s *Server) leadOnce(ctx context.Context, dsn string) error {
 
 func (s *Server) runJobs(ctx context.Context) {
 	g, _ := loadGuard(ctx, s.db) // defaults on error
+	s.guardEvery.Store(int64(g.EvaluateEvery))
 	guard := time.NewTicker(time.Duration(g.EvaluateEvery))
 	keys := time.NewTicker(jwksEvery)
 	audit := time.NewTicker(auditEvery)
@@ -223,14 +224,22 @@ func (s *Server) auditBroken(ctx context.Context, err error) error {
 	return err
 }
 
-// dropOldStats keeps 30 days of per-minute stats, and drops
-// edges not seen as long: replaced pods report under new names.
+// dropOldStats keeps 30 days of per-minute stats and route hours, and
+// drops edges and routes not seen as long: replaced pods report under new
+// names.
 func (s *Server) dropOldStats(ctx context.Context) error {
 	cutoff := s.now().AddDate(0, 0, -retentionDays)
 	if _, err := s.db.Exec(ctx, "DELETE FROM edge_stats_minute WHERE minute < $1", cutoff); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(ctx, "DELETE FROM fleet WHERE last_seen < $1", cutoff)
+	if _, err := s.db.Exec(ctx, "DELETE FROM fleet WHERE last_seen < $1", cutoff); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, "DELETE FROM observed_route_hour WHERE hour < $1", cutoff); err != nil {
+		return err
+	}
+	// A route with no hours left has not been seen within retention.
+	_, err := s.db.Exec(ctx, "DELETE FROM observed_routes r WHERE NOT EXISTS (SELECT 1 FROM observed_route_hour h WHERE h.route_id = r.id)")
 	return err
 }
 
@@ -253,7 +262,9 @@ type auditView struct {
 	HMAC       []byte    `json:"-"`
 }
 
-// listAudit pages newest first, filtered by actor, action or target.
+// listAudit pages newest first, filtered by actor, action or target, which
+// match exactly, and mentions, which matches part of the target or details,
+// such as a rule ID inside a save's changes.
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *principal) error {
 	q := r.URL.Query()
 	before := int64(1 << 62)
@@ -264,7 +275,8 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *principal)
 	}
 	rows, err := s.db.Query(r.Context(), `SELECT seq, occurred_at, actor, action, target, details::text, key_id, hmac FROM audit_events
 		WHERE seq < $1 AND ($2 = '' OR actor = $2) AND ($3 = '' OR action = $3) AND ($4 = '' OR target = $4)
-		ORDER BY seq DESC LIMIT 100`, before, q.Get("actor"), q.Get("action"), q.Get("target"))
+		AND ($5 = '' OR strpos(target, $5) > 0 OR strpos(details::text, $5) > 0)
+		ORDER BY seq DESC LIMIT 100`, before, q.Get("actor"), q.Get("action"), q.Get("target"), q.Get("mentions"))
 	if err != nil {
 		return err
 	}

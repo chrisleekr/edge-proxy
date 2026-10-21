@@ -43,17 +43,13 @@ func New(cfg *Config, log *slog.Logger) *Server {
 	m := &metrics{}
 	st := &store{}
 	reg := newStatsRegistry()
-	ups := map[string]*upstream{}
-	for name, u := range cfg.Upstreams {
-		ups[name] = &upstream{name: name, url: u, transport: newTransport(cfg)}
-	}
 	alog := newAccessLog(log, m, cfg.LogSampleRate, 4096)
 	keys := newKeyStore(jwks.NewClient(cfg.JWKSAllowedHosts, jwksTimeout, jwksRoots), m, log)
 	s := &Server{
 		cfg: cfg, log: log, m: m, store: st, alog: alog,
 		edge: &Edge{
 			cfg: cfg, id: newIdentity(cfg), store: st, m: m, alog: alog, log: log,
-			upstreams: ups, pool: newBufferPool(), now: time.Now, strip: sourceHeaders(cfg.Deployment()),
+			pool: newBufferPool(), now: time.Now, strip: sourceHeaders(cfg.Deployment()),
 			penalties: ratelimit.NewPenalties(maxPenalties), tokens: newTokenCache(cfg.TokenCacheSize),
 		},
 	}
@@ -66,7 +62,7 @@ func New(cfg *Config, log *slog.Logger) *Server {
 	s.poller = &poller{cfg: cfg, dep: cfg.Deployment(), client: client, store: st, reg: reg, keys: keys, m: m, log: log, now: time.Now}
 	if cfg.AdminURL != nil {
 		s.reporter = &reporter{
-			url: cfg.AdminURL.JoinPath("v1", "edge", "report").String(), token: cfg.ServiceToken, instance: cfg.Instance, deployment: cfg.Deployment().Fingerprint(),
+			url: cfg.AdminURL.JoinPath("v1", "edge", "report").String(), token: cfg.ServiceToken, instance: cfg.Instance, deployment: cfg.Deployment().Fingerprint(), upstream: cfg.Upstream.String(),
 			interval: cfg.StatsInterval, client: client, reg: reg, store: st, m: m, log: log,
 		}
 	}

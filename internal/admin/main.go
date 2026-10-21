@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -78,13 +79,34 @@ func serve(ctx context.Context, ui fs.FS, getenv func(string) string, log *slog.
 		return fmt.Errorf("database: %w", noURL(err))
 	}
 	defer db.Close()
+	edgeCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("database: %w", noURL(err))
+	}
+	// Edge queries are short single-row reads and upserts; a few connections
+	// serve hundreds of edges polling every few seconds.
+	edgeCfg.MaxConns = edgePoolConns
+	edgeDB, err := pgxpool.NewWithConfig(ctx, edgeCfg)
+	if err != nil {
+		return fmt.Errorf("database: %w", noURL(err))
+	}
+	defer edgeDB.Close()
 	l, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return err
 	}
 	log.Info("admin listening", "addr", l.Addr().String())
-	return NewServer(cfg, db, log).Serve(ctx, l)
+	s := NewServer(cfg, db, log)
+	s.edgeDB = edgeDB
+	if err := bootstrap(ctx, db, s, log); err != nil {
+		_ = l.Close()
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	return s.Serve(ctx, l)
 }
+
+// edgePoolConns sizes the pool kept for edge traffic.
+const edgePoolConns = 4
 
 // createUser bootstraps a user, typically the first admin; the password is
 // read from the first line of stdin so it never appears in shell history.
@@ -102,7 +124,7 @@ func createUser(ctx context.Context, args []string, getenv func(string) string, 
 		return fmt.Errorf("database: %w", noURL(err))
 	}
 	defer db.Close()
-	id, err := CreateUser(ctx, db, cfg, "cli", args[0], "", strings.TrimRight(line, "\r\n"), args[1:])
+	id, err := CreateUser(ctx, db, cfg, time.Now, "cli", args[0], "", strings.TrimRight(line, "\r\n"), args[1:])
 	if err != nil {
 		return err
 	}

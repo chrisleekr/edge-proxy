@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,9 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -43,15 +46,22 @@ var (
 	// flushTimeout bounds the last stats write at shutdown, so an
 	// unresponsive Postgres can't hold the replica open.
 	flushTimeout = 5 * time.Second
+	// flushEvery is how often stats, the current minute included, are
+	// written: the dashboard's delay after an edge's report.
+	flushEvery = 10 * time.Second
 )
 
 // Server is the admin API.
 type Server struct {
 	cfg *Config
 	db  *pgxpool.Pool
-	log *slog.Logger
-	now func() time.Time
-	mux *http.ServeMux
+	// edgeDB serves edge snapshot polls, reports and their token lookups.
+	// Its own pool, so UI work holding every db connection never delays a
+	// publish or rollback reaching the edges.
+	edgeDB *pgxpool.Pool
+	log    *slog.Logger
+	now    func() time.Time
+	mux    *http.ServeMux
 
 	// Login throttles.
 	pairLimit, userLimit, ipLimit, overflow *ratelimit.Local[string]
@@ -60,19 +70,34 @@ type Server struct {
 	replica string // this admin instance, for its stats rows
 	agg     *aggregator
 	jwks    *jwks.Client
+	// guardEvery is the leader's guard tick, fixed until leadership changes.
+	guardEvery atomic.Int64
 	// The leader's incremental audit verification position.
 	auditSeq int64
 	auditMAC []byte
 	known    *knownPeers
+
+	// Observed routes: ingest slots, this replica's unflushed totals and
+	// the route patterns, reloaded on every flush.
+	ingest   chan struct{}
+	routeAgg *routeAggregator
+	patterns atomic.Pointer[[]routePattern]
+
+	// registered lists every route as "METHOD /path permission", so a test
+	// can check the API reference against it.
+	registered []string
 }
 
 // NewServer wires the API. db must connect as the runtime role.
 func NewServer(cfg *Config, db *pgxpool.Pool, log *slog.Logger) *Server {
 	s := &Server{
-		cfg: cfg, db: db, log: log, now: time.Now, mux: http.NewServeMux(),
+		cfg: cfg, db: db, edgeDB: db, log: log, now: time.Now, mux: http.NewServeMux(),
 		pairLimit: ratelimit.NewLocalStore(100_000), userLimit: ratelimit.NewLocalStore(100_000), ipLimit: ratelimit.NewLocalStore(100_000),
 		overflow: ratelimit.NewLocalStore(64), known: &knownPeers{m: map[string]time.Time{}}, changeLimit: ratelimit.NewLocalStore(100_000),
-		replica: cfg.Replica, agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil),
+		// The start time keeps a restarted replica's rows apart from its
+		// previous run's for the same minute; readers sum replicas.
+		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil),
+		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(),
 	}
 	s.routes()
 	return s
@@ -102,7 +127,17 @@ type problem struct {
 	Tests  []TestResult `json:"test_results,omitempty"`
 }
 
-func (p *problem) Error() string { return p.Title + ": " + p.Detail }
+// Error includes the issues because the CLI has only this text to show.
+func (p *problem) Error() string {
+	s := p.Title + ": " + p.Detail
+	if p.Errors != nil {
+		if p.Detail != "" {
+			s += "; "
+		}
+		s += expr.Issues(p.Errors).Error()
+	}
+	return s
+}
 
 func fail(status int, detail string) *problem {
 	return &problem{Status: status, Title: http.StatusText(status), Detail: detail}
@@ -118,8 +153,13 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, p *principal) erro
 // handle registers an authenticated route that needs perm ("" for any
 // signed-in principal).
 func (s *Server) handle(pattern, perm string, h handlerFunc) {
+	s.registered = append(s.registered, pattern+" "+perm)
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		p, err := s.authenticate(r)
+		db := s.db
+		if perm == permEdge {
+			db = s.edgeDB
+		}
+		p, err := s.authenticate(r, db)
 		if err == nil && perm != "" && !p.can(perm) {
 			err = errForbidden
 		}
@@ -132,6 +172,7 @@ func (s *Server) handle(pattern, perm string, h handlerFunc) {
 
 // public registers a route that needs no principal.
 func (s *Server) public(pattern string, h func(w http.ResponseWriter, r *http.Request) error) {
+	s.registered = append(s.registered, pattern+" public")
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) { s.writeError(w, h(w, r)) })
 }
 
@@ -191,7 +232,7 @@ func (s *Server) change(ctx context.Context, actor string, fn func(tx pgx.Tx) (a
 			return err
 		}
 		e.Actor = actor
-		return admindb.Audit(ctx, tx, s.cfg.Audit, e)
+		return admindb.Audit(ctx, tx, s.cfg.Audit, s.now, e)
 	}))
 }
 
@@ -229,11 +270,12 @@ func hashSecret(v string) []byte {
 }
 
 // authenticate resolves an API token or a session cookie.
-func (s *Server) authenticate(r *http.Request) (*principal, error) {
+// db is the pool of the route being served.
+func (s *Server) authenticate(r *http.Request, db *pgxpool.Pool) (*principal, error) {
 	ctx := r.Context()
 	now := s.now()
 	if v, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-		return s.tokenPrincipal(ctx, hashSecret(v), now)
+		return s.tokenPrincipal(ctx, db, hashSecret(v), now)
 	}
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
@@ -262,13 +304,20 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	return p, err
 }
 
-// tokenPrincipal: edge tokens may only fetch snapshots and post reports;
-// user tokens get their scopes, limited to what the owner can do now.
-func (s *Server) tokenPrincipal(ctx context.Context, h []byte, now time.Time) (*principal, error) {
+// tokenPrincipal: edge tokens may only fetch snapshots and post reports, and
+// the log shipper's token may only post access logs; user tokens get their
+// scopes, limited to what the owner can do now.
+func (s *Server) tokenPrincipal(ctx context.Context, db *pgxpool.Pool, h []byte, now time.Time) (*principal, error) {
+	if s.cfg.EdgeToken != nil && subtle.ConstantTimeCompare(h, s.cfg.EdgeToken) == 1 {
+		return &principal{actor: "deployment:edge", perms: map[string]bool{permEdge: true}}, nil
+	}
+	if s.cfg.LogToken != nil && subtle.ConstantTimeCompare(h, s.cfg.LogToken) == 1 {
+		return &principal{actor: "deployment:log-shipper", perms: map[string]bool{permLogs: true}}, nil
+	}
 	var id, kind string
 	var userID, username *string
 	var scopes []string
-	err := s.db.QueryRow(ctx, `SELECT t.id, t.kind, t.user_id, u.username, t.scopes FROM api_tokens t LEFT JOIN users u ON u.id = t.user_id
+	err := db.QueryRow(ctx, `SELECT t.id, t.kind, t.user_id, u.username, t.scopes FROM api_tokens t LEFT JOIN users u ON u.id = t.user_id
 		WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > $2) AND NOT coalesce(u.disabled, false)`,
 		h, now).Scan(&id, &kind, &userID, &username, &scopes)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -290,8 +339,12 @@ func (s *Server) tokenPrincipal(ctx context.Context, h []byte, now time.Time) (*
 	return p, err
 }
 
-// permEdge is held only by edge service tokens.
-const permEdge = "edge"
+// permEdge is held only by edge service tokens, and permLogs only by the log
+// shipper's token.
+const (
+	permEdge = "edge"
+	permLogs = "logs.ingest"
+)
 
 func (s *Server) userPerms(ctx context.Context, userID string) (map[string]bool, error) {
 	rows, err := s.db.Query(ctx, `SELECT DISTINCT p.permission FROM user_roles r JOIN role_permissions p ON p.role = r.role WHERE r.user_id = $1`, userID)
@@ -346,14 +399,20 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	go s.lead(ctx, s.cfg.DatabaseURL)
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
+	flushTick := time.NewTicker(flushEvery)
+	defer flushTick.Stop()
 	for running := true; running; {
 		select {
 		case err := <-errc:
 			return err
 		case now := <-tick.C:
 			s.sweep(now)
+		case now := <-flushTick.C:
 			if err := s.flush(ctx, now); err != nil {
 				s.log.Warn("stats flush", "error", err.Error())
+			}
+			if err := s.flushRoutes(ctx); err != nil {
+				s.log.Warn("route flush", "error", err.Error())
 			}
 		case <-ctx.Done():
 			running = false
@@ -368,6 +427,9 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	defer cancelFlush()
 	if ferr := s.flush(fctx, s.now().Add(time.Minute)); ferr != nil {
 		s.log.Warn("stats flush at shutdown", "error", ferr.Error())
+	}
+	if ferr := s.flushRoutes(fctx); ferr != nil {
+		s.log.Warn("route flush at shutdown", "error", ferr.Error())
 	}
 	if err != nil {
 		return fmt.Errorf("shutdown: %w", err)

@@ -21,8 +21,8 @@ func TestStatsSplitEdgeAndUpstreamErrors(t *testing.T) {
 	h.load(envelope(testConfig(1)))
 	h.appHandler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }
 	h.do("GET", "/", nil).Body.Close()
-	h.admin.Close()
-	h.do("GET", "/admin/x", nil).Body.Close()
+	h.app.Close()
+	h.do("GET", "/", nil).Body.Close()
 	s := h.srv.store.load().active.stats
 	if s.requests.Load() != 2 || s.upstream5xx.Load() != 1 || s.edge5xx.Load() != 1 {
 		t.Fatalf("requests %d upstream5xx %d edge5xx %d", s.requests.Load(), s.upstream5xx.Load(), s.edge5xx.Load())
@@ -51,6 +51,29 @@ func TestTopLimitedReported(t *testing.T) {
 	}
 	if top := h.srv.poller.reg.deltas()[0].TopLimited; len(top) != 0 {
 		t.Fatalf("next report repeats subjects: %+v", top)
+	}
+}
+
+// A log-only rule over its limit lists the client as would-limit, so an
+// operator sees who a new rule would hit before switching it to block.
+func TestTopWouldLimitReported(t *testing.T) {
+	old := sampleTop
+	sampleTop = func() bool { return true }
+	t.Cleanup(func() { sampleTop = old })
+	h := newHarness(t, nil)
+	c := testConfig(1)
+	r := rlRule("search-per-ip", "true", "sliding_window", 1, "ip")
+	r.FailMode = "local"
+	r.Action = "log"
+	c.RateLimitRules = []snapshot.RateLimitRule{r}
+	h.load(envelope(c))
+	if got := h.statuses(3, "GET", "/"); !slices.Equal(got, []int{200, 200, 200}) {
+		t.Fatalf("log-only rule blocked: %v", got)
+	}
+
+	top := h.srv.poller.reg.deltas()[0].TopLimited
+	if len(top) != 1 || top[0].Rule != "search-per-ip" || top[0].Display != "198.51.100.7" || top[0].Limited != 0 || top[0].WouldLimit != 2*topSample {
+		t.Fatalf("top limited %+v", top)
 	}
 }
 
@@ -123,7 +146,7 @@ func TestStatsReporter(t *testing.T) {
 	rp.report(ctx)
 	rp.report(ctx)
 	mu.Lock()
-	if len(got) != 2 || got[0].Instance != "edge-1" || got[0].MaxSchema != 1 || got[0].Deployment != h.srv.cfg.Deployment().Fingerprint() || got[0].ConfigSource != "admin" || len(got[0].Versions) != 1 || got[0].Versions[0].Requests != 2 {
+	if len(got) != 2 || got[0].Instance != "edge-1" || got[0].MaxSchema != snapshot.SupportedSchema || got[0].Deployment != h.srv.cfg.Deployment().Fingerprint() || got[0].Upstream != h.app.URL || got[0].ConfigSource != "admin" || len(got[0].Versions) != 1 || got[0].Versions[0].Requests != 2 {
 		t.Fatalf("first report = %+v", got)
 	}
 	if got[1].Versions[0].Requests != 0 || sum(got[1].Versions[0].LatencyMS) != 0 {

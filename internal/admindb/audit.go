@@ -46,8 +46,10 @@ type Querier interface {
 }
 
 // Audit appends e in tx, the transaction of the change it records, so no
-// change commits without its row. The advisory lock is released at commit.
-func Audit(ctx context.Context, tx pgx.Tx, k AuditKeys, e Event) error {
+// change commits without its row. now is the caller's clock (admin's, which
+// tests freeze); it is read under the lock, so times follow seq.
+// The advisory lock is released at commit.
+func Audit(ctx context.Context, tx pgx.Tx, k AuditKeys, now func() time.Time, e Event) error {
 	details, err := json.Marshal(e.Details)
 	if err != nil {
 		return fmt.Errorf("audit details: %w", err)
@@ -64,7 +66,7 @@ func Audit(ctx context.Context, tx pgx.Tx, k AuditKeys, e Event) error {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	r := auditRow{Seq: seq + 1, OccurredAt: time.Now().UTC().Truncate(time.Microsecond), Actor: e.Actor, Action: e.Action, Target: e.Target, Details: details, KeyID: k.Current}
+	r := auditRow{Seq: seq + 1, OccurredAt: now().UTC().Truncate(time.Microsecond), Actor: e.Actor, Action: e.Action, Target: e.Target, Details: details, KeyID: k.Current}
 	_, err = tx.Exec(ctx, `INSERT INTO audit_events (seq, occurred_at, actor, action, target, details, key_id, hmac)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		r.Seq, r.OccurredAt, r.Actor, r.Action, r.Target, string(details), r.KeyID, r.sign(k.Keys[k.Current], prev))

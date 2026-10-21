@@ -36,6 +36,9 @@ type versionStats struct {
 	rules   []ruleStats
 	ruleIDs []string
 	top     topKeys
+	// wouldTop tracks log-only (shadow) limits apart from top, so log-only
+	// rules never evict the subjects real limits report.
+	wouldTop topKeys
 
 	// last holds the counts at the previous report, so reports carry deltas.
 	// Only the reporter goroutine touches it.
@@ -152,6 +155,10 @@ func (s *versionStats) delta() StatsCounts {
 	}
 	s.last = now
 	d.TopLimited = s.top.drain()
+	for _, t := range s.wouldTop.drain() {
+		t.WouldLimit, t.Limited = t.Limited, 0
+		d.TopLimited = append(d.TopLimited, t)
+	}
 	return d
 }
 
@@ -177,12 +184,14 @@ type topKeys struct {
 	m  map[string]*TopCount
 }
 
-// TopCount is one subject. Limited is estimated from the sample.
+// TopCount is one subject. Limited and WouldLimit (log-only rules) are
+// estimated from the sample.
 type TopCount struct {
-	Rule    string `json:"rule"`
-	Key     string `json:"key"`
-	Display string `json:"display"`
-	Limited uint64 `json:"limited"`
+	Rule       string `json:"rule"`
+	Key        string `json:"key"`
+	Display    string `json:"display"`
+	Limited    uint64 `json:"limited"`
+	WouldLimit uint64 `json:"would_limit,omitempty"`
 }
 
 func (t *topKeys) add(key, rule, display string) {
@@ -197,14 +206,14 @@ func (t *topKeys) add(key, rule, display string) {
 	}
 	var base uint64
 	if len(t.m) == topCapacity {
-		var minKey string
-		for k, e := range t.m {
-			if minKey == "" || e.Limited < t.m[minKey].Limited {
-				minKey = k
+		var minE *TopCount
+		for _, e := range t.m {
+			if minE == nil || e.Limited < minE.Limited {
+				minE = e
 			}
 		}
-		base = t.m[minKey].Limited
-		delete(t.m, minKey)
+		base = minE.Limited
+		delete(t.m, minE.Key)
 	}
 	t.m[key] = &TopCount{Rule: rule, Key: key, Display: display, Limited: base + topSample}
 }
@@ -285,8 +294,10 @@ type StatsReport struct {
 	MaxSchema int `json:"max_schema"`
 	// Deployment is snapshot.Deployment.Fingerprint of this edge's
 	// deployment config, which must match admin's.
-	Deployment string        `json:"deployment"`
-	Versions   []StatsCounts `json:"versions"`
+	Deployment string `json:"deployment"`
+	// Upstream is this edge's UPSTREAM_URL, shown read-only in admin.
+	Upstream string        `json:"upstream"`
+	Versions []StatsCounts `json:"versions"`
 }
 
 // ReportAnswer is admin's reply to a stats report.
@@ -301,6 +312,7 @@ type ReportAnswer struct {
 type reporter struct {
 	url, token, instance string
 	deployment           string // fingerprint
+	upstream             string
 	interval             time.Duration
 	client               *http.Client
 	reg                  *statsRegistry
@@ -323,7 +335,7 @@ func (rp *reporter) run(ctx context.Context) {
 }
 
 func (rp *reporter) report(ctx context.Context) {
-	rep := StatsReport{Instance: rp.instance, IntervalSeconds: rp.interval.Seconds(), MaxSchema: snapshot.SupportedSchema, Deployment: rp.deployment, Versions: rp.reg.deltas()}
+	rep := StatsReport{Instance: rp.instance, IntervalSeconds: rp.interval.Seconds(), MaxSchema: snapshot.SupportedSchema, Deployment: rp.deployment, Upstream: rp.upstream, Versions: rp.reg.deltas()}
 	if ld := rp.store.load(); ld != nil {
 		rep.ConfigSource = ld.source
 		rep.BootstrapAgeSeconds = int64(ld.bootstrapAge / time.Second)

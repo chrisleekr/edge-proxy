@@ -2,6 +2,7 @@ package jwks
 
 import (
 	"crypto/x509"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -90,8 +91,12 @@ func TestFetchRefuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.c.Fetch(t.Context(), tc.url); err == nil || !strings.Contains(err.Error(), tc.msg) {
+			_, err := tc.c.Fetch(t.Context(), tc.url)
+			if err == nil || !strings.Contains(err.Error(), tc.msg) {
 				t.Fatalf("err = %v, want %q", err, tc.msg)
+			}
+			if guardedOut := strings.Contains(tc.msg, "non-public"); errors.Is(err, ErrNonPublic) != guardedOut {
+				t.Fatalf("errors.Is(err, ErrNonPublic) = %v for %v", !guardedOut, err)
 			}
 		})
 	}

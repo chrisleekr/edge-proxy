@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -67,7 +68,7 @@ func TestStep2Rejections(t *testing.T) {
 	}{
 		{"missing ingress secret", "GET", "/", nil, reasonIngressSecret},
 		{"missing client IP header", "GET", "/", []string{"X-Origin-Secret", "s3cret", "CloudFront-Viewer-Address", ""}, reasonClientIP},
-		{"encoded slash", "GET", "/a%2Fb", []string{"X-Origin-Secret", "s3cret"}, reasonPath},
+		{"encoded backslash", "GET", "/a%5Cb", []string{"X-Origin-Secret", "s3cret"}, reasonPath},
 		{"lowercase method", "post", "/", []string{"X-Origin-Secret", "s3cret"}, reasonMethod},
 	}
 	for _, tc := range cases {
@@ -84,9 +85,26 @@ func TestStep2Rejections(t *testing.T) {
 	}
 }
 
-// An encoded slash hidden behind a character Go re-encodes is still caught,
-// end to end. Sent raw: Go's client would normalize the target.
-func TestEncodedSlashCaughtOnTheWire(t *testing.T) {
+// GitLab names a project as group%2Fproject: the upstream receives it
+// unchanged.
+func TestEncodedSlashReachesUpstreamUnchanged(t *testing.T) {
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	resp := h.do("GET", "/api/v4/projects/group%2Fproject?state=opened", nil)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	if got := h.lastApp.RequestURI; got != "/api/v4/projects/group%2Fproject?state=opened" {
+		t.Fatalf("upstream got %q", got)
+	}
+}
+
+// A target with %2F next to dot-segments and a byte a path can't carry raw
+// reaches the upstream with every escape intact; only "|" is encoded. Go's
+// client would otherwise decode %2F and send /admin/../secret%7C. Sent raw:
+// Go's client would normalize the target.
+func TestEncodedSlashPassesThroughOnTheWire(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
 	conn, err := net.Dial("tcp", h.front.Listener.Addr().String())
@@ -99,7 +117,13 @@ func TestEncodedSlashCaughtOnTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	edgeError(t, resp, 400, "bad_request")
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	if got := h.lastApp.RequestURI; got != "/admin%2F..%2Fsecret%7C" {
+		t.Fatalf("upstream got %q", got)
+	}
 }
 
 // A peer outside TRUSTED_PROXIES can't choose its client IP.
@@ -118,7 +142,7 @@ func TestUnsafeRequestIDIsReplaced(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
 	for _, id := range []string{`x","admin":true,"y":"`, "<script>", strings.Repeat("a", 129)} {
-		resp := h.do("GET", "/a%2Fb", nil, "X-Request-Id", id)
+		resp := h.do("GET", "/a%5Cb", nil, "X-Request-Id", id)
 		if resp.Header.Get("X-Request-Id") == id {
 			t.Errorf("request id %q accepted", id)
 		}
@@ -136,14 +160,16 @@ func TestNoSnapshotYet(t *testing.T) {
 	}
 }
 
-// A host no upstream serves gets 421, and config rules can route by path.
-func TestRouting(t *testing.T) {
+// Every host goes to the one upstream with its Host unchanged: the load
+// balancer behind the edge routes it, so the edge needs no list of hosts.
+func TestAnyHostGoesToTheUpstream(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
-	edgeError(t, h.do("GET", "/", nil, "Host", "unknown.example.com"), 421, "misdirected")
-	h.adminHandler = func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "admin "+r.URL.Path) }
-	if body := readBody(t, h.do("GET", "/admin/users", nil)); body != "admin /admin/users" {
-		t.Fatalf("admin route: %q", body)
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Host+" "+r.URL.Path) }
+	for _, host := range []string{"api.example.com", "shop.example.net", "new-app.example.org:8443"} {
+		if body := readBody(t, h.do("GET", "/users", nil, "Host", host)); body != host+" /users" {
+			t.Errorf("Host %s: upstream got %q", host, body)
+		}
 	}
 }
 
@@ -173,24 +199,6 @@ func TestOverloadIsShed(t *testing.T) {
 	}
 	close(release)
 	<-done
-	<-done
-}
-
-// One slow upstream can't take every connection: it has its own cap (step 10).
-func TestUpstreamCap(t *testing.T) {
-	h := newHarness(t, map[string]string{"MAX_UPSTREAM_INFLIGHT": "1"})
-	h.load(envelope(testConfig(1)))
-	entered, release := make(chan struct{}), make(chan struct{})
-	h.appHandler = func(w http.ResponseWriter, r *http.Request) { entered <- struct{}{}; <-release }
-	done := make(chan struct{})
-	go func() { h.do("GET", "/slow", nil).Body.Close(); close(done) }()
-	<-entered
-	edgeError(t, h.do("GET", "/", nil), 503, "overloaded")
-	// The other upstream is unaffected.
-	if readBody(t, h.do("GET", "/admin/x", nil)) != "upstream ok" {
-		t.Error("admin upstream blocked by app's cap")
-	}
-	close(release)
 	<-done
 }
 
@@ -244,7 +252,7 @@ func TestUpstreamTimeout(t *testing.T) {
 	h.load(envelope(testConfig(1)))
 	// One handler for both cases: swapping it while the slow call still
 	// runs would race.
-	h.adminHandler = func(w http.ResponseWriter, r *http.Request) {
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/slow" {
 			time.Sleep(1500 * time.Millisecond)
 			return
@@ -268,10 +276,10 @@ func TestUpstreamTimeout(t *testing.T) {
 func TestUpstreamDown(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
-	h.admin.Close()
+	h.app.Close()
 	edgeError(t, h.do("GET", "/admin/x", nil), 502, "bad_gateway")
 
-	h.srv.edge.upstreams["admin"].transport = &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+	h.srv.edge.rp.Transport = &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
 		return nil, timeoutErr{}
 	}}
 	edgeError(t, h.do("GET", "/admin/x", nil), 504, "gateway_timeout")
@@ -327,11 +335,13 @@ func TestWebSocketUpgrade(t *testing.T) {
 func TestPanicIsContained(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
-	h.srv.edge.upstreams["app"].transport = panicTransport{}
+	working := h.srv.edge.rp.Transport
+	h.srv.edge.rp.Transport = panicTransport{}
 	edgeError(t, h.do("GET", "/", nil), 503, "unavailable")
 	if h.srv.m.rejected[reasonPanic].Load() != 1 || len(h.logs.lines("request panic recovered")) != 1 {
 		t.Fatal("panic not recorded")
 	}
+	h.srv.edge.rp.Transport = working
 	if readBody(t, h.do("GET", "/admin/x", nil)) != "upstream ok" {
 		t.Fatal("replica not serving after a panic")
 	}
@@ -342,7 +352,7 @@ func TestPanicIsContained(t *testing.T) {
 func TestPanicAfterHeaders(t *testing.T) {
 	h := newHarness(t, nil)
 	h.load(envelope(testConfig(1)))
-	h.srv.edge.upstreams["app"].transport = bodyPanicTransport{}
+	h.srv.edge.rp.Transport = bodyPanicTransport{}
 	req, _ := http.NewRequest("GET", h.front.URL+"/", nil)
 	req.Host = "api.example.com"
 	req.Header.Set("CloudFront-Viewer-Address", "198.51.100.7:1")
@@ -401,11 +411,14 @@ func TestUpstreamDiesMidResponse(t *testing.T) {
 func TestCanaryCohort(t *testing.T) {
 	h := newHarness(t, nil)
 	cand := testConfig(2)
-	cand.ConfigRules = append(cand.ConfigRules, snapshotRule("canary-route", `http.request.uri.path eq "/v1/x"`, "admin"))
+	cand.RequestHeaderRules = append(cand.RequestHeaderRules, snapshot.HeaderRule{ID: "canary-mark", Expression: mustParse(`http.request.uri.path eq "/v1/x"`),
+		Ops: []snapshot.HeaderOp{{Op: "set", Name: "X-Version", Value: "candidate"}}})
 	e := envelope(testConfig(1))
 	e.Candidate, e.CanaryPercent, e.CanaryExpiresAt = cand, 50, time.Now().Add(time.Hour)
 	h.load(e)
-	h.adminHandler = func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "candidate") }
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, cmp.Or(r.Header.Get("X-Version"), "upstream ok"))
+	}
 
 	in, out := ipWithCohort(t, true, 5000), ipWithCohort(t, false, 5000)
 	for range 3 {
@@ -435,10 +448,6 @@ func TestCohortByIPv6Prefix(t *testing.T) {
 	if cohortOf(a) != cohortOf(b) {
 		t.Fatal("same /64 split across cohorts")
 	}
-}
-
-func snapshotRule(id, src, up string) snapshot.ConfigRule {
-	return snapshot.ConfigRule{ID: id, Expression: mustParse(src), Settings: snapshot.Settings{Upstream: new(up)}}
 }
 
 // A response kind validation accepts but the edge doesn't know would be

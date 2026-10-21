@@ -55,7 +55,6 @@ type SimSettings struct {
 	Locale           bool              `json:"locale"`
 	Responses        map[string]string `json:"responses"`
 	BodyLimit        int64             `json:"body_limit"`
-	Upstream         string            `json:"upstream"`
 	UpstreamTimeout  snapshot.Duration `json:"upstream_timeout"`
 	RateLimitHeaders bool              `json:"ratelimit_headers"`
 }
@@ -63,8 +62,7 @@ type SimSettings struct {
 // Simulate runs the edge's own path and method checks, config phase, CORS
 // preflight, auth, rate-limit selection and header phase on req, in serve's
 // order, so config tests and live traffic can't disagree. Stateful steps
-// (backstop, quotas) and the host-to-upstream fallback depend on the running
-// edge and are left out.
+// (backstop, quotas) depend on the running edge and are left out.
 func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	ip, err := netip.ParseAddr(req.IP)
 	if err != nil {
@@ -100,7 +98,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	}
 	res.Settings = SimSettings{
 		AuthMode: set.authMode, Accepted: set.accepted, CORSPolicy: set.cors, Locale: set.locale,
-		Responses: map[string]string{}, BodyLimit: set.bodyLimit, Upstream: set.upstream,
+		Responses: map[string]string{}, BodyLimit: set.bodyLimit,
 		UpstreamTimeout: snapshot.Duration(set.upstreamTimeout), RateLimitHeaders: set.rateLimitHeaders,
 	}
 	for k, name := range set.responses {

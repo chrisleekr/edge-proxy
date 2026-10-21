@@ -1,10 +1,13 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,21 +115,23 @@ func TestLeaderLock(t *testing.T) {
 	}
 	idp.mu.Unlock()
 	_ = holder.Close(ctx)
+	waitFor(t, func() bool { return leaderLockFree(t, h) })
 
+	logs := leaderLogs(h)
 	jobs, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- h.s.leadOnce(jobs, h.s.cfg.DatabaseURL) }()
-	waitFor(t, func() bool {
-		idp.mu.Lock()
-		defer idp.mu.Unlock()
-		return idp.hits > before
-	})
+	// The anchor is logged after the JWKS refresh, so seeing it means both
+	// startup jobs ran.
+	waitFor(t, func() bool { return logs.count(`"msg":"audit anchor"`) == 1 })
 	stop()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.logs.String(), `"msg":"audit anchor"`) {
-		t.Fatal("no audit anchor logged")
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	if idp.hits == before {
+		t.Fatal("leader did not refresh keys")
 	}
 }
 
@@ -174,13 +179,63 @@ func TestAuditEndpoints(t *testing.T) {
 // stopped using it: a pgx.Conn is not safe for concurrent use.
 func TestLeaderStepDownWaitsForPing(t *testing.T) {
 	h := newHarness(t)
+	logs := leaderLogs(h)
 	defer func(d time.Duration) { leaderPing = d }(leaderPing)
 	leaderPing = time.Millisecond
-	for range 20 {
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
-		if err := h.s.leadOnce(ctx, h.s.cfg.DatabaseURL); err != nil {
+	for i := range 20 {
+		waitFor(t, func() bool { return leaderLockFree(t, h) })
+		// Cancel only once leading: a deadline would also cover connecting
+		// and authenticating, which can take longer than the run itself.
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- h.s.leadOnce(ctx, h.s.cfg.DatabaseURL) }()
+		// The startup jobs run while the 1ms ping loop is active.
+		waitFor(t, func() bool { return logs.count(`"msg":"audit anchor"`) == i+1 })
+		cancel()
+		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
-		cancel()
 	}
+}
+
+// leaderLockFree reports whether Postgres has released this test
+// database's leader lock. A closed session's lock is released only when
+// its backend exits, which is shortly after Close returns, so a replica
+// trying at once can lose. Advisory locks are per database and tests share
+// one container, so the check ignores leaders in other tests' databases.
+func leaderLockFree(t *testing.T, h *harness) bool {
+	t.Helper()
+	var free bool
+	if err := h.owner.QueryRow(t.Context(), `SELECT NOT EXISTS (
+		SELECT 1 FROM pg_locks
+		WHERE locktype = 'advisory' AND objid = $1
+			AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))`, leaderLock).Scan(&free); err != nil {
+		t.Fatal(err)
+	}
+	return free
+}
+
+// leaderLogs points the server's logger at a buffer that is safe to read
+// while the leader goroutines write to it.
+func leaderLogs(h *harness) *syncBuffer {
+	b := &syncBuffer{}
+	h.s.log = slog.New(slog.NewJSONHandler(b, nil))
+	return b
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) count(sub string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.Count(s.b.String(), sub)
 }

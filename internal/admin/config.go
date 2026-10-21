@@ -3,6 +3,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -34,9 +35,26 @@ type Config struct {
 	TrustedProxies []netip.Prefix
 	// Replica names this admin instance (INSTANCE, default the hostname).
 	Replica string
+	// BootstrapUser and BootstrapPassword create the first admin when no user
+	// exists, so an automated install needs no shell in the pod.
+	BootstrapUser     string
+	BootstrapPassword string
+	// BootstrapPublish publishes the starter policy when no version has ever
+	// been published, so edges on a fresh install load a policy and serve.
+	BootstrapPublish bool
+	// EdgeToken is the hash of an edge token defined by the deployment
+	// (EDGE_SERVICE_TOKEN_FILE), the same file the edges read. It is accepted
+	// alongside tokens created in admin and rotates with the deployment.
+	EdgeToken []byte
+	// LogToken is the hash of the log shipper's token (LOG_INGEST_TOKEN_FILE).
+	// It may only post access logs.
+	LogToken []byte
 	// UI is the built admin UI, or nil or empty to serve the API only.
 	UI fs.FS
 }
+
+// minEdgeToken matches the 32 random bytes of tokens admin creates.
+const minEdgeToken = 32
 
 // minAuditKey is HMAC-SHA256's block-independent recommendation: a key at
 // least as long as the hash output (RFC 2104 §3).
@@ -54,6 +72,8 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		Replica:          getenv("INSTANCE"),
 		JWKSAllowedHosts: p.List("JWKS_ALLOWED_HOSTS"),
 		TrustedProxies:   p.Prefixes("ADMIN_TRUSTED_PROXIES"),
+		BootstrapUser:    strings.ToLower(getenv("BOOTSTRAP_ADMIN_USERNAME")),
+		BootstrapPublish: p.Bool("BOOTSTRAP_PUBLISH_DEFAULT"),
 	}
 	if c.Replica == "" {
 		c.Replica, _ = os.Hostname()
@@ -89,10 +109,59 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 			}
 		}
 	}
+	loadBootstrap(p, getenv, c)
 	d, err := edge.LoadDeployment(getenv)
 	c.Deployment = d
 	if err = errors.Join(p.Err(), err); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// loadBootstrap reads the first-admin and edge-token settings. Files rather
+// than variables keep the secrets out of the process environment.
+func loadBootstrap(p *envparse.Parser, getenv func(string) string, c *Config) {
+	if path := getenv("BOOTSTRAP_ADMIN_PASSWORD_FILE"); path != "" {
+		if b, err := os.ReadFile(path); err != nil { //nolint:gosec // an operator-chosen path
+			p.Fail("BOOTSTRAP_ADMIN_PASSWORD_FILE", "cannot read the file")
+		} else {
+			// The first line, as create-user reads stdin.
+			line, _, _ := strings.Cut(string(b), "\n")
+			c.BootstrapPassword = strings.TrimRight(line, "\r")
+		}
+	}
+	switch {
+	case (c.BootstrapUser == "") != (getenv("BOOTSTRAP_ADMIN_PASSWORD_FILE") == ""):
+		p.Fail("BOOTSTRAP_ADMIN_USERNAME", "set it together with BOOTSTRAP_ADMIN_PASSWORD_FILE")
+	case c.BootstrapUser != "":
+		if why := passwordProblem(c.BootstrapPassword, c.BootstrapUser, c.Blocklist); why != "" {
+			p.Fail("BOOTSTRAP_ADMIN_PASSWORD_FILE", "password "+why)
+		}
+	}
+	c.EdgeToken = readTokenFile(p, getenv, "EDGE_SERVICE_TOKEN_FILE")
+	c.LogToken = readTokenFile(p, getenv, "LOG_INGEST_TOKEN_FILE")
+	// The edge token is checked first, so a shared token would let the
+	// shipper fetch snapshots and post stats.
+	if c.LogToken != nil && bytes.Equal(c.EdgeToken, c.LogToken) {
+		p.Fail("LOG_INGEST_TOKEN_FILE", "must hold a different token from EDGE_SERVICE_TOKEN_FILE")
+	}
+}
+
+// readTokenFile returns the hash of the token in the file name points to,
+// or nil when name is unset.
+func readTokenFile(p *envparse.Parser, getenv func(string) string, name string) []byte {
+	path := getenv(name)
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // an operator-chosen path
+	switch token := strings.TrimSpace(string(b)); {
+	case err != nil:
+		p.Fail(name, "cannot read the file")
+	case len(token) < minEdgeToken:
+		p.Fail(name, fmt.Sprintf("must hold a token of at least %d characters", minEdgeToken))
+	default:
+		return hashSecret(token)
+	}
+	return nil
 }

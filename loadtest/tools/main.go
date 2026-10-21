@@ -6,13 +6,16 @@
 //	tools bootstrap  write a bootstrap snapshot of the test policy to $SHARED
 //	tools probe URL  wait until URL answers 200, for the image smoke
 //	tools lb         mock load balancer with health checks (flags: -backends)
+//	tools gateway    mock gateway behind the edge, routing by path (flags: -routes)
 //	tools streams    hold SSE and WebSocket connections (flags: -sse -ws -for)
+//	tools service X  mock microservice X for the capacity test: catalog, orders, account, content
 //
 // Configuration comes from the environment, as in compose.yaml.
 package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -44,7 +47,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("usage: tools upstream|idp|seed|bootstrap|probe|lb|streams")
+		log.Fatal("usage: tools upstream|idp|seed|bootstrap|probe|lb|gateway|streams|service")
 	}
 	var err error
 	switch os.Args[1] {
@@ -61,8 +64,12 @@ func main() {
 		err = probe(os.Args[2:])
 	case "lb":
 		err = lb(os.Args[2:])
+	case "gateway":
+		err = gateway(os.Args[2:])
 	case "streams":
 		err = streams(os.Args[2:])
+	case "service":
+		err = service(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -131,7 +138,11 @@ func idp() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /jwks.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(jwks) })
 	mux.HandleFunc("GET /token", func(w http.ResponseWriter, r *http.Request) {
-		t := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{"iss": "https://idp", "aud": "loadtest", "sub": r.URL.Query().Get("sub"),
+		// iss and aud default to the main issuer; the demo also signs for its
+		// partner issuer, which shares this JWKS.
+		q := r.URL.Query()
+		iss, aud := cmp.Or(q.Get("iss"), "https://idp"), cmp.Or(q.Get("aud"), "loadtest")
+		t := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{"iss": iss, "aud": aud, "sub": q.Get("sub"),
 			"exp": time.Now().Add(time.Hour).Unix()})
 		t.Header["kid"] = "k1"
 		s, err := t.SignedString(signer)
@@ -198,6 +209,11 @@ func probe(args []string) error {
 //go:embed policy.json
 var policy []byte
 
+// demoPolicy is the demo's richer policy: one example of each feature.
+//
+//go:embed demo-policy.json
+var demoPolicy []byte
+
 // seed creates the first admin the way the CLI does, then uses the API as
 // an operator would: save the test policy, publish it, create an edge token.
 func seed(ctx context.Context) error {
@@ -216,8 +232,10 @@ func seed(ctx context.Context) error {
 		return err
 	}
 	defer db.Close()
-	const user, password = "loadtest", "load test password for local runs only"
-	if _, err := admin.CreateUser(ctx, db, cfg, "cli", user, "", password, []string{"admin"}); err != nil {
+	// Local demo only. Admin requires at least 15 characters, and neither the
+	// username nor the service name inside the password.
+	const user, password = "admin", "local-dev-login" //nolint:gosec // the published demo login, not a secret
+	if _, err := admin.CreateUser(ctx, db, cfg, time.Now, "cli", user, "", password, []string{"admin"}); err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}
 
@@ -266,13 +284,19 @@ func seed(ctx context.Context) error {
 		Config json.RawMessage `json:"config"`
 		Tests  json.RawMessage `json:"tests"`
 	}
-	if err := json.Unmarshal(policy, &p); err != nil {
+	// SEED_POLICY=demo seeds the demo's policy; load tests assert on the
+	// smaller default one.
+	src, msg := policy, "load test policy"
+	if os.Getenv("SEED_POLICY") == "demo" {
+		src, msg = demoPolicy, "demo policy: one example of each feature"
+	}
+	if err := json.Unmarshal(src, &p); err != nil {
 		return err
 	}
 	if _, err := call("PUT", "/api/draft", p, 200, "If-Match", `"0"`); err != nil {
 		return err
 	}
-	if _, err := call("POST", "/api/publish", map[string]string{"message": "load test policy"}, 201, "If-Match", `"1"`); err != nil {
+	if _, err := call("POST", "/api/publish", map[string]string{"message": msg}, 201, "If-Match", `"1"`); err != nil {
 		return err
 	}
 	out, err := call("POST", "/api/tokens", map[string]string{"name": "edges", "kind": "edge"}, 201)

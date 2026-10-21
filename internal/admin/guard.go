@@ -277,6 +277,14 @@ func evaluate(g GuardSettings, sub, base *cohort, changed map[string]bool, adopt
 	ch, un := g.Signals["changed_rule_limited_ratio"], g.Signals["unchanged_rule_limited_ratio"]
 	chRes := signalResult{Mode: ch.Mode, Baseline: ch.MaxRatio}
 	unRes := signalResult{Mode: un.Mode}
+	// worst reports the rule with the highest ratio, but a rule that tripped
+	// always wins over one that did not, so a trip names its own rule and
+	// numbers rather than a busier rule that is fine.
+	worst := func(r *signalResult, id string, v, baseline float64, tripped bool) {
+		if (tripped && !r.Tripped) || (tripped == r.Tripped && v > r.Value) {
+			r.Value, r.Baseline, r.Detail, r.Tripped = v, baseline, id, tripped
+		}
+	}
 	for _, id := range slices.Sorted(maps.Keys(sub.rules)) {
 		rc := sub.rules[id]
 		v := ratio(rc.Limited, rc.Evaluated)
@@ -288,24 +296,14 @@ func evaluate(g GuardSettings, sub, base *cohort, changed map[string]bool, adopt
 			if b != nil {
 				shadow = ratio(b.WouldLimit, b.Evaluated)
 			}
-			if v > chRes.Value {
-				chRes.Value, chRes.Detail = v, id
-			}
-			if v > ch.MaxRatio || (shadow > 0 && v > shadow*ch.MaxVsShadow) {
-				chRes.Tripped, chRes.Detail = true, id
-			}
+			worst(&chRes, id, v, ch.MaxRatio, v > ch.MaxRatio || (shadow > 0 && v > shadow*ch.MaxVsShadow))
 			continue
 		}
 		if b == nil {
 			continue
 		}
 		bv := ratio(b.Limited, b.Evaluated)
-		if v > unRes.Value {
-			unRes.Value, unRes.Baseline, unRes.Detail = v, bv, id
-		}
-		if bv > 0 && v > bv*un.Factor {
-			unRes.Tripped, unRes.Detail = true, id
-		}
+		worst(&unRes, id, v, bv, bv > 0 && v > bv*un.Factor)
 	}
 	out["changed_rule_limited_ratio"], out["unchanged_rule_limited_ratio"] = chRes, unRes
 	for name, r := range out {
@@ -340,8 +338,11 @@ const (
 
 // guardOutcome is stored on the version it judged.
 type guardOutcome struct {
-	At       time.Time               `json:"at"`
-	Decision string                  `json:"decision"` // one of the decision constants
+	At       time.Time `json:"at"`
+	Decision string    `json:"decision"` // one of the decision constants
+	// Baseline is the version the signals were compared with, so the UI can
+	// name it.
+	Baseline int64                   `json:"baseline_version"`
 	Signals  map[string]signalResult `json:"signals,omitempty"`
 }
 
@@ -355,8 +356,12 @@ func (s *Server) runGuard(ctx context.Context) error {
 	}
 	if c != nil {
 		// Keep edges on the candidate while admin is alive, whether or not
-		// the guard is judging it.
-		if _, err := s.db.Exec(ctx, "UPDATE canary SET expires_at = $1", now.Add(canaryLease)); err != nil {
+		// the guard is judging it. expires_at is in the snapshot ETag, so
+		// renewing on every run would make every edge download an unchanged
+		// snapshot each time. Renew once half the lease is gone, or two ticks
+		// before it would lapse when ticks are further apart.
+		renewBelow := max(canaryLease/2, 2*time.Duration(s.guardEvery.Load()))
+		if _, err := s.db.Exec(ctx, "UPDATE canary SET expires_at = $1 WHERE expires_at < $2", now.Add(canaryLease), now.Add(renewBelow)); err != nil {
 			return err
 		}
 	}
@@ -406,7 +411,7 @@ func (s *Server) runGuard(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	out := guardOutcome{At: now, Decision: decisionInsufficient}
+	out := guardOutcome{At: now, Decision: decisionInsufficient, Baseline: baseline.Version}
 	if sub.Requests >= g.MinRequests && base.Requests >= g.MinRequests {
 		adoption, err := s.adoption(ctx, subject.Version, now)
 		if err != nil {
@@ -514,6 +519,6 @@ func (s *Server) act(ctx context.Context, g GuardSettings, subject, baseline *ve
 			}
 		}
 		s.log.Error("guard tripped", "action", action, "version", subject.Version)
-		return admindb.Audit(ctx, tx, s.cfg.Audit, admindb.Event{Actor: "system:guard", Action: action, Target: fmt.Sprintf("version %d", subject.Version), Details: details})
+		return admindb.Audit(ctx, tx, s.cfg.Audit, s.now, admindb.Event{Actor: "system:guard", Action: action, Target: fmt.Sprintf("version %d", subject.Version), Details: details})
 	}))
 }

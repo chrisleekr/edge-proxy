@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -35,9 +36,9 @@ type Config struct {
 	IngressSecretHeader string
 	IngressSecrets      []string
 
-	Upstreams map[string]*url.URL
-	// HostUpstream maps a lowercase host to an upstream name.
-	HostUpstream map[string]string
+	// Upstream is the load balancer or gateway every request is forwarded to.
+	// It routes by Host; the edge never chooses where a request goes.
+	Upstream *url.URL
 
 	AdminURL            *url.URL
 	ServiceToken        string
@@ -47,11 +48,10 @@ type Config struct {
 	BootstrapAllowStale bool
 	PollInterval        time.Duration
 
-	MaxInflight         int
-	MaxStreams          int
-	MaxUpstreamInflight int
-	MaxIdleConnsPerHost int
-	MaxHeaderBytes      int
+	MaxInflight    int
+	MaxStreams     int
+	MaxIdleConns   int
+	MaxHeaderBytes int
 
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
@@ -127,8 +127,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		PollInterval:        p.Duration("POLL_INTERVAL", 5*time.Second),
 		MaxInflight:         p.Integer("MAX_INFLIGHT", 10_000),
 		MaxStreams:          p.Integer("MAX_STREAMS", 1_000),
-		MaxUpstreamInflight: p.Integer("MAX_UPSTREAM_INFLIGHT", 2_000),
-		MaxIdleConnsPerHost: p.Integer("UPSTREAM_MAX_IDLE_PER_HOST", 256),
+		MaxIdleConns:        p.Integer("UPSTREAM_MAX_IDLE", 256),
 		MaxHeaderBytes:      p.Integer("MAX_HEADER_BYTES", 64<<10),
 		ReadHeaderTimeout:   p.Duration("READ_HEADER_TIMEOUT", 10*time.Second),
 		// Above the 60s idle timeout common to cloud load balancers, so the
@@ -149,7 +148,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 	}
 	p.clientIP(c)
 	p.trustedProxies(c)
-	p.upstreams(c)
+	p.upstream(c)
 	if s := p.Str("ADMIN_URL", ""); s != "" {
 		u, err := url.Parse(s)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -187,6 +186,12 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		default:
 			c.ServiceToken = strings.TrimSpace(string(b))
 		}
+	}
+	// Admin counts an edge toward fleet_size for a minute after its last
+	// report, and local fallback limits divide by fleet_size. A longer
+	// interval would drop edges from the count and loosen every limit.
+	if c.StatsInterval > 30*time.Second {
+		p.Fail("STATS_INTERVAL", "must be at most 30s, so a missed report keeps the edge in admin's fleet count")
 	}
 	if c.AdminURL != nil && c.ServiceToken == "" {
 		p.Fail("EDGE_SERVICE_TOKEN", "is required with ADMIN_URL")
@@ -253,31 +258,21 @@ func (p *envParser) trustedProxies(c *Config) {
 	}
 }
 
-func (p *envParser) upstreams(c *Config) {
-	c.Upstreams = map[string]*url.URL{}
-	c.HostUpstream = map[string]string{}
-	// UPSTREAMS=name=http://host:port,...
-	for _, pair := range p.List("UPSTREAMS") {
-		name, raw, _ := strings.Cut(pair, "=")
-		u, err := url.Parse(raw)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-			p.Fail("UPSTREAMS", fmt.Sprintf("%q must be name=http(s)://host[:port][/path]", pair))
-			continue
+func (p *envParser) upstream(c *Config) {
+	u, err := url.Parse(p.Str("UPSTREAM_URL", ""))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		p.Fail("UPSTREAM_URL", "is required: the http(s)://host[:port][/path] of the load balancer or gateway that routes your apps")
+		return
+	}
+	if u.Port() == "" {
+		// Spelled out, so the dialer and TLS naming use one port.
+		port := "80"
+		if u.Scheme == "https" {
+			port = "443"
 		}
-		c.Upstreams[name] = u
+		u.Host = net.JoinHostPort(u.Hostname(), port)
 	}
-	if len(c.Upstreams) == 0 {
-		p.Fail("UPSTREAMS", "needs at least one name=URL")
-	}
-	// UPSTREAM_HOSTS=host=name,...
-	for _, pair := range p.List("UPSTREAM_HOSTS") {
-		host, name, _ := strings.Cut(pair, "=")
-		if _, ok := c.Upstreams[name]; !ok || host == "" {
-			p.Fail("UPSTREAM_HOSTS", fmt.Sprintf("%q must be host=<name from UPSTREAMS>", pair))
-			continue
-		}
-		c.HostUpstream[strings.ToLower(host)] = name
-	}
+	c.Upstream = u
 }
 
 // LoadDeployment reads only what snapshot validation needs, from the same
@@ -287,7 +282,6 @@ func LoadDeployment(getenv func(string) string) (snapshot.Deployment, error) {
 	p := &envParser{envparse.Parser{Get: getenv}}
 	c := &Config{AllowRegex: p.Bool("ALLOW_REGEX"), IngressSecretHeader: p.Str("INGRESS_SECRET_HEADER", "")}
 	p.clientIP(c)
-	p.upstreams(c)
 	if err := p.Err(); err != nil {
 		return snapshot.Deployment{}, err
 	}
@@ -297,9 +291,6 @@ func LoadDeployment(getenv func(string) string) (snapshot.Deployment, error) {
 // Deployment is what snapshot validation needs to know about this deployment.
 func (c *Config) Deployment() snapshot.Deployment {
 	d := snapshot.Deployment{AllowRegex: c.AllowRegex}
-	for name := range c.Upstreams {
-		d.Upstreams = append(d.Upstreams, name)
-	}
 	for f, h := range c.Viewer {
 		d.ViewerFields = append(d.ViewerFields, f)
 		d.SourceHeaders = append(d.SourceHeaders, h)
@@ -310,7 +301,6 @@ func (c *Config) Deployment() snapshot.Deployment {
 	if c.IngressSecretHeader != "" {
 		d.SourceHeaders = append(d.SourceHeaders, c.IngressSecretHeader)
 	}
-	slices.Sort(d.Upstreams)
 	slices.Sort(d.ViewerFields)
 	return d
 }

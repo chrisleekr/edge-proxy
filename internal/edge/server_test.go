@@ -46,7 +46,7 @@ func TestInternalEndpoints(t *testing.T) {
 	if code, _ := get("/readyz"); code != 200 {
 		t.Fatal("not ready with a snapshot")
 	}
-	h.do("GET", "/a%2Fb", nil).Body.Close()
+	h.do("GET", "/a%5Cb", nil).Body.Close()
 	_, body := get("/metrics")
 	for _, want := range []string{`edge_rejected_total{reason="path"} 1`, `edge_requests_total{class="4xx"} 1`, "edge_snapshot_version 4", "edge_ready 1", `edge_requests_total{class="none"} 0`} {
 		if !strings.Contains(body, want) {

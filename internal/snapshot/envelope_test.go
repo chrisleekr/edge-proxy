@@ -34,12 +34,21 @@ func TestCompileWarns(t *testing.T) {
 		}, "request_header_rules[1].ops[3].from", "X-Old can be dropped"},
 		{"rule overwritten by a later catch-all", func(c *Config) {
 			c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "catch-all", Expression: expr.True(), Settings: Settings{
-				Auth: &AuthSetting{Mode: "none"}, CORSPolicy: new(""), Upstream: new("web"), UpstreamTimeout: new(dur("5s")),
+				Auth: &AuthSetting{Mode: "none"}, CORSPolicy: new(""), UpstreamTimeout: new(dur("5s")),
 			}})
 		}, "config_rules[0]", "every setting is overwritten"},
 		{"host that is two things at once", func(c *Config) {
 			c.ConfigRules[0].Expression = mustParse(`http.host eq "a.example.com" and (ssl or http.host eq "b.example.com" and http.host eq "c.example.com")`)
 		}, "config_rules[0].expression", "can never all be true"},
+		{"CORS policy no rule selects", func(c *Config) {
+			c.ConfigRules[0].Settings.CORSPolicy = nil
+		}, `global.cors_policies["app"]`, "no config rule selects it"},
+		{"issuer no rule accepts", func(c *Config) {
+			c.ConfigRules[0].Settings.Auth.Accepted = []string{"corp"}
+		}, "auth.issuers[1]", "no config rule accepts it"},
+		{"template no response kind uses", func(c *Config) {
+			c.ConfigRules[1].Settings.Responses = nil
+		}, `global.responses["rate_limited_html"]`, "nothing sends it"},
 		{"limit skipped by sending a header", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and http.request.headers["x-internal"] ne "1"`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.request.headers"},
@@ -133,6 +142,40 @@ func TestSchema1EncodingNeverChanges(t *testing.T) {
 	}
 	if !bytes.Equal(got, want.Bytes()) {
 		t.Fatalf("a schema 1 envelope encodes differently, so edges not yet upgraded would reject it:\n got %s\nwant %s", got, want.Bytes())
+	}
+}
+
+// A schema 1 policy saved before the edge had a single upstream still loads:
+// its 421 "misdirected" response is dropped from the compiled copy, and the
+// stored config is left as it was so admin can keep serving it unchanged.
+func TestSchema1MisdirectedResponseIsDropped(t *testing.T) {
+	c := validConfig()
+	c.Schema = 1
+	c.Global.Responses["misdirected"] = Response{Status: 421, ContentType: "application/problem+json", Body: `{"status":421}`}
+	c.Global.Defaults.Responses["misdirected"] = "misdirected"
+	c.ConfigRules[0].Settings.Responses = map[string]string{"misdirected": "misdirected"}
+	out, _, errs := Compile(c, testDeployment)
+	if errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	if out.Config.Schema != 2 || out.Config.Global.Defaults.Responses["misdirected"] != "" || out.Config.ConfigRules[0].Settings.Responses["misdirected"] != "" {
+		t.Fatalf("compiled copy still has schema 1 parts: %+v", out.Config.Global.Defaults.Responses)
+	}
+	if c.Schema != 1 || c.Global.Defaults.Responses["misdirected"] == "" || c.ConfigRules[0].Settings.Responses["misdirected"] == "" {
+		t.Fatal("Compile changed the stored config")
+	}
+}
+
+// A schema 1 rule that sent requests to a named upstream can't be honored by
+// an edge with one upstream, so the version is refused rather than rerouted.
+func TestSchema1UpstreamRuleIsRefused(t *testing.T) {
+	b, err := os.ReadFile("testdata/schema1-envelope.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = bytes.Replace(b, []byte(`"cors_policy": "app",`), []byte(`"cors_policy": "app", "upstream": "orders",`), 1)
+	if _, err := Decode(bytes.NewReader(b)); err == nil || !strings.Contains(err.Error(), `unknown field "upstream"`) {
+		t.Fatalf("error = %v, want unknown field upstream", err)
 	}
 }
 

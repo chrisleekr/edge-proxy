@@ -208,6 +208,9 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 		}
 		if shadow {
 			rs.wouldLimit.Add(1)
+			if sampleTop() {
+				st.ver.stats.wouldTop.add(c.key, c.rule.ID, st.display(c))
+			}
 			continue
 		}
 		rs.limited.Add(1)

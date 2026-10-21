@@ -2,7 +2,6 @@ package edge
 
 import (
 	"maps"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -22,8 +21,7 @@ func cloudfrontEnv() map[string]string {
 	return map[string]string{
 		"CLIENT_IP_SOURCE":    "cloudfront",
 		"TRUSTED_PROXIES":     "10.0.0.0/8, 192.0.2.10",
-		"UPSTREAMS":           "app=http://app:8080,admin=https://admin.internal/base",
-		"UPSTREAM_HOSTS":      "api.example.com=app,Admin.Example.com=admin",
+		"UPSTREAM_URL":        "https://lb.internal/base",
 		"ADMIN_URL":           "http://edge-admin:8081",
 		"EDGE_SERVICE_TOKEN":  "t0k",
 		"SNAPSHOT_CACHE_PATH": "/var/cache/edge/snapshot.json",
@@ -43,14 +41,14 @@ func TestLoadConfigCloudFront(t *testing.T) {
 	if c.Viewer["ip.src.country"] != "CloudFront-Viewer-Country" || len(c.TrustedProxies) != 2 || c.TrustedProxies[1].Bits() != 32 {
 		t.Errorf("viewer %v, trusted %v", c.Viewer, c.TrustedProxies)
 	}
-	if c.HostUpstream["admin.example.com"] != "admin" || c.Upstreams["admin"].Path != "/base" {
-		t.Errorf("upstreams %v %v", c.HostUpstream, c.Upstreams)
+	if c.Upstream.Host != "lb.internal:443" || c.Upstream.Path != "/base" {
+		t.Errorf("upstream %v", c.Upstream)
 	}
 	if c.BootstrapMaxAge != 7*24*time.Hour || c.PollInterval != 5*time.Second || c.IdleTimeout != 75*time.Second || c.LogSampleRate != 1 || c.Instance == "" {
 		t.Errorf("defaults not applied: %+v", c)
 	}
 	d := c.Deployment()
-	if !reflect.DeepEqual(d.Upstreams, []string{"admin", "app"}) || len(d.ViewerFields) != 4 || len(d.SourceHeaders) != 5 {
+	if len(d.ViewerFields) != 4 || len(d.SourceHeaders) != 5 {
 		t.Errorf("Deployment = %+v", d)
 	}
 }
@@ -158,9 +156,10 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"viewer header pair without a header", map[string]string{"VIEWER_HEADERS": "ip.src.country"}, "must be field=Header"},
 		{"viewer header for a request field", map[string]string{"VIEWER_HEADERS": "http.host=X-Host"}, `"http.host" is not a viewer field`},
 		{"viewer headers with remote_addr", map[string]string{"CLIENT_IP_SOURCE": "remote_addr", "VIEWER_HEADERS": "ssl=X-Proto"}, "can't be used with remote_addr"},
-		{"upstream without a scheme", map[string]string{"UPSTREAMS": "app=app:8080"}, "must be name=http(s)://"},
-		{"no upstreams", map[string]string{"UPSTREAMS": "", "UPSTREAM_HOSTS": ""}, "UPSTREAMS: needs at least one"},
-		{"host mapped to an unknown upstream", map[string]string{"UPSTREAM_HOSTS": "api.example.com=web"}, "must be host=<name from UPSTREAMS>"},
+		{"upstream without a scheme", map[string]string{"UPSTREAM_URL": "lb:8080"}, "UPSTREAM_URL: is required"},
+		{"no upstream", map[string]string{"UPSTREAM_URL": ""}, "UPSTREAM_URL: is required"},
+		{"upstream with credentials", map[string]string{"UPSTREAM_URL": "https://u:s3cret@lb.internal"}, "UPSTREAM_URL: is required"},
+		{"stats interval too long for admin's fleet count", map[string]string{"STATS_INTERVAL": "1m"}, "STATS_INTERVAL: must be at most 30s"},
 		{"admin URL that isn't http", map[string]string{"ADMIN_URL": "ftp://admin"}, "ADMIN_URL: must be an http or https URL"},
 		{"no snapshot source at all", map[string]string{"ADMIN_URL": "", "SNAPSHOT_CACHE_PATH": "", "BOOTSTRAP_PATH": ""}, "set at least one of"},
 		{"admin URL without a token", map[string]string{"EDGE_SERVICE_TOKEN": ""}, "EDGE_SERVICE_TOKEN: is required"},
@@ -194,20 +193,34 @@ func TestLoadConfigRejects(t *testing.T) {
 	}
 }
 
+// An upstream URL without a port gets its scheme's, so the dialer and the
+// TLS server name agree on one.
+func TestUpstreamPortDefaultsByScheme(t *testing.T) {
+	for raw, want := range map[string]string{"http://lb.internal": "lb.internal:80", "https://lb.internal": "lb.internal:443", "https://lb.internal:8443": "lb.internal:8443"} {
+		e := cloudfrontEnv()
+		e["UPSTREAM_URL"] = raw
+		c, err := LoadConfig(env(e))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Upstream.Host != want {
+			t.Errorf("%s: host %s, want %s", raw, c.Upstream.Host, want)
+		}
+	}
+}
+
 // Admin validates against the same deployment variables as its edges.
 func TestLoadDeployment(t *testing.T) {
 	d, err := LoadDeployment(env(map[string]string{
 		"CLIENT_IP_SOURCE": "cloudfront", "TRUSTED_PROXIES": "10.0.0.0/8",
-		"UPSTREAMS": "app=http://app:8080,admin=http://admin:8080", "INGRESS_SECRET_HEADER": "X-Origin-Secret", "ALLOW_REGEX": "true",
+		"INGRESS_SECRET_HEADER": "X-Origin-Secret", "ALLOW_REGEX": "true",
 	}))
-	if err != nil || !slices.Equal(d.Upstreams, []string{"admin", "app"}) || !d.AllowRegex || !slices.Contains(d.SourceHeaders, "X-Origin-Secret") || !slices.Contains(d.ViewerFields, "ip.src.country") {
+	if err != nil || !d.AllowRegex || !slices.Contains(d.SourceHeaders, "X-Origin-Secret") || !slices.Contains(d.ViewerFields, "ip.src.country") {
 		t.Fatalf("deployment %+v, %v", d, err)
 	}
-	// Admin never sees edge traffic, so it doesn't need the trusted proxies.
-	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudfront", "UPSTREAMS": "app=http://app:8080"})); err != nil {
-		t.Fatalf("without TRUSTED_PROXIES: %v", err)
-	}
-	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudfront"})); err == nil || !strings.Contains(err.Error(), "UPSTREAMS") {
-		t.Fatalf("missing upstreams: %v", err)
+	// Admin never sees edge traffic, so it needs neither the trusted proxies
+	// nor the upstream.
+	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudfront"})); err != nil {
+		t.Fatalf("without TRUSTED_PROXIES and UPSTREAM_URL: %v", err)
 	}
 }

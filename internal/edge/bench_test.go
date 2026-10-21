@@ -36,13 +36,14 @@ func BenchmarkAllowPath(b *testing.B) {
 	}
 }
 
-// inMemoryEdge is a replica running c with in-memory upstreams, and a
+// inMemoryEdge is a replica running c with an in-memory upstream, and a
 // request to target from one CloudFront client.
 func inMemoryEdge(tb testing.TB, c *snapshot.Config, target string) (*Server, *http.Request) {
 	tb.Helper()
 	e := cloudfrontEnv()
 	e["TRUSTED_PROXIES"] = "192.0.2.0/24"
 	e["LOG_SAMPLE_RATE"] = "0"
+	e["UPSTREAM_URL"] = "https://lb.internal"
 	cfg, err := LoadConfig(env(e))
 	if err != nil {
 		tb.Fatal(err)
@@ -51,9 +52,7 @@ func inMemoryEdge(tb testing.TB, c *snapshot.Config, target string) (*Server, *h
 	if err := s.poller.apply(envelope(c), "admin", 0); err != nil {
 		tb.Fatal(err)
 	}
-	for _, up := range s.edge.upstreams {
-		up.transport = cannedTransport{}
-	}
+	s.edge.rp.Transport = cannedTransport{}
 	req := httptest.NewRequest("GET", "http://api.example.com"+target, nil)
 	req.RemoteAddr = "192.0.2.1:5000"
 	req.Header.Set("CloudFront-Viewer-Address", "198.51.100.7:40000")

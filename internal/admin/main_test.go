@@ -34,7 +34,7 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if c.ListenAddr != ":8081" || c.SessionIdle != 10*time.Minute || c.SessionMaxAge != 12*time.Hour ||
 		!c.Blocklist["password123456789"] || !c.Blocklist["hunter2hunter2hunter2"] || len(c.Blocklist) != 2 ||
-		strings.Join(c.Audit.Order, ",") != "k0,k1" || c.Audit.Current != "k1" || len(c.JWKSAllowedHosts) != 2 || len(c.Deployment.Upstreams) != 2 ||
+		strings.Join(c.Audit.Order, ",") != "k0,k1" || c.Audit.Current != "k1" || len(c.JWKSAllowedHosts) != 2 || len(c.Deployment.ViewerFields) == 0 ||
 		len(c.TrustedProxies) != 2 || c.TrustedProxies[0] != netip.MustParsePrefix("10.0.0.5/32") {
 		t.Fatalf("config %+v", c)
 	}
@@ -53,7 +53,7 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"missing blocklist", map[string]string{"PASSWORD_BLOCKLIST_PATH": "/nonexistent/blocklist"}, "PASSWORD_BLOCKLIST_PATH"},
 		{"bad session timeout", map[string]string{"SESSION_MAX_AGE": "12"}, "SESSION_MAX_AGE"},
 		{"admin proxy that isn't an IP", map[string]string{"ADMIN_TRUSTED_PROXIES": "proxy.internal"}, `"proxy.internal" is not an IP or CIDR`},
-		{"edge deployment invalid", map[string]string{"UPSTREAMS": ""}, "UPSTREAMS"},
+		{"edge deployment invalid", map[string]string{"CLIENT_IP_SOURCE": "akamai"}, "CLIENT_IP_SOURCE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,7 +121,7 @@ func TestMainRejects(t *testing.T) {
 		{"migrate without the owner URL", []string{"migrate"}, nil, "", "MIGRATION_DATABASE_URL"},
 		{"migrate with a bad URL keeps the password out", []string{"migrate"}, map[string]string{"MIGRATION_DATABASE_URL": "postgres://u:s3cret@[bad/db", "DB_RUNTIME_ROLE": "app"}, "", "invalid connection string"},
 		{"create-user without a role", []string{"create-user", "root"}, baseEnv(db.App), "", "usage"},
-		{"create-user with a weak password", []string{"create-user", "root", "admin"}, baseEnv(db.App), "short\n", "Invalid user"},
+		{"create-user with a short password names the reason", []string{"create-user", "root", "admin"}, baseEnv(db.App), "kq7vzm2xwp\n", "Invalid user: password: password must be at least 15 characters"},
 		{"create-user without config", []string{"create-user", "root", "admin"}, nil, "", "DATABASE_URL"},
 		{"serve without config", nil, nil, "", "DATABASE_URL"},
 		{"serve with a bad database URL", nil, baseEnv("postgres://u:s3cret@[bad/db"), "", "invalid connection string"},

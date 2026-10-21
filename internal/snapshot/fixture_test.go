@@ -9,9 +9,8 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 )
 
-// testDeployment is a CloudFront-style deployment with two upstreams.
+// testDeployment is a CloudFront-style deployment.
 var testDeployment = Deployment{
-	Upstreams:     []string{"orders", "web"},
 	ViewerFields:  []string{"ip.src.country", "ip.src.asnum", "ssl", "http.request.version"},
 	SourceHeaders: []string{"CloudFront-Viewer-Address", "CloudFront-Viewer-Country", "X-Origin-Secret"},
 }
@@ -47,7 +46,7 @@ func validConfig() *Config {
 	responses["rate_limited_json"] = Response{Status: 429, ContentType: "application/json", Body: `{"error":"rate_limited","retry_after":{{retry_after}},"request_id":"{{request_id}}"}`}
 
 	return &Config{
-		Schema:  1,
+		Schema:  SupportedSchema,
 		Version: 7,
 		Global: Global{
 			Backstop: Backstop{Limit: 100, Period: dur("1s"), Burst: 200, MaxEntries: 100_000},
@@ -88,7 +87,6 @@ func validConfig() *Config {
 				Settings: Settings{
 					Auth:            &AuthSetting{Mode: "required", Accepted: []string{"corp", "corp-new"}},
 					CORSPolicy:      new("app"),
-					Upstream:        new("orders"),
 					UpstreamTimeout: new(dur("10s")),
 				},
 			},
@@ -104,6 +102,7 @@ func validConfig() *Config {
 					Auth:             &AuthSetting{Mode: "optional"},
 				},
 			},
+			{ID: "public-feed", Expression: mustParse(`starts_with(http.request.uri.path, "/v1/public/")`), Settings: Settings{CORSPolicy: new("public")}},
 		},
 		RateLimitRules: []RateLimitRule{
 			{ID: "site-per-ip", Expression: expr.True(), Algorithm: "token_bucket", Limit: 300, Period: dur("1m"), Burst: 600, Key: []string{"ip"}, OnMissingKey: "fallback_ip", Action: "block", FailMode: "local"},
