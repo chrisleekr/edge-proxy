@@ -43,10 +43,12 @@ if [ "${cpus}" -lt 8 ]; then
   exit 1
 fi
 # The container limits add up to about 5 GiB and k6 may grow to its 8 GiB
-# GOMEMLIMIT; below that, an OOM kill would read as a failed step.
+# GOMEMLIMIT; below that, an OOM kill would read as a failed step. The VM
+# kernel reports a few hundred MiB less than the size it was given, so the
+# floor sits under the 16 GiB the docs ask for.
 mem="$(docker info --format '{{.MemTotal}}')"
 if [ "${mem}" -lt $((14 * 1024 * 1024 * 1024)) ]; then
-  echo "The Docker VM has $((mem / 1024 / 1024)) MiB of memory; the capacity run needs at least 14 GiB." >&2
+  echo "The Docker VM has $((mem / 1024 / 1024)) MiB of memory; set the Docker VM to 16 GiB." >&2
   exit 1
 fi
 

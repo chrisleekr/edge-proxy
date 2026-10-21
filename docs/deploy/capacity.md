@@ -25,7 +25,7 @@ Run it on hardware like your production edges, with k6 on a separate machine if 
 BUDGET_MS=10 DURATION=60s START=1000 make capacity-max
 ```
 
-It runs one edge as a small cloud task (2 vCPU pinned, 2 GiB) in front of four mock microservices, with k6 on its own cores and the mocks sharing one core, 0.25 CPU each (`loadtest/compose.capacity.yaml`, needs a Docker VM with at least 8 CPUs and 14 GiB of memory):
+It runs one edge as a small cloud task (2 vCPU pinned, 2 GiB) in front of four mock microservices, with k6 on its own cores and the mocks sharing one core, 0.25 CPU each (`loadtest/compose.capacity.yaml`, needs a Docker VM with at least 8 CPUs and 16 GiB of memory):
 
 | Service | Routes |
 |---|---|
