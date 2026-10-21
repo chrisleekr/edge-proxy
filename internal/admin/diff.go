@@ -6,6 +6,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
@@ -169,17 +170,37 @@ func compare(path string, a, b any, out *[]FieldChange) {
 	}
 }
 
-// summary is the change count shown on a version, e.g. "+2 rules, ~1 changed, -0".
+// summary is the change count shown on a version, in words, such as
+// "2 rules added, 1 rule changed".
 func (d Diff) summary() string {
 	var add, chg, rm int
+	var reordered bool
 	for _, pd := range d.Phases {
 		add, chg, rm = add+len(pd.Added), chg+len(pd.Changed), rm+len(pd.Removed)
+		reordered = reordered || pd.Reordered
 	}
-	s := fmt.Sprintf("+%d rules, ~%d changed, -%d", add, chg, rm)
-	if len(d.Sections) > 0 {
-		s += fmt.Sprintf(", %d settings changed", len(d.Sections))
+	var parts []string
+	count := func(n int, what, done string) {
+		if n == 1 {
+			parts = append(parts, "1 "+what+" "+done)
+		} else if n > 1 {
+			parts = append(parts, fmt.Sprintf("%d %ss %s", n, what, done))
+		}
 	}
-	return s
+	// The same order and words as the UI's describe, so the version list and
+	// the draft status agree. Order decides which rules run, so a reorder alone
+	// is a change.
+	count(add, "rule", "added")
+	count(rm, "rule", "removed")
+	count(chg, "rule", "changed")
+	if reordered {
+		parts = append(parts, "rules reordered")
+	}
+	count(len(d.Sections), "setting", "changed")
+	if len(parts) == 0 {
+		return "no changes"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // rebase applies the draft's changes since base on top of active,

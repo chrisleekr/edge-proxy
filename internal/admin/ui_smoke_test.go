@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"testing"
@@ -24,6 +26,24 @@ func TestUISmoke(t *testing.T) {
 	h.s.cfg.UI = ui
 	h.s.uiRoutes()
 	h.user("smoke", "admin")
+
+	// Access lines for the Routes page: a rate limited login, and blog
+	// posts enough alike for a grouping suggestion.
+	lines := []string{}
+	for i := range 10 {
+		if i < 2 {
+			lines = append(lines, access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login"))
+			continue
+		}
+		lines = append(lines, access("POST", "api.example.com", "/login"))
+	}
+	for i := range 22 {
+		lines = append(lines, access("GET", "www.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i), "edge.query_keys", []string{"utm_source"}))
+	}
+	status(t, h.shipper().post(lines...), http.StatusAccepted)
+	if err := h.s.flushRoutes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := exec.Command("npx", "playwright", "test")
 	cmd.Dir = "../../web/admin"

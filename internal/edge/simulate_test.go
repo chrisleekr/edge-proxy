@@ -16,7 +16,7 @@ import (
 
 func compiled(t *testing.T, c *snapshot.Config) *snapshot.Compiled {
 	t.Helper()
-	out, _, errs := snapshot.Compile(c, snapshot.Deployment{Upstreams: []string{"app", "admin"}, ViewerFields: []string{"ip.src.country"}})
+	out, _, errs := snapshot.Compile(c, snapshot.Deployment{ViewerFields: []string{"ip.src.country"}})
 	if errs != nil {
 		t.Fatal(expr.Issues(errs))
 	}
@@ -48,7 +48,7 @@ func TestSimulate(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"admin-route", "au-auth"}
-	if !reflect.DeepEqual(got.ConfigRules, want) || got.Settings.Upstream != "admin" || got.Settings.AuthMode != "required" || !reflect.DeepEqual(got.Settings.Accepted, []string{"corp"}) || got.Settings.UpstreamTimeout != dur(time.Second) {
+	if !reflect.DeepEqual(got.ConfigRules, want) || got.Settings.AuthMode != "required" || !reflect.DeepEqual(got.Settings.Accepted, []string{"corp"}) || got.Settings.UpstreamTimeout != dur(time.Second) {
 		t.Fatalf("config phase = %+v", got)
 	}
 	wantRL := []string{"site", "tenant", "admin-0", "admin-1", "admin-2", "admin-3"}
@@ -68,7 +68,7 @@ func TestSimulate(t *testing.T) {
 		req  SimRequest
 		want string
 	}{
-		{SimRequest{Method: "GET", Host: "h", Target: "/a%2Fb", IP: "1.2.3.4"}, "path"},
+		{SimRequest{Method: "GET", Host: "h", Target: "/a%5Cb", IP: "1.2.3.4"}, "path"},
 		{SimRequest{Method: "get", Host: "h", Target: "/", IP: "1.2.3.4"}, "method"},
 	} {
 		if got, err := Simulate(cc, tc.req); err != nil || got.Rejected != tc.want {
@@ -108,7 +108,7 @@ func TestSimulateFollowsTheLivePipeline(t *testing.T) {
 		{ID: "site", Expression: expr.True(), Algorithm: "fixed_window", Limit: 1, Period: dur(time.Second), Key: []string{"ip"}, OnMissingKey: "skip", Action: "block", FailMode: "open"},
 		{ID: "per-key", Expression: mustParse(`starts_with(http.request.uri.path, "/keyed")`), Algorithm: "fixed_window", Limit: 1, Period: dur(time.Second), Key: []string{"ip", "header:x-api-key"}, OnMissingKey: "reject", Action: "block", FailMode: "open"},
 	}
-	cc, _, errs := snapshot.Compile(c, snapshot.Deployment{Upstreams: []string{"app", "admin"}, ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"cdn-country", "true-client-ip"}})
+	cc, _, errs := snapshot.Compile(c, snapshot.Deployment{ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"cdn-country", "true-client-ip"}})
 	if errs != nil {
 		t.Fatal(expr.Issues(errs))
 	}

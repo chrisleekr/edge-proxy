@@ -184,7 +184,6 @@
             ]
           },
           "cors_policy": "app",
-          "upstream": "orders",
           "upstream_timeout": "10s"
         }
       },
@@ -589,7 +588,6 @@
             ]
           },
           "cors_policy": "app",
-          "upstream": "orders",
           "upstream_timeout": "10s"
         }
       },

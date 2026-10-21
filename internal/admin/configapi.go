@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/chrisleekr/edge-proxy/internal/admindb"
 	"github.com/chrisleekr/edge-proxy/internal/expr"
+	"github.com/chrisleekr/edge-proxy/internal/jwks"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -29,6 +33,7 @@ func (s *Server) configRoutes() {
 	s.handle("POST /api/expr/validate", "config.read", s.exprValidate)
 	s.handle("GET /api/draft", "config.read", s.getDraft)
 	s.handle("PUT /api/draft", "config.write", s.putDraft)
+	s.handle("POST /api/draft/check", "config.read", s.checkDraft)
 	s.handle("GET /api/draft/rebase", "config.read", s.previewRebase)
 	s.handle("POST /api/draft/rebase", "config.write", s.applyRebase)
 	s.handle("POST /api/simulate", "config.test", s.simulate)
@@ -78,7 +83,44 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 			ops = append(ops, o)
 		}
 	}
-	return writeJSON(w, http.StatusOK, map[string]any{"fields": fields, "operators": ops})
+	type keyKind struct {
+		Name  string `json:"name"`
+		Named bool   `json:"named"`
+	}
+	var kinds []keyKind
+	for _, k := range snapshot.KeyKinds {
+		kinds = append(kinds, keyKind{k, slices.Contains(snapshot.NamedKeyKinds, k)})
+	}
+	// Each kind with the status its template must use, so the editor offers
+	// only templates that fit.
+	type kindStatus struct {
+		Name   string `json:"name"`
+		Status int    `json:"status"`
+	}
+	statuses := snapshot.ResponseStatuses()
+	var kindStatuses []kindStatus
+	for _, k := range slices.Sorted(maps.Keys(statuses)) {
+		kindStatuses = append(kindStatuses, kindStatus{k, statuses[k]})
+	}
+	// The rule editor offers these as choices, so none can be misspelled.
+	rules := map[string]any{
+		"algorithms":      snapshot.Algorithms,
+		"key_kinds":       kinds,
+		"max_key_parts":   snapshot.MaxKeyParts,
+		"on_missing_keys": snapshot.OnMissingKeys,
+		"actions":         snapshot.Actions,
+		"fail_modes":      snapshot.FailModes,
+		"auth_modes":      snapshot.AuthModes,
+		"forward_modes":   snapshot.ForwardModes,
+		"header_ops":      snapshot.HeaderOps,
+		"response_kinds":  kindStatuses,
+		"content_types":   snapshot.ContentTypes,
+		"jwt_algorithms":  snapshot.JWTAlgorithms,
+		// RFC 9110 §9 methods and PATCH (RFC 5789), for CORS and Simulate.
+		// Validation takes any uppercase token; these are what a form offers.
+		"methods": []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+	}
+	return writeJSON(w, http.StatusOK, map[string]any{"fields": fields, "operators": ops, "rules": rules})
 }
 
 func (s *Server) exprParse(w http.ResponseWriter, r *http.Request, _ *principal) error {
@@ -328,7 +370,7 @@ func (s *Server) putDraft(w http.ResponseWriter, r *http.Request, p *principal) 
 		return err
 	}
 	var in draftIn
-	if err := readJSON(w, r, &in); err != nil {
+	if err := readDraft(w, r, &in); err != nil {
 		return err
 	}
 	saved, warns, results, err := s.saveDraft(r.Context(), p, rev, in, s.keepBase(r.Context()), "config.save", nil)
@@ -336,6 +378,89 @@ func (s *Server) putDraft(w http.ResponseWriter, r *http.Request, p *principal) 
 		return err
 	}
 	return s.draftSaved(w, r.Context(), in.Config, saved, warns, results)
+}
+
+// checkDraft validates a config as a save would, without saving it, so the
+// rule editor can show each problem by its field before the rule is applied.
+func (s *Server) checkDraft(w http.ResponseWriter, r *http.Request, _ *principal) error {
+	var in draftIn
+	err := readDraft(w, r, &in)
+	if err == nil && in.Config == nil {
+		err = fail(http.StatusUnprocessableEntity, "config is required")
+	}
+	var warns []expr.Issue
+	if err == nil {
+		_, warns, err = s.validate(r.Context(), s.db, in.Config, nil)
+	}
+	// Problems with a path are the answer; anything else is a failed request.
+	if p, ok := errors.AsType[*problem](err); ok && p.Errors != nil {
+		return writeJSON(w, http.StatusOK, map[string]any{"errors": p.Errors, "warnings": orEmpty(warns)})
+	}
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, map[string]any{"errors": []expr.Issue{}, "warnings": orEmpty(warns)})
+}
+
+// readDraft decodes a draft like readJSON. A body that does not decode also
+// gets the path of the config section or rule at fault, so the editor can
+// link to it: the decoder's own message names neither.
+func readDraft(w http.ResponseWriter, r *http.Request, in *draftIn) error {
+	const msg = "invalid JSON body"
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return fail(http.StatusRequestEntityTooLarge, msg+": body is too large")
+	}
+	if err != nil {
+		return fail(http.StatusBadRequest, msg+": "+err.Error())
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	err = decodeOne(dec, in, msg)
+	// The issue repeats the decoder's message, so the detail need not.
+	if p, ok := errors.AsType[*problem](err); ok {
+		if p.Errors = configIssue(body); p.Errors != nil {
+			p.Detail = msg
+		}
+	}
+	return err
+}
+
+// configIssue decodes each config section, and each rule of a rule list,
+// on its own and reports the first that fails.
+func configIssue(body []byte) []expr.Issue {
+	var in struct {
+		Config map[string]json.RawMessage `json:"config"`
+	}
+	if json.Unmarshal(body, &in) != nil {
+		return nil
+	}
+	for _, k := range slices.Sorted(maps.Keys(in.Config)) {
+		err := decodeSection(k, in.Config[k])
+		if err == nil {
+			continue
+		}
+		var items []json.RawMessage
+		if json.Unmarshal(in.Config[k], &items) == nil {
+			for i, item := range items {
+				if err := decodeSection(k, append(append([]byte("["), item...), ']')); err != nil {
+					return []expr.Issue{{Path: fmt.Sprintf("config.%s[%d]", k, i), Msg: strings.TrimPrefix(err.Error(), "json: ")}}
+				}
+			}
+		}
+		return []expr.Issue{{Path: "config." + k, Msg: strings.TrimPrefix(err.Error(), "json: ")}}
+	}
+	return nil
+}
+
+func decodeSection(key string, v json.RawMessage) error {
+	b, err := json.Marshal(map[string]json.RawMessage{key: v})
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	return dec.Decode(new(snapshot.Config))
 }
 
 // draftSaved answers every draft save. It fetches keys for issuers that
@@ -362,6 +487,12 @@ func (s *Server) simulate(w http.ResponseWriter, r *http.Request, _ *principal) 
 	}
 	res, err := simulate(c, in.Request)
 	if err != nil {
+		// The simulator names the field first, as "ip: ...". The form shows an
+		// IP problem under its field, in words rather than the parser's.
+		if strings.HasPrefix(err.Error(), "ip: ") {
+			return &problem{Status: http.StatusUnprocessableEntity, Title: "Request can't be simulated",
+				Errors: []expr.Issue{{Path: "request.ip", Msg: "must be an IP address, such as 203.0.113.7 or 2001:db8::1"}}}
+		}
 		return fail(http.StatusUnprocessableEntity, err.Error())
 	}
 	return writeJSON(w, http.StatusOK, res)
@@ -422,14 +553,15 @@ type versionRow struct {
 	// GuardOverride replaces the guard settings while this version is judged.
 	GuardOverride       *GuardSettings `json:"guard_override"`
 	GuardOverrideReason *string        `json:"guard_override_reason"`
+	AbortReason         *string        `json:"abort_reason"`
 }
 
-const versionCols = "version, author, published_at, message, source, based_on, status, change_summary, override_reason, config, tests, test_results, guard_outcome, guard_override, guard_override_reason"
+const versionCols = "version, author, published_at, message, source, based_on, status, change_summary, override_reason, config, tests, test_results, guard_outcome, guard_override, guard_override_reason, abort_reason"
 
 func scanVersion(row pgx.Row) (*versionRow, error) {
 	var v versionRow
 	err := row.Scan(&v.Version, &v.Author, &v.PublishedAt, &v.Message, &v.Source, &v.BasedOn, &v.Status, &v.ChangeSummary,
-		&v.OverrideReason, &v.Config, &v.Tests, &v.TestResults, &v.GuardOutcome, &v.GuardOverride, &v.GuardOverrideReason)
+		&v.OverrideReason, &v.Config, &v.Tests, &v.TestResults, &v.GuardOutcome, &v.GuardOverride, &v.GuardOverrideReason, &v.AbortReason)
 	return &v, err
 }
 
@@ -483,7 +615,7 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 		return 0, errForbidden
 	}
 	if req.canary != 0 && !validPercent(req.canary) {
-		return 0, fail(http.StatusUnprocessableEntity, "canary_percent must be 0.01 to 99.99")
+		return 0, fail(http.StatusUnprocessableEntity, "canary_percent must be a number from 0.01 to 99.99, or left out for all traffic")
 	}
 	if req.guard != nil {
 		errs := req.guard.problems()
@@ -566,13 +698,19 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 		details["based_on"] = *req.basedOn
 	}
 	if req.guard != nil {
-		details["guard_override"], details["guard_override_reason"] = req.guard, req.guardWhy
+		// The saved settings beside the override, so the log can say what
+		// this publish changed rather than repeat every setting.
+		saved, err := loadGuard(ctx, tx)
+		if err != nil {
+			return 0, err
+		}
+		details["guard_settings"], details["guard_override"], details["guard_override_reason"] = saved, req.guard, req.guardWhy
 	}
 	if override != nil {
 		details["override_reason"] = *override
 		details["issuers_without_keys"] = missing
 	}
-	return v, admindb.Audit(ctx, tx, s.cfg.Audit, admindb.Event{Actor: p.actor, Action: publishActions[req.source], Target: fmt.Sprintf("version %d", v), Details: details})
+	return v, admindb.Audit(ctx, tx, s.cfg.Audit, s.now, admindb.Event{Actor: p.actor, Action: publishActions[req.source], Target: fmt.Sprintf("version %d", v), Details: details})
 }
 
 // issuersWithoutKeys lists issuers that a required-auth rule accepts and
@@ -606,15 +744,29 @@ func issuersWithoutKeys(ctx context.Context, q querier, c *snapshot.Config) ([]s
 	return missing, nil
 }
 
+// canaryPercent is a request's canary_percent. Left out, it is 0 (all
+// traffic). An explicit null is NaN, which validPercent refuses: a client
+// that sends null meant a canary, such as a UI encoding NaN from "5%", and
+// must not publish to all traffic instead.
+type canaryPercent float64
+
+func (c *canaryPercent) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*c = canaryPercent(math.NaN())
+		return nil
+	}
+	return json.Unmarshal(b, (*float64)(c))
+}
+
 func (s *Server) publish(w http.ResponseWriter, r *http.Request, p *principal) error {
 	rev, err := ifMatch(r)
 	if err != nil {
 		return err
 	}
 	var in struct {
-		Message        string  `json:"message"`
-		OverrideReason string  `json:"override_reason"`
-		CanaryPercent  float64 `json:"canary_percent"`
+		Message        string        `json:"message"`
+		OverrideReason string        `json:"override_reason"`
+		CanaryPercent  canaryPercent `json:"canary_percent"`
 		guardIn
 	}
 	if err := readJSON(w, r, &in); err != nil {
@@ -639,7 +791,7 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request, p *principal) e
 		if !samePtr(av, d.BaseVersion) {
 			return fail(http.StatusConflict, "the active version changed since this draft started; rebase the draft first")
 		}
-		v, err = s.publishTx(ctx, tx, p, publishReq{config: &d.Config, tests: d.Tests, message: in.Message, source: "manual", override: in.OverrideReason, canary: in.CanaryPercent,
+		v, err = s.publishTx(ctx, tx, p, publishReq{config: &d.Config, tests: d.Tests, message: in.Message, source: "manual", override: in.OverrideReason, canary: float64(in.CanaryPercent),
 			guard: in.Guard, guardWhy: in.GuardReason})
 		if err != nil {
 			return err
@@ -664,7 +816,7 @@ func pathVersion(r *http.Request, name string) (int64, error) {
 }
 
 func (s *Server) listVersions(w http.ResponseWriter, r *http.Request, _ *principal) error {
-	rows, err := s.db.Query(r.Context(), `SELECT version, author, published_at, message, source, based_on, status, change_summary, override_reason, guard_outcome
+	rows, err := s.db.Query(r.Context(), `SELECT version, author, published_at, message, source, based_on, status, change_summary, override_reason, guard_outcome, abort_reason
 		FROM config_versions ORDER BY version DESC`)
 	if err != nil {
 		return err
@@ -680,6 +832,7 @@ func (s *Server) listVersions(w http.ResponseWriter, r *http.Request, _ *princip
 		ChangeSummary  string          `json:"change_summary"`
 		OverrideReason *string         `json:"override_reason"`
 		GuardOutcome   json.RawMessage `json:"guard_outcome"`
+		AbortReason    *string         `json:"abort_reason"`
 	}
 	list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[item])
 	if err != nil {
@@ -713,7 +866,7 @@ func (s *Server) revert(w http.ResponseWriter, r *http.Request, p *principal) er
 		OverrideReason string `json:"override_reason"`
 		// Revert with canary, for an old version you'd rather stage.
 		// The default skips the canary.
-		CanaryPercent float64 `json:"canary_percent"`
+		CanaryPercent canaryPercent `json:"canary_percent"`
 		guardIn
 	}
 	if err := readJSON(w, r, &in); err != nil {
@@ -727,7 +880,7 @@ func (s *Server) revert(w http.ResponseWriter, r *http.Request, p *principal) er
 			return err
 		}
 		v, err = s.publishTx(ctx, tx, p, publishReq{config: &old.Config, tests: old.Tests, message: in.Reason, source: "revert", basedOn: &k, override: in.OverrideReason,
-			canary: in.CanaryPercent, guard: in.Guard, guardWhy: in.GuardReason})
+			canary: float64(in.CanaryPercent), guard: in.Guard, guardWhy: in.GuardReason})
 		return err
 	}))
 	if err != nil {
@@ -781,6 +934,15 @@ func (s *Server) rebaseView(ctx context.Context) (*rebasePlan, error) {
 	}
 	if d == nil || d.BaseVersion == nil || av == nil || *av == *d.BaseVersion {
 		return nil, fail(http.StatusConflict, "nothing to rebase: the draft is based on the active version")
+	}
+	// A draft based on the running canary already has the newest changes;
+	// rebasing onto active would strip them.
+	c, err := loadCanary(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	if c != nil && c.Version == *d.BaseVersion {
+		return nil, fail(http.StatusConflict, "nothing to rebase: the draft is based on the canary version")
 	}
 	base, err := s.loadVersion(ctx, s.db, *d.BaseVersion)
 	if err != nil {
@@ -1015,7 +1177,11 @@ func (s *Server) fetchNewKeys(ctx context.Context, c *snapshot.Config) []expr.Is
 			continue
 		}
 		if err := s.refreshIssuer(ctx, is); err != nil {
-			warns = append(warns, expr.Issue{Path: path, Msg: "keys could not be fetched: " + err.Error()})
+			msg := "keys could not be fetched: " + err.Error()
+			if errors.Is(err, jwks.ErrNonPublic) {
+				msg = "keys could not be fetched: the keys URL is a private address, and admin fetches from those only for hosts in its JWKS_ALLOWED_HOSTS"
+			}
+			warns = append(warns, expr.Issue{Path: path, Msg: msg})
 		}
 	}
 	return warns

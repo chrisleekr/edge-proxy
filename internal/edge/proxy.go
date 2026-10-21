@@ -2,6 +2,8 @@ package edge
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -9,20 +11,32 @@ import (
 	"net/http/httputil"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 var errUpstreamTimeout = errors.New("upstream response headers timed out")
 
+// upstreamRoots is nil (the system pool) except in tests.
+var upstreamRoots *x509.CertPool
+
 func newTransport(c *Config) *http.Transport {
 	d := &net.Dialer{Timeout: c.DialTimeout, KeepAlive: 30 * time.Second}
+	addr := c.Upstream.Host // config sets the port
 	return &http.Transport{
-		// Never use an environment proxy: upstreams are deployment-defined.
-		Proxy:                 nil,
-		DialContext:           d.DialContext,
-		MaxIdleConns:          0, // no global cap; per-host below
-		MaxIdleConnsPerHost:   c.MaxIdleConnsPerHost,
+		// Never use an environment proxy: the upstream is deployment-defined.
+		Proxy: nil,
+		// Every connection goes to UPSTREAM_URL. The request URL's host can
+		// differ (see rewrite) but only names the TLS server, never the address.
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, network, addr)
+		},
+		TLSClientConfig: &tls.Config{RootCAs: upstreamRoots, MinVersion: tls.VersionTLS12},
+		// Pools are per Host for an https upstream, and a client picks the
+		// Host, so the total is capped too.
+		MaxIdleConns:          c.MaxIdleConns,
+		MaxIdleConnsPerHost:   c.MaxIdleConns,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   c.DialTimeout,
 		ExpectContinueTimeout: time.Second,
@@ -32,14 +46,7 @@ func newTransport(c *Config) *http.Transport {
 
 // proxy is step 10. It never retries: a request may not be safe to repeat,
 // and retries multiply load during an incident.
-func (e *Edge) proxy(st *reqState, r *http.Request, up *upstream) {
-	if up.inflight.Add(1) > int64(e.cfg.MaxUpstreamInflight) {
-		up.inflight.Add(-1)
-		e.reject(st, kOverloaded, reasonUpstreamOverloaded)
-		return
-	}
-	defer up.inflight.Add(-1)
-
+func (e *Edge) proxy(st *reqState, r *http.Request) {
 	if r.ContentLength > st.set.bodyLimit {
 		e.reject(st, kPayloadTooLarge, reasonPayloadTooLarge)
 		return
@@ -58,9 +65,9 @@ func (e *Edge) proxy(st *reqState, r *http.Request, up *upstream) {
 	defer cancel(nil)
 	timer := time.AfterFunc(st.set.upstreamTimeout, func() { cancel(errUpstreamTimeout) })
 	defer timer.Stop()
-	r = r.WithContext(ctx)
 
-	st.up, st.upTimer = up, timer
+	st.upTimer = timer
+	// st.ctx wraps ctx, so one WithContext copy of r carries both.
 	st.ctx = stateCtx{Context: ctx, st: st}
 	e.rp.ServeHTTP(&st.sw, r.WithContext(&st.ctx))
 }
@@ -71,10 +78,9 @@ func (e *Edge) proxy(st *reqState, r *http.Request, up *upstream) {
 func (e *Edge) newReverseProxy() *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			st := stateOf(pr.In)
-			e.rewrite(pr, st, st.up)
+			e.rewrite(pr, stateOf(pr.In))
 		},
-		Transport:  upstreamTransport{},
+		Transport:  newTransport(e.cfg),
 		BufferPool: e.pool,
 		ModifyResponse: func(resp *http.Response) error {
 			st := stateOf(resp.Request)
@@ -108,19 +114,33 @@ func (c *stateCtx) Value(key any) any {
 // stateOf is the state proxy attached to r, or to the request r was cloned from.
 func stateOf(r *http.Request) *reqState { return r.Context().Value(stateKey{}).(*reqState) }
 
-// upstreamTransport sends each request through its own upstream's transport.
-type upstreamTransport struct{}
-
-func (upstreamTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	return stateOf(r).up.transport.RoundTrip(r)
-}
-
 // rewrite builds the upstream request. Forwarding headers come only from
 // trusted values; SetXForwarded would use the LB's address.
 // ReverseProxy has already removed hop-by-hop, Forwarded and X-Forwarded-*.
-func (e *Edge) rewrite(pr *httputil.ProxyRequest, st *reqState, up *upstream) {
-	pr.SetURL(up.url)
+func (e *Edge) rewrite(pr *httputil.ProxyRequest, st *reqState) {
+	u := e.cfg.Upstream
+	pr.SetURL(u)
+	if raw := pr.In.URL.RawPath; raw != "" {
+		// Go sends EscapedPath, which re-encodes the decoded path, turning
+		// %2F into "/", when RawPath has a byte a path can't carry raw.
+		pr.Out.URL.RawPath = strings.TrimSuffix(u.EscapedPath(), "/") + escapeRaw(raw)
+	}
 	pr.Out.Host = pr.In.Host
+	if u.Scheme == "https" {
+		// TLS names the request's own host, as the Host header does, so a
+		// load balancer or gateway that picks its certificate and route by
+		// SNI serves this host. The dial still goes to UPSTREAM_URL.
+		h := st.fields.host
+		if h == "" {
+			// HTTP/1.0 may omit Host: name the upstream, as an http one is reached.
+			h = u.Hostname()
+		}
+		if u.Port() == "443" && !strings.Contains(h, ":") {
+			pr.Out.URL.Host = h // the default port, without an allocation per request
+		} else {
+			pr.Out.URL.Host = net.JoinHostPort(h, u.Port())
+		}
+	}
 	h := pr.Out.Header
 	upstreamHeaders(st.ver.c, &st.ver.headers, st, h, e.strip)
 	ip := st.client.ip.String()
@@ -178,10 +198,23 @@ func (e *Edge) proxyError(st *reqState, r *http.Request, err error) {
 		e.m.rejected[reasonClientGone].Add(1)
 	case errors.As(err, &ne) && ne.Timeout():
 		e.reject(st, kGatewayTimeout, reasonUpstreamTimeout)
+	case isTLSRefusal(err):
+		// The LB has no certificate for this Host. Clients choose the Host,
+		// so this is counted, not logged per request.
+		e.reject(st, kBadGateway, reasonUpstreamTLS)
 	default:
 		e.log.Warn("upstream request failed", "error", err.Error(), "request_id", st.requestID)
 		e.reject(st, kBadGateway, reasonUpstreamError)
 	}
+}
+
+// isTLSRefusal reports a handshake the upstream refused, or whose certificate
+// doesn't name the request's host. crypto/tls returns a received alert as a
+// *net.OpError with Op "remote error".
+func isTLSRefusal(err error) bool {
+	var cve *tls.CertificateVerificationError
+	var oe *net.OpError
+	return errors.As(err, &cve) || errors.As(err, &oe) && oe.Op == "remote error"
 }
 
 // body enforces the limit and read deadline and records why reading failed,
@@ -223,3 +256,21 @@ func (b *bufferPool) Get() []byte { return b.p.Get().(*[bufferSize]byte)[:] }
 
 // Put takes back a buffer from Get; both callers return it unchanged.
 func (b *bufferPool) Put(buf []byte) { b.p.Put((*[bufferSize]byte)(buf)) }
+
+// pathSafe are the bytes RFC 3986 §3.3 allows raw in a path, plus "%".
+const pathSafe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@/%"
+
+// escapeRaw percent-encodes only the bytes a path can't carry raw, keeping
+// every escape the client sent, so the upstream decodes the same path.
+func escapeRaw(p string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if c := p[i]; strings.IndexByte(pathSafe, c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			b.Write([]byte{'%', hex[c>>4], hex[c&15]})
+		}
+	}
+	return b.String()
+}

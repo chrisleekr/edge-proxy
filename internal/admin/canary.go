@@ -13,8 +13,8 @@ import (
 )
 
 // canaryLease is how long edges keep a candidate without admin: the leader
-// extends it on every guard run, so if admin disappears edges go back to
-// active within this time.
+// extends it once less than half, or less than two guard ticks, is left, so
+// if admin disappears edges go back to active within this time.
 const canaryLease = 10 * time.Minute
 
 type canaryRow struct {
@@ -113,6 +113,9 @@ func (s *Server) abortCanary(w http.ResponseWriter, r *http.Request, p *principa
 	}
 	ctx := r.Context()
 	return s.canaryChange(ctx, w, p, func(tx pgx.Tx, c *canaryRow, _ GuardSettings) (admindb.Event, error) {
+		if _, err := tx.Exec(ctx, "UPDATE config_versions SET abort_reason = $1 WHERE version = $2", in.Reason, c.Version); err != nil {
+			return admindb.Event{}, err
+		}
 		return s.endCanary(ctx, tx, c, "rolled_back", "canary.abort", map[string]any{"reason": in.Reason})
 	})
 }

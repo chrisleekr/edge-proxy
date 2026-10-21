@@ -8,14 +8,15 @@ const ADMIN = 'http://admin:8081';
 const json = { 'Content-Type': 'application/json' };
 
 export function session() {
-  const r = http.post(`${ADMIN}/api/auth/login`, JSON.stringify({ username: 'loadtest', password: 'load test password for local runs only' }), { headers: json });
+  const r = http.post(`${ADMIN}/api/auth/login`, JSON.stringify({ username: 'admin', password: 'local-dev-login' }), { headers: json, responseType: 'text' });
   const c = r.cookies['__Host-edge_session'];
   if (!c) throw new Error(`admin login failed: ${r.status} ${r.body}`);
   return `__Host-edge_session=${c[0].value}`;
 }
 
 export function call(cookie, method, path, body, headers = {}, want = [200, 201, 204]) {
-  const r = http.request(method, `${ADMIN}${path}`, body === undefined ? null : JSON.stringify(body), { headers: { ...json, Cookie: cookie, ...headers } });
+  // responseType keeps the body for scripts that discard response bodies.
+  const r = http.request(method, `${ADMIN}${path}`, body === undefined ? null : JSON.stringify(body), { headers: { ...json, Cookie: cookie, ...headers }, responseType: 'text' });
   if (!want.includes(r.status)) throw new Error(`${method} ${path}: ${r.status} ${r.body}`);
   return r;
 }

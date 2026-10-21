@@ -28,10 +28,13 @@ func uniq(name string) string {
 	return name + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
-// valkeyHarness is a replica connected to the shared test Valkey.
+// valkeyHarness is a replica connected to the shared test Valkey. The
+// production 50ms VALKEY_TIMEOUT is shorter than the Docker round trip
+// under a loaded test run, and a timed-out call fails open, so enforcement
+// assertions would depend on host load.
 func valkeyHarness(t *testing.T, set map[string]string) *harness {
 	t.Helper()
-	e := map[string]string{"VALKEY_URL": "redis://" + testenv.Valkey(t), "UPSTREAM_HOSTS": "api.example.com=app,www.example.com=app"}
+	e := map[string]string{"VALKEY_URL": "redis://" + testenv.Valkey(t), "VALKEY_TIMEOUT": "5s"}
 	maps.Copy(e, set)
 	h := newHarness(t, e)
 	if err := h.srv.edge.valkey.Connect(t.Context()); err != nil {
@@ -396,7 +399,10 @@ func TestFailModes(t *testing.T) {
 
 	t.Run("a client-keyed rule can't fill another rule's local state", func(t *testing.T) {
 		old := maxLocalState
-		maxLocalState = 128 // 64 per rule here, one subject per shard
+		// 128 per rule here, two subjects per shard: the shard comes from a
+		// per-process random seed, so the login rule's default client and
+		// the new one may share one, and both must fit.
+		maxLocalState = 256
 		t.Cleanup(func() { maxLocalState = old })
 		h := newHarness(t, nil)
 		c := testConfig(1)
@@ -468,6 +474,50 @@ func TestValkeyErrorsOpenTheBreaker(t *testing.T) {
 	}
 	if h.srv.m.valkeyErrors.Load() != 5 || h.srv.m.valkeyBreakerOpen.Load() != 2 {
 		t.Fatalf("errors=%d breaker open=%d", h.srv.m.valkeyErrors.Load(), h.srv.m.valkeyBreakerOpen.Load())
+	}
+}
+
+// A Valkey reply slower than VALKEY_TIMEOUT takes the rule's fail_mode;
+// one within it still enforces the limit.
+func TestValkeyTimeout(t *testing.T) {
+	addr := testenv.Valkey(t)
+	raw, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{addr}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	cases := []struct {
+		name, timeout string
+		want          int
+		errors        uint64
+	}{
+		{"reply within the timeout is enforced", "5s", 429, 0},
+		{"reply after the timeout fails open", "50ms", 200, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := valkeyHarness(t, map[string]string{"VALKEY_TIMEOUT": tc.timeout})
+			c := testConfig(1)
+			c.RateLimitRules = []snapshot.RateLimitRule{rlRule(uniq("slow"), "true", "sliding_window", 1, "ip")}
+			h.load(envelope(c))
+			if got := h.statuses(1, "GET", "/"); !eqInts(got, 200) {
+				t.Fatalf("first request: %v", got)
+			}
+			// The first request can time out on a loaded host and still pass by
+			// failing open, so count only errors from the paused request.
+			before := h.srv.m.valkeyErrors.Load()
+			// Valkey holds every script call for 2s, then runs it. The pause
+			// starts when Valkey runs it, so it must outlast any stall before
+			// the next request reaches Valkey. WRITE, not ALL: ALL also holds
+			// the handshake of a newly dialed connection past its 1s dial timeout.
+			if err := raw.Do(t.Context(), raw.B().ClientPause().Timeout(2000).Write().Build()).Error(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { raw.Do(context.Background(), raw.B().ClientUnpause().Build()) }) //nolint:usetesting // t.Context is already cancelled when Cleanup runs
+			if got, errs := h.statuses(1, "GET", "/"), h.srv.m.valkeyErrors.Load()-before; !eqInts(got, tc.want) || errs != tc.errors {
+				t.Fatalf("second request %v, valkey errors %d", got, errs)
+			}
+		})
 	}
 }
 

@@ -147,7 +147,6 @@ type Settings struct {
 	Locale           *bool             `json:"locale,omitempty"`
 	Responses        map[string]string `json:"responses,omitempty"`
 	BodyLimit        *int64            `json:"body_limit,omitempty"`
-	Upstream         *string           `json:"upstream,omitempty"`
 	UpstreamTimeout  *Duration         `json:"upstream_timeout,omitempty"`
 	RateLimitHeaders *bool             `json:"ratelimit_headers,omitempty"`
 }

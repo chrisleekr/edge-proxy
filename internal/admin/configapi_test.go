@@ -23,7 +23,7 @@ func TestDraftLifecycle(t *testing.T) {
 		Config   snapshot.Config
 		Revision int64
 	}](t, ed.do("GET", "/api/draft", nil))
-	if first.Revision != 0 || len(first.Config.Global.Responses) != 9 || first.Config.RateLimitRules != nil {
+	if first.Revision != 0 || len(first.Config.Global.Responses) != 8 || first.Config.RateLimitRules != nil {
 		t.Fatalf("first draft %+v", first)
 	}
 	status(t, ed.save("", testConfig()), 428)
@@ -45,27 +45,47 @@ func TestDraftLifecycle(t *testing.T) {
 	t.Run("an invalid config is never saved", func(t *testing.T) {
 		bad := testConfig()
 		bad.RateLimitRules[0].Limit = 0
-		bad.ConfigRules[0].Settings.Upstream = new("billing")
+		bad.ConfigRules[0].Settings.CORSPolicy = new("billing")
 		resp := ed.save(`"1"`, bad)
 		p := decode[problem](t, resp)
 		paths := []string{}
 		for _, e := range p.Errors {
 			paths = append(paths, e.Path)
 		}
-		if resp.StatusCode != 422 || !slices.Contains(paths, "config.rate_limit_rules[0].limit") || !slices.Contains(paths, "config.config_rules[0].settings.upstream") {
+		if resp.StatusCode != 422 || !slices.Contains(paths, "config.rate_limit_rules[0].limit") || !slices.Contains(paths, "config.config_rules[0].settings.cors_policy") {
 			t.Fatalf("%d %+v", resp.StatusCode, p)
 		}
 		if ed.revision() != `"1"` {
 			t.Fatal("invalid config changed the draft")
 		}
 	})
+	t.Run("a rule that does not decode is named with its path", func(t *testing.T) {
+		for name, edit := range map[string]func(r map[string]any){
+			"a duration in words": func(r map[string]any) { r["period"] = "1 minute" },
+			"a misspelled field":  func(r map[string]any) { r["limt"] = 10 },
+		} {
+			t.Run(name, func(t *testing.T) {
+				var cfg map[string]any
+				raw, _ := json.Marshal(testConfig())
+				if err := json.Unmarshal(raw, &cfg); err != nil {
+					t.Fatal(err)
+				}
+				edit(cfg["rate_limit_rules"].([]any)[0].(map[string]any))
+				resp := ed.do("PUT", "/api/draft", map[string]any{"config": cfg, "tests": []any{}}, "If-Match", `"1"`)
+				p := decode[problem](t, resp)
+				if resp.StatusCode != 400 || len(p.Errors) != 1 || p.Errors[0].Path != "config.rate_limit_rules[0]" {
+					t.Fatalf("%d %+v", resp.StatusCode, p)
+				}
+			})
+		}
+	})
 	t.Run("a failing test is saved but reported", func(t *testing.T) {
 		wrong := adminTest
-		wrong.Expect.Settings = map[string]any{"upstream": "app"}
+		wrong.Expect.Settings = map[string]any{"upstream_timeout": "5s"}
 		res := decode[struct {
 			TestResults []TestResult `json:"test_results"`
 		}](t, ed.save(`"1"`, testConfig(), wrong))
-		if res.TestResults[0].Pass || !strings.Contains(res.TestResults[0].Failures[0], `settings.upstream: want app, got admin`) {
+		if res.TestResults[0].Pass || !strings.Contains(res.TestResults[0].Failures[0], `settings.upstream_timeout: want 5s, got 1s`) {
 			t.Fatalf("results %+v", res.TestResults)
 		}
 	})
@@ -116,7 +136,7 @@ func TestPublish(t *testing.T) {
 		status(t, pub.save(pub.revision(), c, adminTest), 200)
 		status(t, pub.publishDraft("Tighten login"), 201)
 		list := decode[[]versionRow](t, pub.do("GET", "/api/versions", nil))
-		if len(list) != 2 || list[0].Status != "active" || list[1].Status != "superseded" || list[0].ChangeSummary != "+0 rules, ~1 changed, -0" || list[0].Author != "user:pub" {
+		if len(list) != 2 || list[0].Status != "active" || list[1].Status != "superseded" || list[0].ChangeSummary != "1 rule changed" || list[0].Author != "user:pub" {
 			t.Fatalf("versions %+v", list)
 		}
 		v2 := decode[versionRow](t, pub.do("GET", "/api/versions/2", nil))
@@ -126,6 +146,36 @@ func TestPublish(t *testing.T) {
 	})
 	if got := h.actions(); !slices.Contains(got, "config.publish version 1") || !slices.Contains(got, "config.publish version 2") {
 		t.Fatalf("audit %v", got)
+	}
+}
+
+// A fresh install publishes the starter draft as served, with no edit
+// first, so edges get a policy and become ready.
+func TestPublishStarterDraft(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "publisher")
+	pub := h.signedIn("pub")
+	starter := decode[struct {
+		Config snapshot.Config
+		Tests  []ConfigTest
+	}](t, pub.do("GET", "/api/draft", nil))
+	status(t, pub.save(`"0"`, &starter.Config, starter.Tests...), 200)
+	if v := decode[map[string]int64](t, pub.publishDraft("Starter policy"))["version"]; v != 1 {
+		t.Fatalf("version %d", v)
+	}
+}
+
+// A keys URL on a private address is refused by the SSRF guard, and the save
+// says why in words, naming the setting that would allow it.
+func TestSaveExplainsAPrivateKeysURL(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "publisher")
+	pub := h.signedIn("pub")
+	c := testConfig()
+	c.Auth = snapshot.Auth{Issuers: []snapshot.Issuer{{ID: "corp", Issuer: "https://auth.example.com/", Audiences: []string{"api"}, JWKSURL: "https://10.255.255.1/jwks", Algorithm: "RS256"}}, DefaultAccepted: []string{"corp"}}
+	resp := pub.save(`"0"`, c)
+	if b := body(resp); resp.StatusCode != 200 || !strings.Contains(b, "the keys URL is a private address") || !strings.Contains(b, "JWKS_ALLOWED_HOSTS") || strings.Contains(b, "dial tcp") {
+		t.Fatalf("%d %s", resp.StatusCode, b)
 	}
 }
 
@@ -164,9 +214,11 @@ func TestRevert(t *testing.T) {
 	h.user("pub", "publisher")
 	h.user("ed", "editor")
 	pub := h.signedIn("pub")
-	status(t, pub.save(`"0"`, testConfig(), adminTest), 200)
+	v1 := testConfig()
+	v1.ConfigRules[0].Expression = mustParse(`starts_with(http.request.uri.path, "/admin/") and ip.src.country ne "XX"`)
+	status(t, pub.save(`"0"`, v1, adminTest), 200)
 	status(t, pub.publishDraft("v1"), 201)
-	c := testConfig()
+	c := clone(v1)
 	c.RateLimitRules[0].Limit = 1
 	status(t, pub.save(pub.revision(), c, adminTest), 200)
 	status(t, pub.publishDraft("v2 too tight"), 201)
@@ -203,16 +255,16 @@ func TestRevert(t *testing.T) {
 		status(t, pub.publishDraft("after the revert"), 201)
 	})
 	t.Run("a version that no longer fits the deployment can't be restored", func(t *testing.T) {
-		// The admin upstream was removed from the deployment since v1.
+		// The CDN in front no longer sends a viewer country, which v1 uses.
 		e := baseEnv("unused")
-		e["UPSTREAMS"] = "app=http://app:8080"
+		e["CLIENT_IP_SOURCE"] = "remote_addr"
 		cfg, err := LoadConfig(env(e))
 		if err != nil {
 			t.Fatal(err)
 		}
 		h.s.cfg.Deployment = cfg.Deployment
 		resp := pub.do("POST", "/api/versions/1/revert", map[string]string{"reason": "go back"})
-		if b := body(resp); resp.StatusCode != 422 || !strings.Contains(b, "config.config_rules[0].settings.upstream") {
+		if b := body(resp); resp.StatusCode != 422 || !strings.Contains(b, "config.config_rules[0].expression") {
 			t.Fatalf("%d %s", resp.StatusCode, b)
 		}
 	})
@@ -252,7 +304,7 @@ func TestCopyToDraftAndHistory(t *testing.T) {
 		Diff    Diff
 		Summary string
 	}](t, pub.do("GET", "/api/diff/3/draft", nil))
-	if diff.Summary != "+1 rules, ~0 changed, -0" || !slices.Equal(diff.Diff.Phases["rate_limit_rules"].Added, []string{"login"}) {
+	if diff.Summary != "1 rule added" || !slices.Equal(diff.Diff.Phases["rate_limit_rules"].Added, []string{"login"}) {
 		t.Fatalf("diff %+v", diff)
 	}
 	raw := decode[map[string]string](t, pub.do("GET", "/api/diff/1/2?view=raw", nil))
@@ -274,13 +326,17 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 	status(t, ed.save(`"0"`, testConfig(), adminTest), 200)
 
 	sim := decode[SimView](t, ed.do("POST", "/api/simulate", map[string]any{"request": TestRequest{Method: "POST", Host: "api.example.com", Path: "/login"}}))
-	if !slices.Equal(sim.RateLimitRules, []string{"login"}) || sim.Settings.Upstream != "" {
+	if !slices.Equal(sim.RateLimitRules, []string{"login"}) {
 		t.Fatalf("simulate %+v", sim)
 	}
 	if res := decode[[]TestResult](t, ed.do("POST", "/api/tests/run", nil)); len(res) != 1 || !res[0].Pass {
 		t.Fatalf("tests %+v", res)
 	}
-	status(t, ed.do("POST", "/api/simulate", map[string]any{"request": TestRequest{Host: "api.example.com", Path: "/", IP: "not-an-ip"}}), 422)
+	// A mistyped IP is reported against its field, so the form shows it there.
+	if bad := decode[problem](t, ed.do("POST", "/api/simulate", map[string]any{"request": TestRequest{Host: "api.example.com", Path: "/", IP: "not-an-ip"}})); bad.Status != 422 ||
+		len(bad.Errors) != 1 || bad.Errors[0].Path != "request.ip" {
+		t.Fatalf("bad ip %+v", bad)
+	}
 
 	type op struct {
 		Name  string
@@ -305,6 +361,40 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 	// The UI picks operators by these type names.
 	if gt := schema.Operators[slices.IndexFunc(schema.Operators, func(o op) bool { return o.Name == "gt" })]; !slices.Equal(gt.Types, []string{"int"}) {
 		t.Fatalf("gt types %v", gt.Types)
+	}
+
+	// The rule editor offers only these, so a choice can't be misspelled.
+	choices := decode[struct {
+		Rules struct {
+			Algorithms []string
+			KeyKinds   []struct {
+				Name  string
+				Named bool
+			} `json:"key_kinds"`
+			MaxKeyParts   int `json:"max_key_parts"`
+			ResponseKinds []struct {
+				Name   string
+				Status int
+			} `json:"response_kinds"`
+			HeaderOps     []string `json:"header_ops"`
+			ContentTypes  []string `json:"content_types"`
+			JWTAlgorithms []string `json:"jwt_algorithms"`
+			Methods       []string
+		}
+	}](t, ed.do("GET", "/api/expr/schema", nil)).Rules
+	header := choices.KeyKinds[slices.IndexFunc(choices.KeyKinds, func(k struct {
+		Name  string
+		Named bool
+	}) bool {
+		return k.Name == "header"
+	})]
+	if !slices.Equal(choices.Algorithms, snapshot.Algorithms) || !header.Named || choices.MaxKeyParts != snapshot.MaxKeyParts ||
+		!slices.Contains(choices.ResponseKinds, struct {
+			Name   string
+			Status int
+		}{"rate_limited", 429}) || !slices.Equal(choices.HeaderOps, snapshot.HeaderOps) ||
+		!slices.Equal(choices.ContentTypes, snapshot.ContentTypes) || !slices.Equal(choices.JWTAlgorithms, snapshot.JWTAlgorithms) || !slices.Contains(choices.Methods, "POST") {
+		t.Fatalf("rule choices %+v", choices)
 	}
 
 	parsed := decode[struct{ AST expr.Node }](t, ed.do("POST", "/api/expr/parse", map[string]string{"text": `http.host eq "api.example.com"`}))
@@ -424,5 +514,42 @@ func TestRebaseMerge(t *testing.T) {
 	got, conflicts = rebase(base, d4, a4)
 	if !slices.Equal(conflicts, []string{"global"}) || got.Global.Defaults.BodyLimit != 2048 {
 		t.Fatalf("global conflict %v", conflicts)
+	}
+}
+
+// The rule editor checks a config before applying a rule: every problem
+// comes back with its path, and nothing is saved.
+func TestDraftCheck(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	status(t, ed.save(`"0"`, testConfig(), adminTest), 200)
+	type checked struct{ Errors, Warnings []expr.Issue }
+	check := func(cfg any) checked {
+		t.Helper()
+		return decode[checked](t, ed.do("POST", "/api/draft/check", map[string]any{"config": cfg}))
+	}
+
+	if c := check(testConfig()); len(c.Errors) != 0 {
+		t.Fatalf("valid config: %v", c.Errors)
+	}
+	zero := testConfig()
+	zero.RateLimitRules[0].Limit = 0
+	if c := check(zero); len(c.Errors) != 1 || c.Errors[0].Path != "config.rate_limit_rules[0].limit" {
+		t.Fatalf("limit 0: %v", c.Errors)
+	}
+	// A value the decoder refuses names its rule like a validation error.
+	raw := testConfig()
+	raw.RateLimitRules = nil
+	body, _ := json.Marshal(raw)
+	var words map[string]any
+	_ = json.Unmarshal(body, &words)
+	words["rate_limit_rules"] = []any{map[string]any{"id": "x", "expression": map[string]any{"combinator": "and", "rules": []any{}},
+		"algorithm": "fixed_window", "limit": 1, "period": "1 minute", "key": []string{"ip"}, "on_missing_key": "skip", "action": "block", "fail_mode": "open"}}
+	if c := check(words); len(c.Errors) != 1 || c.Errors[0].Path != "config.rate_limit_rules[0]" || !strings.Contains(c.Errors[0].Msg, "1 minute") {
+		t.Fatalf("period in words: %v", c.Errors)
+	}
+	if d := decode[struct{ Revision int64 }](t, ed.do("GET", "/api/draft", nil)); d.Revision != 1 {
+		t.Fatalf("checking saved the draft: revision %d", d.Revision)
 	}
 }

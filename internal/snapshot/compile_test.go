@@ -60,6 +60,9 @@ func TestCheckExpression(t *testing.T) {
 		{"reads an edge-managed header", `http.request.headers["x-edge-auth-sub"] eq "admin"`, expr.PhaseRateLimit, "expression", ""},
 		{"locale the edge never produces", `edge.locale eq "fr"`, expr.PhaseRateLimit, "never \"fr\"", ""},
 		{"contradiction", `http.host eq "a.example.com" and http.host eq "b.example.com"`, expr.PhaseConfig, "", "can never all be true"},
+		{"prefix on the raw URI, which /%61dmin slips past", `starts_with(http.request.uri, "/admin")`, expr.PhaseConfig, "", "http.request.uri is not normalized"},
+		{"match on the raw full URI", `http.request.full_uri eq "https://api.example.com/admin"`, expr.PhaseRateLimit, "", "http.request.full_uri is not normalized"},
+		{"prefix on the normalized path gets no raw-URI warning", `starts_with(http.request.uri.path, "/admin")`, expr.PhaseConfig, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,6 +71,15 @@ func TestCheckExpression(t *testing.T) {
 				t.Fatalf("errs %v, warns %v", errs, warns)
 			}
 		})
+	}
+}
+
+// An expression that uses the raw URI fields more than once gets one warning, not one per use.
+func TestRawURIWarnsOncePerExpression(t *testing.T) {
+	src := `starts_with(http.request.uri, "/admin") or http.request.full_uri eq "https://api.example.com/admin"`
+	errs, warns := CheckExpression(mustParse(src), expr.PhaseConfig, validConfig(), testDeployment)
+	if len(errs) != 0 || len(warns) != 1 || !strings.Contains(warns[0].Msg, "is not normalized") {
+		t.Fatalf("errs %v, warns %v", errs, warns)
 	}
 }
 
@@ -89,7 +101,7 @@ func hasIssue(is []expr.Issue, want string) bool {
 func TestStarterCompiles(t *testing.T) {
 	c := Starter()
 	c.Version = 1 // admin numbers it at save
-	if _, warns, errs := Compile(c, Deployment{Upstreams: []string{"app"}}); errs != nil || warns != nil {
+	if _, warns, errs := Compile(c, Deployment{}); errs != nil || warns != nil {
 		t.Fatalf("errors %v, warnings %v", errs, warns)
 	}
 	if r := c.Global.Responses["rate_limited"]; r.Status != 429 || r.Body != `{"status":429,"title":"Too Many Requests"}` {
@@ -100,15 +112,14 @@ func TestStarterCompiles(t *testing.T) {
 // Edges and admin build their deployment from env in map order and header
 // case; only a real difference may block publishing.
 func TestDeploymentFingerprint(t *testing.T) {
-	base := Deployment{Upstreams: []string{"app", "admin"}, ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"CloudFront-Viewer-Country", "CloudFront-Viewer-Address"}}
-	same := Deployment{Upstreams: []string{"admin", "app"}, ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"cloudfront-viewer-address", "cloudfront-viewer-country"}}
+	base := Deployment{ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"CloudFront-Viewer-Country", "CloudFront-Viewer-Address"}}
+	same := Deployment{ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"cloudfront-viewer-address", "cloudfront-viewer-country"}}
 	if base.Fingerprint() != same.Fingerprint() {
 		t.Fatal("order or header case changed the fingerprint")
 	}
 	for name, d := range map[string]Deployment{
-		"another upstream": {Upstreams: []string{"app", "admin", "legacy"}, ViewerFields: base.ViewerFields, SourceHeaders: base.SourceHeaders},
-		"regex allowed":    {Upstreams: base.Upstreams, ViewerFields: base.ViewerFields, SourceHeaders: base.SourceHeaders, AllowRegex: true},
-		"no viewer fields": {Upstreams: base.Upstreams, SourceHeaders: base.SourceHeaders},
+		"regex allowed":    {ViewerFields: base.ViewerFields, SourceHeaders: base.SourceHeaders, AllowRegex: true},
+		"no viewer fields": {SourceHeaders: base.SourceHeaders},
 	} {
 		if d.Fingerprint() == base.Fingerprint() {
 			t.Errorf("%s: same fingerprint", name)

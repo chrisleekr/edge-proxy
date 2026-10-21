@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,7 +17,7 @@ var testKeys = AuditKeys{Current: "k1", Keys: map[string][]byte{"k1": []byte("01
 
 func audit(t *testing.T, c *pgx.Conn, e Event) {
 	t.Helper()
-	if err := pgx.BeginFunc(t.Context(), c, func(tx pgx.Tx) error { return Audit(t.Context(), tx, testKeys, e) }); err != nil {
+	if err := pgx.BeginFunc(t.Context(), c, func(tx pgx.Tx) error { return Audit(t.Context(), tx, testKeys, time.Now, e) }); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -51,7 +52,7 @@ func TestAuditRollsBackWithTheChange(t *testing.T) {
 	_, app := migrated(t)
 	ctx := t.Context()
 	err := pgx.BeginFunc(ctx, app, func(tx pgx.Tx) error {
-		if err := Audit(ctx, tx, testKeys, Event{Actor: "user:alice", Action: "settings.save"}); err != nil {
+		if err := Audit(ctx, tx, testKeys, time.Now, Event{Actor: "user:alice", Action: "settings.save"}); err != nil {
 			return err
 		}
 		return errors.New("the change failed")
@@ -79,7 +80,7 @@ func TestAuditConcurrentInserts(t *testing.T) {
 	for range 20 {
 		wg.Go(func() {
 			err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-				return Audit(t.Context(), tx, testKeys, Event{Actor: "user:x", Action: "config.save"})
+				return Audit(t.Context(), tx, testKeys, time.Now, Event{Actor: "user:x", Action: "config.save"})
 			})
 			if err != nil {
 				t.Error(err)
@@ -136,7 +137,7 @@ func TestAuditKeyRotation(t *testing.T) {
 	audit(t, app, Event{Actor: "user:alice", Action: "a"})
 	rotated := AuditKeys{Current: "k2", Keys: map[string][]byte{"k1": testKeys.Keys["k1"], "k2": []byte("another 32-byte key for the chain")}, Order: []string{"k1", "k2"}}
 	if err := pgx.BeginFunc(t.Context(), app, func(tx pgx.Tx) error {
-		return Audit(t.Context(), tx, rotated, Event{Actor: "user:alice", Action: "b"})
+		return Audit(t.Context(), tx, rotated, time.Now, Event{Actor: "user:alice", Action: "b"})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,7 @@ func TestAuditKeyRotation(t *testing.T) {
 func TestAuditDetailsMustBeJSON(t *testing.T) {
 	_, app := migrated(t)
 	err := pgx.BeginFunc(t.Context(), app, func(tx pgx.Tx) error {
-		return Audit(t.Context(), tx, testKeys, Event{Actor: "user:alice", Action: "a", Details: func() {}})
+		return Audit(t.Context(), tx, testKeys, time.Now, Event{Actor: "user:alice", Action: "a", Details: func() {}})
 	})
 	if err == nil {
 		t.Fatal("unencodable details accepted")
@@ -193,7 +194,7 @@ func TestAuditIntegrityGaps(t *testing.T) {
 		_, app := migrated(t)
 		rotated := AuditKeys{Current: "k2", Keys: map[string][]byte{"k1": testKeys.Keys["k1"], "k2": []byte("another 32-byte key for the chain")}, Order: []string{"k1", "k2"}}
 		for _, k := range []AuditKeys{rotated, testKeys} { // k2 row, then a forged k1 row
-			if err := pgx.BeginFunc(ctx, app, func(tx pgx.Tx) error { return Audit(ctx, tx, k, Event{Actor: "user:x", Action: "a"}) }); err != nil {
+			if err := pgx.BeginFunc(ctx, app, func(tx pgx.Tx) error { return Audit(ctx, tx, k, time.Now, Event{Actor: "user:x", Action: "a"}) }); err != nil {
 				t.Fatal(err)
 			}
 		}

@@ -17,6 +17,9 @@ type Env struct {
 	ViewerAvailable func(field string) bool
 	// AllowRegex enables the "matches" operator (off by default).
 	AllowRegex bool
+	// RelativePaths accepts a path literal without its leading "/", as
+	// checks did before, so a version stored then still loads.
+	RelativePaths bool
 }
 
 // Issue is one validation problem, located by a path such as "rules[1].rules[0]".
@@ -135,6 +138,7 @@ func (c *checker) key(f FieldDef, key, path string) {
 }
 
 func (c *checker) value(f FieldDef, op OpDef, v Value, path string) {
+	f.Slash = f.Slash && !c.env.RelativePaths
 	switch {
 	case op.NoValue:
 		if !v.IsZero() {
@@ -229,13 +233,19 @@ func literalProblem(f FieldDef, op OpDef, s string, inList bool) string {
 	return ""
 }
 
-// neverMatches reports a literal that a case-sensitive comparison can never
-// match, because of how the edge delivers the field. Regex and
-// case-insensitive wildcard are exempt: they don't compare letters exactly.
+// neverMatches reports a literal that a comparison can never match, because
+// of how the edge delivers the field. Regex and case-insensitive wildcard are
+// exempt from the letter checks: they don't compare letters exactly.
 func neverMatches(f FieldDef, op OpDef, s string) string {
 	name := op.Name
 	if op.Negates != "" {
 		name = op.Negates
+	}
+	// These compare from the first character, and a pattern without a
+	// leading * must match it too.
+	anchored := name == "eq" || name == "in" || name == "starts_with" || ((name == "wildcard" || name == "strict_wildcard") && !strings.HasPrefix(s, "*"))
+	if f.Slash && anchored && !strings.HasPrefix(s, "/") {
+		return fmt.Sprintf("%q can never match: paths start with \"/\", such as %q", s, "/"+s)
 	}
 	if name == "matches" || name == "wildcard" {
 		return ""

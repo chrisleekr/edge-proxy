@@ -1,6 +1,6 @@
 {
   "config": {
-    "schema": 1,
+    "schema": 2,
     "kill_switch": {
       "rate_limit": false,
       "auth": false
@@ -20,7 +20,6 @@
         "responses": {
           "bad_request": "bad_request",
           "unauthorized": "unauthorized",
-          "misdirected": "misdirected",
           "payload_too_large": "payload_too_large",
           "rate_limited": "rate_limited",
           "bad_gateway": "bad_gateway",
@@ -40,11 +39,6 @@
           "status": 401,
           "content_type": "application/problem+json",
           "body": "{\"status\":401,\"title\":\"Unauthorized\"}"
-        },
-        "misdirected": {
-          "status": 421,
-          "content_type": "application/problem+json",
-          "body": "{\"status\":421,\"title\":\"Misdirected Request\"}"
         },
         "payload_too_large": {
           "status": 413,

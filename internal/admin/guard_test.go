@@ -16,7 +16,7 @@ import (
 
 func (h *harness) live(instance string, versions ...int64) {
 	h.t.Helper()
-	if _, err := h.db.Exec(context.Background(), "INSERT INTO fleet VALUES ($1, $2, 'admin', 0, $3) ON CONFLICT (instance) DO UPDATE SET versions = $3, last_seen = $2", instance, h.now(), versions); err != nil {
+	if _, err := h.db.Exec(context.Background(), "INSERT INTO fleet (instance, last_seen, config_source, bootstrap_age_seconds, versions, max_schema) VALUES ($1, $2, 'admin', 0, $3, $4) ON CONFLICT (instance) DO UPDATE SET versions = $3, last_seen = $2", instance, h.now(), versions, snapshot.SupportedSchema); err != nil {
 		h.t.Fatal(err)
 	}
 }
@@ -94,6 +94,14 @@ func TestGuardAfterFullRollout(t *testing.T) {
 	if len(list) != 3 || list[0].Source != "guard_rollback" || *list[0].BasedOn != 1 || list[0].Status != "active" || list[1].Status != "rolled_back" || list[0].Author != "system:guard" {
 		t.Fatalf("versions %+v", list)
 	}
+	// A full rollout is compared with the version it replaced.
+	var out guardOutcome
+	if err := json.Unmarshal(decode[versionRow](t, pub.do("GET", "/api/versions/2", nil)).GuardOutcome, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Decision != "rollback" || out.Baseline != 1 {
+		t.Fatalf("outcome %+v", out)
+	}
 	// The rollback is watched but never rolled back.
 	h.putStats(3, 4, 2_000, 0, 400, []int64{2_000}, "[]", "[]")
 	if err := h.s.runGuard(t.Context()); err != nil {
@@ -154,6 +162,50 @@ func TestGuardSignals(t *testing.T) {
 	}
 }
 
+// A trip names the rule that tripped, with its own numbers, even when
+// another rule limits a larger share without tripping. Otherwise the alert
+// points the operator at a rule that is fine.
+func TestGuardNamesTheRuleThatTripped(t *testing.T) {
+	g := defaultGuard()
+	base := &cohort{Requests: 10_000, rules: map[string]*edge.RuleCounts{
+		"api":    {ID: "api", Evaluated: 1_000, Limited: 10, WouldLimit: 10},
+		"login":  {ID: "login", Evaluated: 1_000, Limited: 300},
+		"search": {ID: "search", Evaluated: 1_000, Limited: 10},
+	}}
+	cases := []struct {
+		name     string
+		changed  []string
+		search   uint64
+		signal   string
+		baseline float64
+	}{
+		// api goes from 1% to 4%, over 3x. login, sorted after it, limits
+		// 35% against 30% and search 2% against 1%: neither trips.
+		{"unchanged rule", nil, 20, "unchanged_rule_limited_ratio", 0.01},
+		// api, changed, limits 4%, over 3x its 1% shadow estimate. search,
+		// also changed and sorted after it, limits 4.5% with no shadow
+		// estimate, under the 5% cap.
+		{"changed rule", []string{"api", "search"}, 45, "changed_rule_limited_ratio", 0.05},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := map[string]bool{}
+			for _, id := range tc.changed {
+				changed[id] = true
+			}
+			sub := &cohort{Requests: 1_000, rules: map[string]*edge.RuleCounts{
+				"api":    {ID: "api", Evaluated: 1_000, Limited: 40},
+				"login":  {ID: "login", Evaluated: 1_000, Limited: 350},
+				"search": {ID: "search", Evaluated: 1_000, Limited: tc.search},
+			}}
+			res := evaluate(g, sub, base, changed, 1, 3*time.Minute)[tc.signal]
+			if !res.Tripped || res.Detail != "api" || res.Value != 0.04 || res.Baseline != tc.baseline {
+				t.Fatalf("%s = %+v, want tripped by api at 0.04 against %v", tc.signal, res, tc.baseline)
+			}
+		})
+	}
+}
+
 // One attacker's few IPs don't make a changed rule look too tight: the
 // most-limited subjects are left out.
 func TestGuardLeavesOutTheMostLimited(t *testing.T) {
@@ -207,6 +259,14 @@ func TestGuardAlertsOnceAndNeedsData(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d alerts", n)
+	}
+	// The outcome names the live version the canary was compared with.
+	var alert guardOutcome
+	if err := json.Unmarshal(decode[versionRow](t, pub.do("GET", "/api/versions/2", nil)).GuardOutcome, &alert); err != nil {
+		t.Fatal(err)
+	}
+	if alert.Decision != "alert" || alert.Baseline != 1 {
+		t.Fatalf("outcome %+v", alert)
 	}
 }
 
@@ -282,6 +342,13 @@ func TestPerPublishGuardOverride(t *testing.T) {
 	status(t, pub.do("POST", "/api/publish", req, "If-Match", pub.revision()), 422) // no reason
 	req["guard_override_reason"] = "maintenance page returns 503 on purpose"
 	status(t, pub.do("POST", "/api/publish", req, "If-Match", pub.revision()), 201)
+	// The audit row keeps the saved settings beside the override, so it can
+	// say what this publish changed.
+	var saved, override string
+	if err := h.db.QueryRow(t.Context(), `SELECT details->'guard_settings'->'signals'->'edge_5xx_ratio'->>'mode', details->'guard_override'->'signals'->'edge_5xx_ratio'->>'mode'
+		FROM audit_events WHERE action = 'config.publish' ORDER BY seq DESC LIMIT 1`).Scan(&saved, &override); err != nil || saved != "rollback" || override != "alert" {
+		t.Fatalf("audit guard settings %q, override %q, err %v", saved, override, err)
+	}
 
 	h.advance(6 * time.Minute)
 	h.live("edge-a", 1, 2)

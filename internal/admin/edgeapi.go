@@ -88,36 +88,43 @@ const snapshotState = `SELECT format('%s|%s|%s',
 
 // snapshot serves GET /v1/snapshot. Every edge polls it, so
 // the ETag comes from snapshotState and an unchanged snapshot answers 304
-// without loading configs. One repeatable-read transaction keeps the tag
-// and the body in step.
+// after one query, with no transaction and no configs loaded. A changed one
+// is read in one repeatable-read transaction, which keeps the tag and the
+// body in step.
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, _ *principal) error {
 	ctx := r.Context()
-	var tag string
+	tag, err := snapshotTag(ctx, s.edgeDB)
+	if err != nil {
+		return err
+	}
+	if r.Header.Get("If-None-Match") == tag {
+		w.WriteHeader(http.StatusNotModified)
+		return nil
+	}
 	var env *snapshot.Envelope
-	err := pgx.BeginTxFunc(ctx, s.db, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
-		var state string
-		if err := tx.QueryRow(ctx, snapshotState).Scan(&state); err != nil {
+	err = pgx.BeginTxFunc(ctx, s.edgeDB, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		var err error
+		if tag, err = snapshotTag(ctx, tx); err != nil {
 			return err
 		}
-		sum := sha256.Sum256([]byte(state))
-		tag = `"` + hex.EncodeToString(sum[:16]) + `"`
-		if r.Header.Get("If-None-Match") == tag {
-			return nil
-		}
-		var err error
 		env, err = s.envelope(ctx, tx)
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	if env == nil {
-		w.WriteHeader(http.StatusNotModified)
-		return nil
-	}
 	env.ExportedAt = s.now().UTC()
 	w.Header().Set("ETag", tag)
 	return writeJSON(w, http.StatusOK, env)
+}
+
+func snapshotTag(ctx context.Context, q querier) (string, error) {
+	var state string
+	if err := q.QueryRow(ctx, snapshotState).Scan(&state); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(state))
+	return `"` + hex.EncodeToString(sum[:16]) + `"`, nil
 }
 
 // report ingests one edge's stats. It returns once the
@@ -143,15 +150,18 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, _ *principal) er
 	if len(rep.Deployment) > 64 {
 		return fail(http.StatusUnprocessableEntity, "deployment must be at most 64 characters")
 	}
-	_, err := s.db.Exec(r.Context(), `INSERT INTO fleet (instance, last_seen, config_source, bootstrap_age_seconds, versions, max_schema, deployment) VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (instance) DO UPDATE SET last_seen = $2, config_source = $3, bootstrap_age_seconds = $4, versions = $5, max_schema = $6, deployment = $7`,
-		rep.Instance, s.now(), rep.ConfigSource, rep.BootstrapAgeSeconds, versions, max(rep.MaxSchema, 1), rep.Deployment)
+	if len(rep.Upstream) > 2048 || strings.ContainsRune(rep.Upstream, 0) {
+		return fail(http.StatusUnprocessableEntity, "upstream must be at most 2048 characters, without NUL")
+	}
+	_, err := s.edgeDB.Exec(r.Context(), `INSERT INTO fleet (instance, last_seen, config_source, bootstrap_age_seconds, versions, max_schema, deployment, upstream) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (instance) DO UPDATE SET last_seen = $2, config_source = $3, bootstrap_age_seconds = $4, versions = $5, max_schema = $6, deployment = $7, upstream = $8`,
+		rep.Instance, s.now(), rep.ConfigSource, rep.BootstrapAgeSeconds, versions, max(rep.MaxSchema, 1), rep.Deployment, rep.Upstream)
 	if err != nil {
 		return err
 	}
 	s.agg.add(s.now(), rep.Versions)
 	var a edge.ReportAnswer
-	if err := s.db.QueryRow(r.Context(), "SELECT count(*) FROM fleet WHERE last_seen > $1", s.now().Add(-fleetWindow)).Scan(&a.FleetSize); err != nil {
+	if err := s.edgeDB.QueryRow(r.Context(), "SELECT count(*) FROM fleet WHERE last_seen > $1", s.now().Add(-fleetWindow)).Scan(&a.FleetSize); err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, a)
@@ -163,7 +173,7 @@ func countsOK(c edge.StatsCounts) bool {
 		n = append(n, c.RateLimit[i].Counters()...)
 	}
 	for i := range c.TopLimited {
-		n = append(n, &c.TopLimited[i].Limited)
+		n = append(n, &c.TopLimited[i].Limited, &c.TopLimited[i].WouldLimit)
 	}
 	return !slices.ContainsFunc(n, func(v *uint64) bool { return *v >= maxCount })
 }
@@ -214,7 +224,7 @@ func (s *Server) checkDeployment(ctx context.Context, q querier) error {
 	if err != nil {
 		return err
 	}
-	return fail(http.StatusConflict, fmt.Sprintf("edge %s runs with different deployment settings than admin; UPSTREAMS, CLIENT_IP_SOURCE, VIEWER_HEADERS, INGRESS_SECRET_HEADER and ALLOW_REGEX must match", instance))
+	return fail(http.StatusConflict, fmt.Sprintf("edge %s runs with different deployment settings than admin; CLIENT_IP_SOURCE, VIEWER_HEADERS, INGRESS_SECRET_HEADER and ALLOW_REGEX must match", instance))
 }
 
 // minuteAgg sums one version's reports within one minute.
@@ -267,6 +277,7 @@ func (a *aggregator) add(now time.Time, counts []edge.StatsCounts) {
 		for _, t := range c.TopLimited {
 			if e := m.top[t.Key]; e != nil {
 				e.Limited += t.Limited
+				e.WouldLimit += t.WouldLimit
 			} else if len(m.top) < maxTopPerMinute {
 				tc := t
 				m.top[t.Key] = &tc
@@ -275,7 +286,9 @@ func (a *aggregator) add(now time.Time, counts []edge.StatsCounts) {
 	}
 }
 
-// take removes the minutes before now, which no report can add to anymore.
+// take returns every minute held. The minutes before now, which no report
+// can add to anymore, are removed; the current one is copied, since reports
+// keep adding to it while flush writes it.
 func (a *aggregator) take(now time.Time) map[aggKey]*minuteAgg {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -285,13 +298,27 @@ func (a *aggregator) take(now time.Time) map[aggKey]*minuteAgg {
 		if k.minute.Before(cur) {
 			out[k] = m
 			delete(a.m, k)
+			continue
 		}
+		c := &minuteAgg{Totals: m.Totals, rules: map[string]*edge.RuleCounts{}, ruleOrder: slices.Clone(m.ruleOrder), top: map[string]*edge.TopCount{}}
+		c.LatencyMS = slices.Clone(m.LatencyMS)
+		for id, r := range m.rules {
+			rc := *r
+			c.rules[id] = &rc
+		}
+		for key, t := range m.top {
+			tc := *t
+			c.top[key] = &tc
+		}
+		out[k] = c
 	}
 	return out
 }
 
-// flush writes completed minutes in one batch. On failure
-// they are dropped: stats never block or grow memory.
+// flush writes every minute held in one batch, the current one so far
+// included, so stats are at most one flush behind. Each write replaces the
+// row with the minute's running sum. On failure finished minutes are
+// dropped: stats never block or grow memory.
 func (s *Server) flush(ctx context.Context, now time.Time) error {
 	done := s.agg.take(now)
 	if len(done) == 0 {
@@ -307,19 +334,22 @@ func (s *Server) flush(ctx context.Context, now time.Time) error {
 		for _, t := range m.top {
 			top = append(top, t)
 		}
-		slices.SortFunc(top, func(a, b *edge.TopCount) int { return cmp.Compare(b.Limited, a.Limited) })
+		slices.SortFunc(top, func(a, b *edge.TopCount) int { return cmp.Compare(b.Limited+b.WouldLimit, a.Limited+a.WouldLimit) })
 		b.Queue(`INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (minute, version, replica) DO UPDATE SET requests = EXCLUDED.requests, edge_5xx = EXCLUDED.edge_5xx,
+				upstream_5xx = EXCLUDED.upstream_5xx, auth_failures = EXCLUDED.auth_failures, latency_ms = EXCLUDED.latency_ms,
+				rate_limit = EXCLUDED.rate_limit, top_limited = EXCLUDED.top_limited`,
 			k.minute, k.version, s.replica, m.Requests, m.Edge5xx, m.Upstream5xx, m.AuthFailures, m.LatencyMS, rules, top)
 	}
-	if err := s.db.SendBatch(ctx, b).Close(); err != nil {
+	if err := s.edgeDB.SendBatch(ctx, b).Close(); err != nil {
 		return fmt.Errorf("stats flush dropped %d minutes: %w", len(done), err)
 	}
 	return nil
 }
 
 func (s *Server) fleet(w http.ResponseWriter, r *http.Request, _ *principal) error {
-	rows, err := s.db.Query(r.Context(), "SELECT instance, last_seen, config_source, bootstrap_age_seconds, versions FROM fleet ORDER BY instance")
+	rows, err := s.db.Query(r.Context(), "SELECT instance, last_seen, config_source, bootstrap_age_seconds, versions, upstream FROM fleet ORDER BY instance")
 	if err != nil {
 		return err
 	}
@@ -329,11 +359,12 @@ func (s *Server) fleet(w http.ResponseWriter, r *http.Request, _ *principal) err
 		ConfigSource string    `json:"config_source"`
 		BootstrapAge int64     `json:"bootstrap_age_seconds"`
 		Versions     []int64   `json:"versions"`
+		Upstream     string    `json:"upstream"`
 		Live         bool      `json:"live"`
 	}
 	list, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (item, error) {
 		var it item
-		err := row.Scan(&it.Instance, &it.LastSeen, &it.ConfigSource, &it.BootstrapAge, &it.Versions)
+		err := row.Scan(&it.Instance, &it.LastSeen, &it.ConfigSource, &it.BootstrapAge, &it.Versions, &it.Upstream)
 		it.Live = it.LastSeen.After(s.now().Add(-fleetWindow))
 		return it, err
 	})

@@ -42,6 +42,11 @@ func TestCheckAcceptsValidRules(t *testing.T) {
 		{Field: "http.request.cookies", Key: "__Host-sid", Operator: "eq", Value: Value{One: "s"}},
 		{Field: "http.request.uri.args", Key: "a b", Operator: "eq", Value: Value{One: "x"}},
 		{Field: "http.request.jwt.claims", Key: "sub", Operator: "eq", Value: Value{One: "u1"}},
+		// Only comparisons anchored at the start of a path need its "/".
+		rule("http.request.uri.path", "ends_with", "search"),
+		rule("http.request.uri.path", "contains", "search"),
+		rule("http.request.uri.path", "strict_wildcard", "*/search"),
+		rule("http.request.uri.path", "matches", "search$"),
 	}
 	for _, n := range valid {
 		if err := Check(n, env); err != nil {
@@ -103,6 +108,11 @@ func TestCheckRejectsInvalidRules(t *testing.T) {
 		{"method with a space", rule("http.request.method", "eq", "GET POST"), nil, "http.request.method values contain only"},
 		{"lowercase method", listRule("http.request.method", "in", "GET", "post"), nil, `values are uppercase, use "POST"`},
 		{"empty method", rule("http.request.method", "ne", ""), nil, "http.request.method values contain only"},
+		{"path without its leading slash", rule("http.request.uri.path", "eq", "search"), nil, `paths start with "/", such as "/search"`},
+		{"path prefix without its leading slash", rule("http.request.uri.path", "not_starts_with", "api/"), nil, `paths start with "/"`},
+		{"empty path", rule("http.request.uri.path", "eq", ""), nil, `paths start with "/"`},
+		{"path list item without its leading slash", listRule("http.request.uri.path", "in", "/login", "signup"), nil, `"signup" can never match`},
+		{"path wildcard without its leading slash", rule("http.request.uri.path", "wildcard", "search*"), nil, `paths start with "/"`},
 		{"header name with a space", Node{Field: "http.request.headers", Key: "x api", Operator: "eq", Value: Value{One: "a"}}, nil, "header and cookie names contain only"},
 		{"cookie name with a semicolon", Node{Field: "http.request.cookies", Key: "a;b", Operator: "eq", Value: Value{One: "a"}}, nil, "header and cookie names contain only"},
 		{"name with invalid UTF-8", Node{Field: "http.request.uri.args", Key: "a\xff", Operator: "eq", Value: Value{One: "a"}}, nil, "name is not valid UTF-8"},

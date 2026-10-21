@@ -17,7 +17,7 @@ func Starter() *Config {
 		defaults[kind] = kind
 	}
 	return &Config{
-		Schema: 1,
+		Schema: SupportedSchema,
 		Global: Global{
 			Backstop: Backstop{Limit: 100, Period: Duration(time.Second), Burst: 200, MaxEntries: 100_000},
 			Defaults: Defaults{BodyLimit: 10 << 20, BodyReadTimeout: Duration(30 * time.Second),

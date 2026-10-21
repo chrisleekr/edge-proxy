@@ -36,7 +36,7 @@ var testAuditKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef012
 func baseEnv(dsn string) map[string]string {
 	return map[string]string{
 		"DATABASE_URL": dsn, "AUDIT_HMAC_KEY_ID": "k1", "AUDIT_HMAC_KEY": testAuditKey,
-		"CLIENT_IP_SOURCE": "cloudfront", "UPSTREAMS": "app=http://app:8080,admin=http://admin:8080",
+		"CLIENT_IP_SOURCE": "cloudfront",
 	}
 }
 
@@ -101,7 +101,7 @@ const goodPassword = "correct horse battery staple"
 // user creates a user the way the CLI bootstraps one.
 func (h *harness) user(name string, roles ...string) string {
 	h.t.Helper()
-	id, err := CreateUser(context.Background(), h.db, h.s.cfg, "cli", name, name+"@example.com", goodPassword, roles)
+	id, err := CreateUser(context.Background(), h.db, h.s.cfg, h.now, "cli", name, name+"@example.com", goodPassword, roles)
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -251,17 +251,17 @@ func mustParse(src string) expr.Node {
 	return n
 }
 
-// testConfig is small and valid: JSON templates for every kind, /admin/
-// routed to the admin upstream, and one login limit.
+// testConfig is small and valid: JSON templates for every kind, a shorter
+// upstream timeout under /admin/, and one login limit.
 func testConfig() *snapshot.Config {
 	responses := map[string]snapshot.Response{}
 	defaults := map[string]string{}
-	for k, st := range map[string]int{"bad_request": 400, "unauthorized": 401, "misdirected": 421, "payload_too_large": 413, "rate_limited": 429, "bad_gateway": 502, "unavailable": 503, "overloaded": 503, "gateway_timeout": 504} {
+	for k, st := range map[string]int{"bad_request": 400, "unauthorized": 401, "payload_too_large": 413, "rate_limited": 429, "bad_gateway": 502, "unavailable": 503, "overloaded": 503, "gateway_timeout": 504} {
 		responses[k] = snapshot.Response{Status: st, ContentType: "application/json", Body: `{"error":"` + k + `"}`}
 		defaults[k] = k
 	}
 	return &snapshot.Config{
-		Schema: 1,
+		Schema: snapshot.SupportedSchema,
 		Global: snapshot.Global{
 			Backstop:       snapshot.Backstop{Limit: 100, Period: snapshot.Duration(time.Second), Burst: 100, MaxEntries: 1000},
 			Defaults:       snapshot.Defaults{BodyLimit: 1024, BodyReadTimeout: snapshot.Duration(time.Second), UpstreamTimeout: snapshot.Duration(2 * time.Second), Responses: defaults},
@@ -269,7 +269,7 @@ func testConfig() *snapshot.Config {
 			RequestHeaders: snapshot.RequestHeaders{Forward: snapshot.Forward{Mode: "all"}},
 		},
 		ConfigRules: []snapshot.ConfigRule{
-			{ID: "admin-route", Expression: mustParse(`starts_with(http.request.uri.path, "/admin/")`), Settings: snapshot.Settings{Upstream: new("admin")}},
+			{ID: "admin-route", Expression: mustParse(`starts_with(http.request.uri.path, "/admin/")`), Settings: snapshot.Settings{UpstreamTimeout: new(snapshot.Duration(time.Second))}},
 		},
 		RateLimitRules: []snapshot.RateLimitRule{
 			{ID: "login", Expression: mustParse(`http.request.uri.path eq "/login"`), Algorithm: "sliding_window", Limit: 10, Period: snapshot.Duration(time.Minute),
@@ -278,9 +278,9 @@ func testConfig() *snapshot.Config {
 	}
 }
 
-// adminTest checks that /admin/ goes to the admin upstream.
+// adminTest checks that /admin/ gets the shorter upstream timeout.
 var adminTest = ConfigTest{Name: "admin is routed", Request: TestRequest{Host: "api.example.com", Path: "/%61dmin/users"},
-	Expect: TestExpect{ConfigRules: &[]string{"admin-route"}, Settings: map[string]any{"upstream": "admin"}}}
+	Expect: TestExpect{ConfigRules: &[]string{"admin-route"}, Settings: map[string]any{"upstream_timeout": "1s"}}}
 
 func clone(c *snapshot.Config) *snapshot.Config {
 	b, _ := json.Marshal(c)

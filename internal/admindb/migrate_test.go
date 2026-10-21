@@ -125,7 +125,7 @@ func TestRuntimeRoleLimits(t *testing.T) {
 func TestRolePermissions(t *testing.T) {
 	_, app := migrated(t)
 	var n int
-	if err := app.QueryRow(t.Context(), "SELECT count(*) FROM role_permissions WHERE role = 'admin'").Scan(&n); err != nil || n != 11 {
+	if err := app.QueryRow(t.Context(), "SELECT count(*) FROM role_permissions WHERE role = 'admin'").Scan(&n); err != nil || n != 12 {
 		t.Fatalf("admin has %d permissions, %v", n, err)
 	}
 }

@@ -28,7 +28,9 @@ var runtimeGrants = []string{
 	"GRANT SELECT, INSERT ON audit_events TO %[1]s",
 	"GRANT SELECT, INSERT, UPDATE ON config_versions TO %[1]s",
 	"GRANT SELECT, INSERT, UPDATE, DELETE ON users, user_identities, local_credentials, user_roles, group_role_mappings, " +
-		"sessions, api_tokens, config_draft, canary, jwks_keys, settings, fleet, edge_stats_minute TO %[1]s",
+		"sessions, api_tokens, config_draft, canary, jwks_keys, settings, fleet, edge_stats_minute, " +
+		"observed_routes, observed_route_hour, route_patterns TO %[1]s",
+	"GRANT USAGE ON SEQUENCE observed_routes_id_seq, route_patterns_id_seq TO %[1]s",
 }
 
 // Migrate applies new migrations in order, each in its own transaction,

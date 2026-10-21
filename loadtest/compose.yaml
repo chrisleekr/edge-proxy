@@ -8,8 +8,6 @@ x-trust: &trust
   # k6 sends the CloudFront viewer header itself, standing in for the CDN.
   # make demo widens this so curl on the host can stand in for the CDN.
   TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.77.0.0/24}
-  UPSTREAMS: app=http://upstream:8080
-  UPSTREAM_HOSTS: api.example.com=app
   JWKS_ALLOWED_HOSTS: idp
   SSL_CERT_FILE: /shared/ca.pem
 
@@ -32,6 +30,11 @@ x-edge: &edge
 
 x-edge-env: &edge-env
   <<: *trust
+  # Every request goes here; it stands in for the LB or gateway behind the edge.
+  UPSTREAM_URL: http://upstream:8080
+  # Load tests keep the default 50ms; make demo raises it, since a 2 CPU
+  # Docker VM running k6 beside the stack pauses Valkey longer than that.
+  VALKEY_TIMEOUT: ${VALKEY_TIMEOUT:-50ms}
   ADMIN_URL: http://admin:8081
   EDGE_SERVICE_TOKEN_FILE: /shared/edge-token
   # VALKEY_URL selects the 3-shard cluster with COMPOSE_PROFILES=cluster.
@@ -39,10 +42,7 @@ x-edge-env: &edge-env
   EXPECTED_REPLICAS: "3"
   # The mock LB checks /readyz every second, so 5s is enough to leave it.
   # 10k streams over three edges, with room to lose one.
-  # Streams also hold an upstream slot, so the per-upstream cap needs room
-  # for them on top of ordinary requests.
   MAX_STREAMS: "6000"
-  MAX_UPSTREAM_INFLIGHT: "8000"
   DRAIN_DELAY: 5s
   SHUTDOWN_TIMEOUT: 30s
   # Unsampled logs at load-test rates would measure the log pipe.
@@ -57,6 +57,39 @@ networks:
 volumes:
   shared:
 
+configs:
+  # The demo log shipper's token, for this throwaway environment only.
+  log-token:
+    content: demo-log-shipper-token-not-a-secret-0001
+  # Keeps edge-1's access lines and posts them to admin, as the Helm
+  # chart's shipper does with pod logs.
+  vector:
+    content: |
+      sources:
+        edge:
+          type: docker_logs
+          include_labels: ["com.docker.compose.project=edge-demo", "com.docker.compose.service=edge-1"]
+      transforms:
+        access:
+          type: remap
+          inputs: [edge]
+          source: |
+            parsed, err = parse_json(string(.message) ?? "")
+            if err != null || !is_object(parsed) { abort }
+            . = object!(parsed)
+            if .msg != "access" { abort }
+      sinks:
+        admin:
+          type: http
+          inputs: [access]
+          uri: http://admin:8081/v1/logs/access
+          encoding: { codec: json }
+          framing: { method: newline_delimited }
+          auth: { strategy: bearer, token: demo-log-shipper-token-not-a-secret-0001 }
+          healthcheck: { enabled: false }
+          batch: { max_bytes: 1000000, timeout_secs: 5 }
+          buffer: { type: memory, max_events: 10000, when_full: drop_newest }
+
 services:
   postgres:
     image: edge-proxy/postgres:dev
@@ -67,7 +100,9 @@ services:
         COPY postgres-init.sql /docker-entrypoint-initdb.d/init.sql
     environment: { POSTGRES_PASSWORD: postgres }
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d edge_admin"]
+      # Over TCP: the init scripts run on a socket-only server that then
+      # restarts, and a socket check would pass before migrate can connect.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d edge_admin"]
       interval: 1s
       retries: 30
 
@@ -103,7 +138,8 @@ services:
 
   admin:
     image: edge-proxy/admin:dev
-    environment: *admin-env
+    environment: { <<: *admin-env, LOG_INGEST_TOKEN_FILE: /log-token }
+    configs: [{ source: log-token, target: /log-token }]
     ports: ["127.0.0.1:8081:8081"]
     volumes: [shared:/shared:ro]
     depends_on:
@@ -116,6 +152,7 @@ services:
     environment:
       <<: *admin-env
       SHARED: /shared
+      SEED_POLICY: ${SEED_POLICY:-load}
     volumes: [shared:/shared]
     depends_on:
       admin: { condition: service_started }
@@ -130,6 +167,16 @@ services:
   edge-3:
     <<: *edge
     environment: { <<: *edge-env, INSTANCE: edge-3 }
+
+  # make demo only: Routes in admin is built from these lines. It reads
+  # Docker's socket to find edge-1's output, which a load test never needs.
+  log-shipper:
+    image: timberio/vector:0.60.0-distroless-libc@sha256:a9ed9a4710bdc2efa66e94c1e8edc7b439709e6e50079f1e1b2b1bf479d387da
+    profiles: [demo]
+    command: [--config, /etc/vector/vector.yaml]
+    configs: [{ source: vector, target: /etc/vector/vector.yaml }]
+    volumes: [/var/run/docker.sock:/var/run/docker.sock:ro]
+    depends_on: [admin, edge-1]
 
   # Stands in for the cloud LB in front of the edges.
   lb:

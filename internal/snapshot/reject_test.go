@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ type rejectCase struct {
 func TestCompileRejects(t *testing.T) {
 	cases := []rejectCase{
 		// Top level.
-		{"newer schema than this build reads", func(c *Config) { c.Schema = 2 }, nil, "schema", "schema 2 is not supported"},
+		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 3 is not supported"},
 		{"version zero", func(c *Config) { c.Version = 0 }, nil, "version", "at least 1"},
 		{"config over 8 MB", addHugeHeaderRules, nil, "", "bytes as JSON"},
 
@@ -30,7 +31,7 @@ func TestCompileRejects(t *testing.T) {
 		{"backstop limit zero", func(c *Config) { c.Global.Backstop.Limit = 0 }, nil, "global.backstop.limit", "must be 1 to"},
 		{"backstop period over an hour", func(c *Config) { c.Global.Backstop.Period = dur("2h") }, nil, "global.backstop.period", "whole seconds from 1s to 1h0m0s"},
 		{"backstop burst over the cap", func(c *Config) { c.Global.Backstop.Burst = MaxCount + 1 }, nil, "global.backstop.burst", "must be 1 to"},
-		{"backstop without a memory bound", func(c *Config) { c.Global.Backstop.MaxEntries = 0 }, nil, "global.backstop.max_entries", "must be 1 to"},
+		{"backstop without a memory bound", func(c *Config) { c.Global.Backstop.MaxEntries = 0 }, nil, "global.backstop.max_entries", "must be 1 to 10,000,000"},
 
 		// Response templates.
 		{"too many templates", func(c *Config) {
@@ -74,7 +75,7 @@ func TestCompileRejects(t *testing.T) {
 		{"default for an unknown kind", func(c *Config) { c.Global.Defaults.Responses["teapot"] = "bad_request_json" }, nil, "global.defaults.responses", `unknown response kind "teapot"`},
 		{"default names a missing template", func(c *Config) { c.Global.Defaults.Responses["bad_request"] = "nope" }, nil, "global.defaults.responses", `bad_request uses template "nope", which doesn't exist`},
 		{"default with the wrong status", func(c *Config) { c.Global.Defaults.Responses["rate_limited"] = "bad_request_json" }, nil, "global.defaults.responses", "rate_limited needs a template with status 429"},
-		{"default missing a kind", func(c *Config) { delete(c.Global.Defaults.Responses, "misdirected") }, nil, "global.defaults.responses", `needs a template for "misdirected"`},
+		{"default missing a kind", func(c *Config) { delete(c.Global.Defaults.Responses, "bad_gateway") }, nil, "global.defaults.responses", `needs a template for "bad_gateway"`},
 
 		// CORS.
 		{"too many CORS policies", func(c *Config) {
@@ -105,7 +106,7 @@ func TestCompileRejects(t *testing.T) {
 		{"any request header with credentials", func(c *Config) {
 			setCORS(c, "app", func(p *CORSPolicy) { p.RequestHeaders = []string{"*"} })
 		}, nil, `global.cors_policies["app"].request_headers[0]`, `"*" can't be used with credentials`},
-		{"exposed header with a space", func(c *Config) { setCORS(c, "app", func(p *CORSPolicy) { p.ExposedHeaders = []string{"Rate Limit"} }) }, nil, `global.cors_policies["app"].exposed_headers[0]`, "not a valid header name"},
+		{"exposed header with a space", func(c *Config) { setCORS(c, "app", func(p *CORSPolicy) { p.ExposedHeaders = []string{"Rate Limit"} }) }, nil, `global.cors_policies["app"].exposed_headers[0]`, "is not a valid header name; use letters, digits and -, such as x-request-id"},
 		{"header listed twice in different case", func(c *Config) {
 			setCORS(c, "app", func(p *CORSPolicy) { p.RequestHeaders = []string{"Content-Type", "content-type"} })
 		}, nil, `global.cors_policies["app"].request_headers[1]`, "duplicate"},
@@ -191,7 +192,6 @@ func TestCompileRejects(t *testing.T) {
 		}, nil, "config_rules[1].settings.locale", "locale is not configured"},
 		{"rule response with the wrong status", func(c *Config) { c.ConfigRules[1].Settings.Responses["unauthorized"] = "bad_request_json" }, nil, "config_rules[1].settings.responses", "unauthorized needs a template with status 401"},
 		{"zero body limit", func(c *Config) { c.ConfigRules[1].Settings.BodyLimit = new(int64(0)) }, nil, "config_rules[1].settings.body_limit", "at least 1 byte"},
-		{"upstream not in deployment", func(c *Config) { c.ConfigRules[0].Settings.Upstream = new("payments") }, nil, "config_rules[0].settings.upstream", `upstream "payments" is not defined in deployment config`},
 		{"upstream timeout of zero", func(c *Config) { c.ConfigRules[0].Settings.UpstreamTimeout = new(Duration(0)) }, nil, "config_rules[0].settings.upstream_timeout", "from 1s"},
 
 		// Rate-limit rules.
@@ -206,7 +206,7 @@ func TestCompileRejects(t *testing.T) {
 			}
 		}, nil, "rate_limit_rules", "at most 200"},
 		{"unknown algorithm", func(c *Config) { c.RateLimitRules[1].Algorithm = "sliding_log" }, nil, "rate_limit_rules[1].algorithm", "must be one of fixed_window"},
-		{"zero limit", func(c *Config) { c.RateLimitRules[1].Limit = 0 }, nil, "rate_limit_rules[1].limit", "must be 1 to"},
+		{"zero limit", func(c *Config) { c.RateLimitRules[1].Limit = 0 }, nil, "rate_limit_rules[1].limit", "must be 1 to 1,000,000,000"},
 		{"fractional period", func(c *Config) { c.RateLimitRules[1].Period = dur("1500ms") }, nil, "rate_limit_rules[1].period", "whole seconds"},
 		{"period over a day", func(c *Config) { c.RateLimitRules[1].Period = dur("25h") }, nil, "rate_limit_rules[1].period", "whole seconds from 1s to 24h0m0s"},
 		{"token bucket without burst", func(c *Config) { c.RateLimitRules[0].Burst = 0 }, nil, "rate_limit_rules[0].burst", "must be 1 to"},
@@ -227,10 +227,10 @@ func TestCompileRejects(t *testing.T) {
 			c.RateLimitRules[3].Expression = expr.True()
 			c.RateLimitRules[0].Expression = mustParse("ssl")
 			c.RequestHeaderRules[1].Ops[1].Value = "x"
-		}, &Deployment{Upstreams: []string{"orders"}, ViewerFields: []string{"ip.src.asnum", "ssl"}}, "rate_limit_rules[3].key[1]", "country has no trusted source"},
+		}, &Deployment{ViewerFields: []string{"ip.src.asnum", "ssl"}}, "rate_limit_rules[3].key[1]", "country has no trusted source"},
 		{"asnum key with no ASN source", func(c *Config) {
 			c.RateLimitRules[3].Key = []string{"jwt_claim:tenant", "asnum"}
-		}, &Deployment{Upstreams: []string{"orders"}, ViewerFields: []string{"ip.src.country", "ssl"}}, "rate_limit_rules[3].key[1]", "asnum has no trusted source"},
+		}, &Deployment{ViewerFields: []string{"ip.src.country", "ssl"}}, "rate_limit_rules[3].key[1]", "asnum has no trusted source"},
 		{"locale key with no locales", func(c *Config) {
 			c.Global.Locale = Locale{}
 			c.ConfigRules[1].Settings.Locale = nil
@@ -280,7 +280,7 @@ func TestCompileRejects(t *testing.T) {
 		{"set a CDN source header", func(c *Config) { c.RequestHeaderRules[1].Ops[0].Name = "cloudfront-viewer-country" }, nil, "request_header_rules[1].ops[0].name", "Cloudfront-Viewer-Country is managed by the edge"},
 		{"remove the ingress secret", func(c *Config) { c.RequestHeaderRules[1].Ops[2].Name = "X-Origin-Secret" }, nil, "request_header_rules[1].ops[2].name", "is managed by the edge"},
 		{"copy from a hop-by-hop header", func(c *Config) { c.RequestHeaderRules[0].Ops[0].From = "Connection" }, nil, "request_header_rules[0].ops[0].from", "Connection is managed by the edge"},
-		{"rename to an invalid name", func(c *Config) { c.RequestHeaderRules[1].Ops[3].To = "X New" }, nil, "request_header_rules[1].ops[3].to", "not a valid header name"},
+		{"rename to an invalid name", func(c *Config) { c.RequestHeaderRules[1].Ops[3].To = "X New" }, nil, "request_header_rules[1].ops[3].to", `"X New" is not a valid header name; use letters, digits and -, such as x-tenant`},
 		{"header value with CRLF", func(c *Config) { c.RequestHeaderRules[1].Ops[0].Value = "a\r\nX-Admin: 1" }, nil, "request_header_rules[1].ops[0].value", "no control characters"},
 		{"header value over 4 KB", func(c *Config) { c.RequestHeaderRules[1].Ops[0].Value = strings.Repeat("v", MaxHeaderValue+1) }, nil, "request_header_rules[1].ops[0].value", "at most 4096 bytes"},
 		{"header value with invalid UTF-8", func(c *Config) { c.RequestHeaderRules[1].Ops[0].Value = "\xff" }, nil, "request_header_rules[1].ops[0].value", "valid UTF-8"},
@@ -291,7 +291,7 @@ func TestCompileRejects(t *testing.T) {
 		{"client_ip placeholder with a name", func(c *Config) { c.RequestHeaderRules[1].Ops[0].Value = "{{client_ip:v4}}" }, nil, "request_header_rules[1].ops[0].value", "{{client_ip}}: takes no name"},
 		{"country placeholder with no country source", func(c *Config) {
 			c.RateLimitRules[3] = RateLimitRule{ID: "tenant", Expression: mustParse("ssl"), Algorithm: "fixed_window", Limit: 1, Period: dur("1s"), Key: []string{"ip"}, OnMissingKey: "skip", Action: "log", FailMode: "open"}
-		}, &Deployment{Upstreams: []string{"orders"}, ViewerFields: []string{"ssl"}}, "request_header_rules[1].ops[1].value", "{{country}}: country has no trusted source"},
+		}, &Deployment{ViewerFields: []string{"ssl"}}, "request_header_rules[1].ops[1].value", "{{country}}: country has no trusted source"},
 		{"locale placeholder with no locales", func(c *Config) {
 			c.Global.Locale = Locale{}
 			c.ConfigRules[1].Settings.Locale = nil
@@ -334,6 +334,25 @@ func runRejects(t *testing.T, cases []rejectCase) {
 			}
 			t.Fatalf("no error at %q mentioning %q; got %v", tc.path, tc.msg, expr.Issues(errs))
 		})
+	}
+}
+
+// The admin UI asks for a name for exactly the NamedKeyKinds, so each of
+// them must need one and every other kind must refuse one.
+func TestNamedKeyKindsAgreeWithValidation(t *testing.T) {
+	for _, kind := range KeyKinds {
+		part := kind
+		if !slices.Contains(NamedKeyKinds, kind) {
+			part += ":x"
+		}
+		c := validConfig()
+		c.RateLimitRules[1].Key = []string{part}
+		_, _, errs := Compile(c, testDeployment)
+		if !slices.ContainsFunc(errs, func(e expr.Issue) bool {
+			return e.Path == "rate_limit_rules[1].key[0]" && strings.Contains(e.Msg, "name")
+		}) {
+			t.Errorf("key %q: no error about its name; got %v", part, expr.Issues(errs))
+		}
 	}
 }
 

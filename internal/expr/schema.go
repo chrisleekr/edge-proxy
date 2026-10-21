@@ -57,6 +57,8 @@ type FieldDef struct {
 	TokenKey bool
 	// TokenValue means values are RFC 9110 tokens (request methods).
 	TokenValue bool
+	// Slash means values start with "/": the edge rejects any other path.
+	Slash bool
 	// Case is the letter case the edge delivers the value in, so the checker
 	// can reject case-sensitive comparisons that can never match.
 	Case Case
@@ -76,7 +78,7 @@ const (
 var Fields = []FieldDef{
 	{Name: "http.request.full_uri", Label: "URI Full", Type: TypeString, Source: SourceRequest},
 	{Name: "http.request.uri", Label: "URI", Type: TypeString, Source: SourceRequest},
-	{Name: "http.request.uri.path", Label: "URI Path", Type: TypeString, Source: SourceRequest},
+	{Name: "http.request.uri.path", Label: "URI Path", Type: TypeString, Source: SourceRequest, Slash: true},
 	{Name: "http.request.uri.query", Label: "URI Query String", Type: TypeString, Source: SourceRequest},
 	{Name: "http.request.uri.args", Label: "URI Query Argument", Type: TypeStringList, Keyed: true, Source: SourceRequest},
 	{Name: "http.host", Label: "Hostname", Type: TypeString, Source: SourceRequest, Case: CaseLower},

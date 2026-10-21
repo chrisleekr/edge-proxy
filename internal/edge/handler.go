@@ -12,11 +12,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
-	"net/url"
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
@@ -30,7 +28,6 @@ type kind int
 const (
 	kBadRequest kind = iota
 	kUnauthorized
-	kMisdirected
 	kPayloadTooLarge
 	kRateLimited
 	kBadGateway
@@ -43,7 +40,7 @@ const (
 // kindNames must name exactly snapshot's response kinds: an unknown name
 // would map to kBadRequest. A test checks they agree.
 var kindNames = [numKinds]string{
-	"bad_request", "unauthorized", "misdirected", "payload_too_large", "rate_limited",
+	"bad_request", "unauthorized", "payload_too_large", "rate_limited",
 	"bad_gateway", "unavailable", "overloaded", "gateway_timeout",
 }
 
@@ -63,7 +60,6 @@ type settings struct {
 	locale           bool
 	responses        [numKinds]string // template names
 	bodyLimit        int64
-	upstream         string
 	upstreamTimeout  time.Duration
 	rateLimitHeaders bool
 }
@@ -109,9 +105,6 @@ func resolve(c *snapshot.Compiled, s settings, req expr.Request, matched []int) 
 		if r.BodyLimit != nil {
 			s.bodyLimit = *r.BodyLimit
 		}
-		if r.Upstream != nil {
-			s.upstream = *r.Upstream
-		}
 		if r.UpstreamTimeout != nil {
 			s.upstreamTimeout = time.Duration(*r.UpstreamTimeout)
 		}
@@ -133,7 +126,6 @@ type Edge struct {
 	m         *metrics
 	alog      *accessLog
 	log       *slog.Logger
-	upstreams map[string]*upstream
 	valkey    *ratelimit.Valkey // nil without VALKEY_URL
 	penalties *ratelimit.Penalties
 	tokens    *tokenCache
@@ -142,13 +134,6 @@ type Edge struct {
 	now       func() time.Time
 	// strip are the canonical source headers removed before forwarding.
 	strip []string
-}
-
-type upstream struct {
-	name      string
-	url       *url.URL
-	transport http.RoundTripper
-	inflight  atomic.Int64
 }
 
 // reqState is everything one request accumulates. It is allocated once per
@@ -183,7 +168,6 @@ type reqState struct {
 
 	// Set by proxy for the shared ReverseProxy's hooks.
 	ctx     stateCtx
-	up      *upstream
 	upTimer *time.Timer
 }
 
@@ -244,16 +228,6 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	if st.set.locale {
 		st.fields.loc = st.ver.locale
 	}
-	name := st.set.upstream
-	if name == "" {
-		name = e.cfg.HostUpstream[st.fields.host]
-	}
-	up := e.upstreams[name]
-	if up == nil {
-		e.reject(st, kMisdirected, reasonMisdirected)
-		return
-	}
-
 	// Step 5: per-replica backstop, before any costly work.
 	if !e.backstop(st) {
 		return
@@ -277,7 +251,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	}
 
 	// Step 10: proxy.
-	e.proxy(st, r, up)
+	e.proxy(st, r)
 }
 
 // isStream reports a WebSocket upgrade or an SSE request.
@@ -338,12 +312,21 @@ func newRequestID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// requestIDChars is a byte table, so checking a trusted ID is one load per
+// byte instead of a scan of the allowed set.
+var requestIDChars = func() (t [256]bool) {
+	for _, c := range []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") {
+		t[c] = true
+	}
+	return t
+}()
+
 func validRequestID(v string) bool {
 	if v == "" || len(v) > 128 {
 		return false
 	}
 	for i := 0; i < len(v); i++ {
-		if strings.IndexByte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-", v[i]) < 0 {
+		if !requestIDChars[v[i]] {
 			return false
 		}
 	}

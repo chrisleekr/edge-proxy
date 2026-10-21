@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/chrisleekr/edge-proxy/internal/edge"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
@@ -27,7 +28,7 @@ func TestEdgeRunsOnAdmin(t *testing.T) {
 	t.Cleanup(plain.Close)
 	cfg, err := edge.LoadConfig(env(map[string]string{
 		"ADMIN_URL": plain.URL, "EDGE_SERVICE_TOKEN": h.edgeToken(pub), "STATS_INTERVAL": "50ms", "POLL_INTERVAL": "50ms",
-		"CLIENT_IP_SOURCE": "cloudfront", "TRUSTED_PROXIES": "127.0.0.1/32", "UPSTREAMS": "app=http://127.0.0.1:1,admin=http://127.0.0.1:1",
+		"CLIENT_IP_SOURCE": "cloudfront", "TRUSTED_PROXIES": "127.0.0.1/32", "UPSTREAM_URL": "http://127.0.0.1:1",
 		"INSTANCE": "edge-a", "DRAIN_DELAY": "1ms",
 	}))
 	if err != nil {
@@ -91,31 +92,37 @@ func TestReportsAreAggregated(t *testing.T) {
 	e.token = h.edgeToken(pub)
 	rep := func(instance string, requests uint64, top ...edge.TopCount) {
 		t.Helper()
-		status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: instance, ConfigSource: "admin", Versions: []edge.StatsCounts{{
+		status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: instance, ConfigSource: "admin", Upstream: "https://lb.internal:443", Versions: []edge.StatsCounts{{
 			Version: 1, Requests: requests, Edge5xx: 1, AuthFailures: 2, LatencyMS: []uint64{requests, 0, 1},
 			RateLimit:  []edge.RuleCounts{{ID: "login", Evaluated: requests, Limited: 1}},
 			TopLimited: top,
 		}}}), 200)
 	}
-	rep("edge-a", 10, edge.TopCount{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 16})
-	rep("edge-b", 5, edge.TopCount{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 32})
+	// k3 is a log-only rule's subject: its would-limit estimates sum apart from limited.
+	rep("edge-a", 10, edge.TopCount{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 16},
+		edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", WouldLimit: 16})
+	rep("edge-b", 5, edge.TopCount{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 32},
+		edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", WouldLimit: 16})
 	status(t, e.do("POST", "/v1/edge/report", map[string]any{"instance": ""}), 422)
 	status(t, e.do("POST", "/v1/edge/report", "not json"), 400)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Deployment: strings.Repeat("f", 65)}), 422)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Upstream: "https://lb\x00"}), 422)
 	// A count no edge can reach would overflow the minute's sums and fail
 	// the batch insert, dropping every edge's stats for that minute.
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, Requests: 1 << 63}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, LatencyMS: []uint64{1 << 63}}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, RateLimit: []edge.RuleCounts{{ID: "login", Limited: 1 << 63}}}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Key: "k", Limited: 1 << 63}}}}}), 422)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Key: "k", WouldLimit: 1 << 63}}}}}), 422)
 	// Postgres refuses NUL in jsonb; one in the batch would fail it the same way.
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Rule: "login", Key: "k2", Display: "q=\x00", Limited: 1}}}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, RateLimit: []edge.RuleCounts{{ID: "lo\x00gin", Limited: 1}}}}}), 422)
 	fleet := decode[[]struct {
 		Instance string
+		Upstream string
 		Live     bool
 	}](t, pub.do("GET", "/api/fleet", nil))
-	if len(fleet) != 2 || !fleet[0].Live {
+	if len(fleet) != 2 || !fleet[0].Live || fleet[0].Upstream != "https://lb.internal:443" {
 		t.Fatalf("fleet %+v", fleet)
 	}
 	if env := decode[snapshot.Envelope](t, e.do("GET", "/v1/snapshot", nil)); env.FleetSize != 2 {
@@ -135,7 +142,8 @@ func TestReportsAreAggregated(t *testing.T) {
 	}
 	rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
 	if len(rows) != 1 || rows[0].Requests != 15 || rows[0].Edge5xx != 2 || rows[0].AuthFailures != 4 || !slices.Equal(rows[0].LatencyMS, []uint64{15, 0, 2}) ||
-		rows[0].RateLimit[0] != (edge.RuleCounts{ID: "login", Evaluated: 15, Limited: 2}) || len(rows[0].TopLimited) != 1 || rows[0].TopLimited[0].Limited != 48 {
+		rows[0].RateLimit[0] != (edge.RuleCounts{ID: "login", Evaluated: 15, Limited: 2}) || len(rows[0].TopLimited) != 2 || rows[0].TopLimited[0].Limited != 48 ||
+		rows[0].TopLimited[1] != (edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", WouldLimit: 32}) {
 		t.Fatalf("stats %+v", rows)
 	}
 	status(t, pub.do("GET", "/api/stats?minutes=0", nil), 400)
@@ -150,6 +158,42 @@ func TestReportsAreAggregated(t *testing.T) {
 	_ = h.db.QueryRow(t.Context(), "SELECT count(*) FROM fleet").Scan(&f)
 	if n != 0 || f != 0 {
 		t.Fatalf("kept %d stats rows and %d fleet rows", n, f)
+	}
+}
+
+// The dashboard shows the minute in progress: each flush writes its running
+// sum, and the next one replaces it rather than adding it twice.
+func TestCurrentMinuteIsShownBeforeItEnds(t *testing.T) {
+	h, pub := published(t)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	report := func(requests uint64) {
+		t.Helper()
+		status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-a", ConfigSource: "admin", Versions: []edge.StatsCounts{{
+			Version: 1, Requests: requests, LatencyMS: []uint64{requests},
+			RateLimit:  []edge.RuleCounts{{ID: "login", Evaluated: requests, Limited: 1}},
+			TopLimited: []edge.TopCount{{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 1}},
+		}}}), 200)
+	}
+	requests := func() []statsRow {
+		t.Helper()
+		if err := h.s.flush(t.Context(), h.now()); err != nil {
+			t.Fatal(err)
+		}
+		return decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
+	}
+	report(10)
+	if rows := requests(); len(rows) != 1 || rows[0].Requests != 10 {
+		t.Fatalf("after one report %+v", rows)
+	}
+	report(5)
+	rows := requests()
+	if len(rows) != 1 || rows[0].Requests != 15 || rows[0].RateLimit[0].Limited != 2 || len(rows[0].TopLimited) != 1 || rows[0].TopLimited[0].Limited != 2 {
+		t.Fatalf("after two reports %+v", rows)
+	}
+	h.advance(time.Minute)
+	if rows := requests(); len(rows) != 1 || rows[0].Requests != 15 {
+		t.Fatalf("after the minute ended %+v", rows)
 	}
 }
 
@@ -199,12 +243,12 @@ func TestPublishWaitsForEdgesWithTheSameDeployment(t *testing.T) {
 	check := func() error {
 		return pgx.BeginFunc(ctx, h.db, func(tx pgx.Tx) error { return h.s.checkDeployment(ctx, tx) })
 	}
-	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-a", Deployment: h.s.cfg.Deployment.Fingerprint()}), 200)
-	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "old-build"}), 200) // predates the field
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-a", MaxSchema: snapshot.SupportedSchema, Deployment: h.s.cfg.Deployment.Fingerprint()}), 200)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "old-build", MaxSchema: snapshot.SupportedSchema}), 200) // predates the field
 	if err := check(); err != nil {
 		t.Fatalf("matching fleet: %v", err)
 	}
-	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-b", Deployment: "0123456789abcdef"}), 200)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-b", MaxSchema: snapshot.SupportedSchema, Deployment: "0123456789abcdef"}), 200)
 	if p, ok := errors.AsType[*problem](check()); !ok || p.Status != 409 || !strings.Contains(p.Detail, "edge edge-b") {
 		t.Fatalf("drifted edge: %v", check())
 	}
@@ -218,5 +262,40 @@ func TestPublishWaitsForEdgesWithTheSameDeployment(t *testing.T) {
 	h.advance(2 * time.Minute)
 	if err := check(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Admin UI work that holds every connection of the main pool, such as
+// audit exports, must not hold up edges: a publish or rollback still
+// reaches them, and their reports are still taken.
+func TestEdgesAreServedWhileUIHoldsEveryConnection(t *testing.T) {
+	h, pub := published(t)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	edgeDB, err := pgxpool.New(t.Context(), h.db.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(edgeDB.Close)
+	h.s.edgeDB = edgeDB
+	for range h.db.Config().MaxConns {
+		c, err := h.db.Acquire(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(c.Release)
+	}
+	done := make(chan [2]int, 1)
+	go func() {
+		snap := e.do("GET", "/v1/snapshot", nil).StatusCode
+		done <- [2]int{snap, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-a"}).StatusCode}
+	}()
+	select {
+	case got := <-done:
+		if got != [2]int{200, 200} {
+			t.Fatalf("snapshot and report answered %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("edge requests waited for a connection the UI holds")
 	}
 }

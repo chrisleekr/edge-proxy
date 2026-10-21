@@ -27,7 +27,7 @@ func TestBrowserStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The browser connects directly, so its peer address is the client.
-	h := newHarness(t, map[string]string{"CLIENT_IP_SOURCE": "remote_addr", "UPSTREAM_HOSTS": "127.0.0.1=app"})
+	h := newHarness(t, map[string]string{"CLIENT_IP_SOURCE": "remote_addr"})
 	h.load(envelope(testConfig(1)))
 	next := make(chan struct{}, 1)
 	h.appHandler = func(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +70,7 @@ func TestBrowserStreams(t *testing.T) {
 		t.Fatalf("playwright: %v", err)
 	}
 	// Every stream a browser opened was released when it closed.
-	waitFor(t, func() bool { return h.srv.m.streams.Load() == 0 && h.srv.edge.upstreams["app"].inflight.Load() == 0 })
+	waitFor(t, func() bool { return h.srv.m.streams.Load() == 0 })
 }
 
 // browserEcho answers a browser WebSocket: it accepts the "chat"

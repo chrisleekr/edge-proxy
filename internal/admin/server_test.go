@@ -188,3 +188,33 @@ func TestJSONBodyLimits(t *testing.T) {
 	status(t, send(pub, "/api/tokens", `{"name":"x","kind":"edge"} junk`), 400)
 	status(t, send(pub, "/api/tokens", `{"name":"`+strings.Repeat("a", maxBody)+`","kind":"edge"}`), 413)
 }
+
+// An audit row is dated by admin's clock, the one its change is stamped
+// with, so it agrees with the version it describes.
+func TestAuditRowTakesTheChangeTime(t *testing.T) {
+	h := newHarness(t)
+	h.advance(36 * time.Hour) // away from the wall clock
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	users := decode[[]struct {
+		Created time.Time `json:"created_at"`
+	}](t, pub.do("GET", "/api/users", nil))
+	created := decode[[]struct {
+		OccurredAt time.Time `json:"occurred_at"`
+	}](t, pub.do("GET", "/api/audit?action=user.create", nil))
+	if len(users) != 1 || len(created) != 1 || !users[0].Created.Equal(created[0].OccurredAt) || !created[0].OccurredAt.Equal(h.now().UTC().Truncate(time.Microsecond)) {
+		t.Fatalf("user created at %+v, audited at %+v, clock %s", users, created, h.now())
+	}
+	status(t, pub.save(`"0"`, testConfig(), adminTest), 200)
+	status(t, pub.publishDraft("v1"), 201)
+	rows := decode[[]struct {
+		Action     string    `json:"action"`
+		OccurredAt time.Time `json:"occurred_at"`
+	}](t, pub.do("GET", "/api/audit?action=config.publish", nil))
+	versions := decode[[]struct {
+		PublishedAt time.Time `json:"published_at"`
+	}](t, pub.do("GET", "/api/versions", nil))
+	if len(rows) != 1 || len(versions) != 1 || !rows[0].OccurredAt.Equal(versions[0].PublishedAt) || !rows[0].OccurredAt.Equal(h.now().UTC().Truncate(time.Microsecond)) {
+		t.Fatalf("publish audited at %+v, version published at %+v, clock %s", rows, versions, h.now())
+	}
+}
