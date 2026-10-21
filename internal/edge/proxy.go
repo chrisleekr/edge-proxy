@@ -130,7 +130,12 @@ func (e *Edge) rewrite(pr *httputil.ProxyRequest, st *reqState) {
 		// TLS names the request's own host, as the Host header does, so a
 		// load balancer or gateway that picks its certificate and route by
 		// SNI serves this host. The dial still goes to UPSTREAM_URL.
-		if h := st.fields.host; u.Port() == "443" && !strings.Contains(h, ":") {
+		h := st.fields.host
+		if h == "" {
+			// HTTP/1.0 may omit Host: name the upstream, as an http one is reached.
+			h = u.Hostname()
+		}
+		if u.Port() == "443" && !strings.Contains(h, ":") {
 			pr.Out.URL.Host = h // the default port, without an allocation per request
 		} else {
 			pr.Out.URL.Host = net.JoinHostPort(h, u.Port())

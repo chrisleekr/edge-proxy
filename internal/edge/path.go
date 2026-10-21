@@ -69,7 +69,8 @@ func keepEncodedSlash(escaped string) (string, bool) {
 		d, _ := url.PathUnescape(s) // the server already parsed the whole path
 		if strings.Contains(d, "/") {
 			for part := range strings.SplitSeq(d, "/") {
-				if part == "." || part == ".." {
+				// A gateway that strips ";x", as dropParams does, sees "..;x" as "..".
+				if name, _, _ := strings.Cut(part, ";"); name == "." || name == ".." {
 					return "", false
 				}
 			}

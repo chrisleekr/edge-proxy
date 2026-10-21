@@ -60,6 +60,9 @@ func TestMatchPath(t *testing.T) {
 		{"/public/..%2Fadmin", "", errAmbiguousPath},
 		{"/public/.%2Fadmin", "", errAmbiguousPath},
 		{"/public/%2e%2e%2Fadmin", "", errAmbiguousPath},
+		// A gateway that strips ";x" sees "..", as dropParams does below.
+		{"/public%2F..;x/admin", "", errAmbiguousPath},
+		{"/public%2F..%3Bx/admin", "", errAmbiguousPath},
 		// Dots inside a name are not dot-segments.
 		{"/files/a..b%2Fc", "/files/a..b%2Fc", nil},
 		// %2F only in the userinfo of an absolute-form target: the path has

@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"bufio"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -47,6 +49,40 @@ func TestHTTPSUpstreamIsNamedByTheRequestHost(t *testing.T) {
 		}
 	}
 	edgeError(t, h.do("GET", "/", nil, "Host", "other.example.com"), 502, "bad_gateway")
+}
+
+// HTTP/1.0 allows a request with no Host. Over HTTPS the edge then names the
+// upstream by its own host, as an http upstream is reached, so the load
+// balancer answers it rather than the edge failing it as a 502.
+func TestHTTPSUpstreamNamesItselfForARequestWithoutHost(t *testing.T) {
+	cert, roots := selfSigned(t, "localhost")
+	lb := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.TLS.ServerName+" Host="+r.Host)
+	}))
+	lb.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	lb.StartTLS()
+	t.Cleanup(lb.Close)
+	old := upstreamRoots
+	upstreamRoots = roots
+	t.Cleanup(func() { upstreamRoots = old })
+	_, port, _ := net.SplitHostPort(lb.Listener.Addr().String())
+
+	h := newHarness(t, map[string]string{"UPSTREAM_URL": "https://localhost:" + port})
+	h.load(envelope(testConfig(1)))
+	conn, err := net.Dial("tcp", h.front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = io.WriteString(conn, "GET / HTTP/1.0\r\nCloudFront-Viewer-Address: 198.51.100.7:1\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Go's client sends the URL's host when Host is empty.
+	if body := readBody(t, resp); resp.StatusCode != 200 || body != "localhost Host=localhost:"+port {
+		t.Fatalf("status %d, body %q; want 200 from the load balancer named localhost", resp.StatusCode, body)
+	}
 }
 
 // selfSigned is a certificate for names that is also its own trust root.
