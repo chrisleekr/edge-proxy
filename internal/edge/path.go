@@ -67,7 +67,7 @@ func keepEncodedSlash(escaped string) (string, bool) {
 	for i, s := range segs {
 		d, _ := url.PathUnescape(s) // the server already parsed the whole path
 		if strings.Contains(d, "/") {
-			for _, part := range strings.Split(d, "/") {
+			for part := range strings.SplitSeq(d, "/") {
 				if part == "." || part == ".." {
 					return "", false
 				}
