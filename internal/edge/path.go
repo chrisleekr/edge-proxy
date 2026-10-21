@@ -37,7 +37,10 @@ func matchPath(r *http.Request) (string, error) {
 	// URL.EscapedPath would re-encode the decoded path when the raw one has
 	// a character such as "{" or "|", hiding it.
 	if strings.Contains(r.URL.RawPath, "%2F") || strings.Contains(r.URL.RawPath, "%2f") {
-		p = keepEncodedSlash(r.URL.RawPath)
+		var ok bool
+		if p, ok = keepEncodedSlash(r.URL.RawPath); !ok {
+			return "", errAmbiguousPath
+		}
 	}
 	p, ok := dropParams(p)
 	// An upstream that doesn't resolve ".." routes /admin/../public under
@@ -55,14 +58,24 @@ func matchPath(r *http.Request) (string, error) {
 }
 
 // keepEncodedSlash decodes each segment of an escaped path but writes a
-// decoded "/" back as %2F, so "group%2Fproject" stays one segment.
-func keepEncodedSlash(escaped string) string {
+// decoded "/" back as %2F, so "group%2Fproject" stays one segment. It fails
+// when %2F hides a "." or ".." part: a gateway that decodes %2F (nginx
+// location matching) resolves /public/..%2Fadmin to /admin, while rules
+// would see a path under /public.
+func keepEncodedSlash(escaped string) (string, bool) {
 	segs := strings.Split(escaped, "/")
 	for i, s := range segs {
 		d, _ := url.PathUnescape(s) // the server already parsed the whole path
+		if strings.Contains(d, "/") {
+			for _, part := range strings.Split(d, "/") {
+				if part == "." || part == ".." {
+					return "", false
+				}
+			}
+		}
 		segs[i] = strings.ReplaceAll(d, "/", "%2F")
 	}
-	return strings.Join(segs, "/")
+	return strings.Join(segs, "/"), true
 }
 
 // dropParams removes ";..." from each segment. Tomcat and Spring route

@@ -55,9 +55,13 @@ func TestMatchPath(t *testing.T) {
 		// Go's EscapedPath re-encodes when the raw path has a character like
 		// { or |, which would hide the encoded slash; RawPath keeps it.
 		{"/a%2Fb{", "/a%2Fb{", nil},
-		// Not dot-segments: each is one segment with %2F inside.
-		{"/admin%2F..%2Fsecret|", "/admin%2F..%2Fsecret|", nil},
-		{"/public/..%2Fadmin", "/public/..%2Fadmin", nil},
+		// A gateway that decodes %2F (nginx) resolves these into another prefix.
+		{"/admin%2F..%2Fsecret|", "", errAmbiguousPath},
+		{"/public/..%2Fadmin", "", errAmbiguousPath},
+		{"/public/.%2Fadmin", "", errAmbiguousPath},
+		{"/public/%2e%2e%2Fadmin", "", errAmbiguousPath},
+		// Dots inside a name are not dot-segments.
+		{"/files/a..b%2Fc", "/files/a..b%2Fc", nil},
 		// %2F only in the userinfo of an absolute-form target: the path has
 		// none, so it is matched as usual.
 		{"http://u%2Fx@h/admin", "/admin", nil},

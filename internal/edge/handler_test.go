@@ -69,6 +69,7 @@ func TestStep2Rejections(t *testing.T) {
 		{"missing ingress secret", "GET", "/", nil, reasonIngressSecret},
 		{"missing client IP header", "GET", "/", []string{"X-Origin-Secret", "s3cret", "CloudFront-Viewer-Address", ""}, reasonClientIP},
 		{"encoded backslash", "GET", "/a%5Cb", []string{"X-Origin-Secret", "s3cret"}, reasonPath},
+		{"dot-segment hidden by encoded slash", "GET", "/public/..%2Fadmin/users", []string{"X-Origin-Secret", "s3cret"}, reasonPath},
 		{"lowercase method", "post", "/", []string{"X-Origin-Secret", "s3cret"}, reasonMethod},
 	}
 	for _, tc := range cases {
@@ -100,9 +101,9 @@ func TestEncodedSlashReachesUpstreamUnchanged(t *testing.T) {
 	}
 }
 
-// A target with %2F next to dot-segments and a byte a path can't carry raw
-// reaches the upstream with every escape intact; only "|" is encoded. Go's
-// client would otherwise decode %2F and send /admin/../secret%7C. Sent raw:
+// A target with %2F and a byte a path can't carry raw reaches the upstream
+// with every escape intact; only "|" is encoded. Go's client would
+// otherwise decode %2F and send /files/docs/a%7C. Sent raw:
 // Go's client would normalize the target.
 func TestEncodedSlashPassesThroughOnTheWire(t *testing.T) {
 	h := newHarness(t, nil)
@@ -112,7 +113,7 @@ func TestEncodedSlashPassesThroughOnTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, _ = io.WriteString(conn, "GET /admin%2F..%2Fsecret| HTTP/1.1\r\nHost: api.example.com\r\nCloudFront-Viewer-Address: 198.51.100.7:1\r\n\r\n")
+	_, _ = io.WriteString(conn, "GET /files/docs%2Fa| HTTP/1.1\r\nHost: api.example.com\r\nCloudFront-Viewer-Address: 198.51.100.7:1\r\n\r\n")
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +122,7 @@ func TestEncodedSlashPassesThroughOnTheWire(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200", resp.StatusCode)
 	}
-	if got := h.lastApp.RequestURI; got != "/admin%2F..%2Fsecret%7C" {
+	if got := h.lastApp.RequestURI; got != "/files/docs%2Fa%7C" {
 		t.Fatalf("upstream got %q", got)
 	}
 }
