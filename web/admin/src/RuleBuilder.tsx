@@ -24,6 +24,31 @@ interface Ctx {
   schema: Schema;
 }
 
+// Example values by field, shown as placeholders so an empty row says what
+// to type. Keys are the names keyed fields take.
+const keyExample: Record<string, string> = {
+  'http.request.headers': 'header, such as x-api-key',
+  'http.request.cookies': 'cookie, such as session',
+  'http.request.uri.args': 'argument, such as page',
+  'http.request.jwt.claims': 'claim, such as sub',
+};
+const valueExample: Record<string, string> = {
+  'http.request.full_uri': 'https://api.example.com/v1/orders?page=2',
+  'http.request.uri': '/v1/orders?page=2',
+  'http.request.uri.path': '/v1/orders',
+  'http.request.uri.query': 'page=2',
+  'http.host': 'api.example.com',
+  'http.request.method': 'POST',
+  'http.cookie': 'session=abc',
+  'http.referer': 'https://www.example.com/',
+  'http.user_agent': 'curl/8.7.1',
+  'http.x_forwarded_for': '203.0.113.7',
+  'ip.src': '203.0.113.7',
+  'ip.src.country': 'AU',
+  'ip.src.asnum': '13335',
+  'edge.locale': 'en-AU',
+};
+
 // FieldSelector adds the key input (header, cookie, query arg or claim name)
 // for keyed fields.
 function FieldSelector(props: FieldSelectorProps) {
@@ -35,7 +60,7 @@ function FieldSelector(props: FieldSelectorProps) {
       {keyed && (
         <input
           aria-label="Key"
-          placeholder="name"
+          placeholder={keyExample[props.value ?? ''] ?? 'name'}
           value={(props.rule as { key?: string }).key ?? ''}
           // RuleType has no key property; the API's AST does.
           onChange={(e) => props.schema.dispatchQuery(setKey(props.schema.getQuery() as RuleGroupType, props.path, e.target.value))}
@@ -66,13 +91,32 @@ function ValueEditor(props: ValueEditorProps) {
       <textarea
         aria-label="Values"
         rows={Math.max(2, items.length)}
+        // An IP list also takes ranges; a single IP value does not.
+        placeholder={`One per line, such as\n${props.field === 'ip.src' ? '203.0.113.0/24\n198.51.100.7' : (valueExample[props.field] ?? 'value')}`}
         value={items.join('\n')}
         onChange={(e) => props.handleOnChange(e.target.value === '' ? [] : e.target.value.split('\n'))}
       />
     );
   }
-  return <input aria-label="Value" value={typeof props.value === 'string' ? props.value : ''} onChange={(e) => props.handleOnChange(e.target.value)} />;
+  const wildcard = props.operator.includes('wildcard') && (props.field === 'http.host' ? '*.example.com' : props.field.startsWith('http.request.uri') ? '/v1/*/orders' : undefined);
+  const example = wildcard || valueExample[props.field];
+  const input = <input aria-label="Value" placeholder={example && `such as ${example}`} value={typeof props.value === 'string' ? props.value : ''} onChange={(e) => props.handleOnChange(e.target.value)} />;
+  const how = wildcardHow[props.operator];
+  if (!how) return input;
+  return (
+    <>
+      {input}
+      <span className="order-last basis-full text-sm text-body">{how}</span>
+    </>
+  );
 }
+
+// The two wildcard operators differ only in letter case, which their names
+// don't say.
+const wildcardHow: Record<string, string> = {
+  wildcard: '* matches any characters, / included. The whole value must match. Letter case is ignored.',
+  strict_wildcard: '* matches any characters, / included. The whole value must match, letter case too.',
+};
 
 export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema; phase: Phase; query: RuleGroupType; onChange: (q: RuleGroupType) => void }) {
   const fields = useMemo(
@@ -92,6 +136,19 @@ export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema
           { name: 'or', label: 'Or' },
         ]}
         controlElements={{ fieldSelector: FieldSelector, valueEditor: ValueEditor }}
+        // Most rules match on the path, which every phase has, so a new
+        // condition starts there.
+        getDefaultField="http.request.uri.path"
+        // "Rule" already names a whole policy rule here; rows are conditions.
+        translations={{
+          addRule: { label: '+ Condition', title: 'Add condition' },
+          addGroup: { label: '+ Group', title: 'Add group' },
+          removeRule: { label: 'Remove', title: 'Remove condition' },
+          removeGroup: { label: 'Remove group', title: 'Remove group' },
+        }}
+        // The library's own classes: rows wrap on narrow screens, and tree
+        // lines show which group a condition belongs to.
+        controlClassnames={{ queryBuilder: 'queryBuilder-branches queryBuilder-responsive' }}
         context={context}
         query={query}
         onQueryChange={onChange}
@@ -103,14 +160,17 @@ export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema
   );
 }
 
-// usePreview posts the AST to the server after edits settle. The browser
-// never renders or validates expressions itself.
-export function usePreview(query: RuleGroupType, phase: Phase) {
+// usePreview posts the expression to the server after edits settle: the
+// builder's AST, or text, which the server parses first. The browser never
+// parses, renders or validates expressions itself.
+export function usePreview(query: RuleGroupType, phase: Phase, text?: string) {
   const [preview, setPreview] = useState<Rendered | { failed: string }>();
   useEffect(() => {
     const ctl = { cancelled: false };
     const t = setTimeout(() => {
-      api<Rendered>('POST', '/api/expr/render', { ast: toAST(query), phase })
+      const ast = text === undefined ? Promise.resolve(toAST(query)) : api<{ ast: Json }>('POST', '/api/expr/parse', { text }).then((r) => r.ast);
+      ast
+        .then((a) => api<Rendered>('POST', '/api/expr/render', { ast: a, phase }))
         .then((r) => !ctl.cancelled && setPreview(r))
         .catch((e: Error) => !ctl.cancelled && setPreview({ failed: e.message }));
     }, 250);
@@ -118,6 +178,6 @@ export function usePreview(query: RuleGroupType, phase: Phase) {
       ctl.cancelled = true;
       clearTimeout(t);
     };
-  }, [query, phase]);
+  }, [query, phase, text]);
   return preview;
 }

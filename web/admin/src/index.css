@@ -1,6 +1,293 @@
 @import 'tailwindcss';
+/* Self-hosted: the admin CSP (default-src 'self') blocks font CDNs. */
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
 
-body {
-  background: var(--color-slate-50);
-  color: var(--color-slate-900);
+/* Design tokens: the light values. Dark mode redefines the same variables
+   below, so every utility built on them flips without a dark: variant. */
+@theme {
+  --color-page: #fafafa;
+  --color-panel: #ffffff;
+  --color-soft: #f5f5f5;
+  --color-heading: #171717;
+  --color-body: #4d4d4d;
+  --color-muted: #666666;
+  --color-line: #ebebeb;
+  /* Borders are drawn as 1px shadows in these, never with border. */
+  --color-ring: rgb(0 0 0 / 0.08);
+  --color-field: rgb(0 0 0 / 0.14);
+
+  --color-brand: #171717;
+  --color-brand-hover: #383838;
+  --color-on-brand: #ffffff;
+  --color-tip: #171717;
+  --color-on-tip: #fafafa;
+  --color-focus: #006ff5;
+
+  /* Colour is for status only; the chrome stays grey. */
+  --color-danger: #c4141c;
+  --color-danger-wash: #ffebeb;
+  --color-danger-solid: #c4141c;
+  --color-danger-solid-hover: #a51017;
+  --color-warning: #9a5b00;
+  --color-warning-wash: #fff5e0;
+  --color-success: #107d32;
+  --color-success-wash: #e8f7ec;
+
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-dialog: 12px;
+
+  --shadow-ring: 0 0 0 1px var(--color-ring);
+  --shadow-field: 0 0 0 1px var(--color-field);
+  --shadow-card: 0 0 0 1px var(--color-ring), 0 2px 2px rgb(0 0 0 / 0.04);
+  --shadow-float: 0 0 0 1px var(--color-ring), 0 8px 30px rgb(0 0 0 / 0.12);
+}
+
+/* Black, not grey: the dark canvas is #000 and panels sit one step up. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-page: #000000;
+    --color-panel: #0a0a0a;
+    --color-soft: #1a1a1a;
+    --color-heading: #ededed;
+    --color-body: #a1a1a1;
+    --color-muted: #8f8f8f;
+    --color-line: #2e2e2e;
+    --color-ring: rgb(255 255 255 / 0.14);
+    --color-field: rgb(255 255 255 / 0.2);
+
+    --color-brand: #ededed;
+    --color-brand-hover: #cccccc;
+    --color-on-brand: #0a0a0a;
+    --color-tip: #1f1f1f;
+    --color-on-tip: #ededed;
+
+    --color-danger: #ff6166;
+    --color-danger-wash: #2a0e0f;
+    --color-warning: #f5b544;
+    --color-warning-wash: #2a1e05;
+    --color-success: #4fd97a;
+    --color-success-wash: #0b2a16;
+  }
+}
+
+/* Technical labels: table heads, nav groups, the release strip. */
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+@layer base {
+  :root {
+    /* Native controls, scrollbars and the date picker follow the mode. */
+    color-scheme: light dark;
+  }
+  body {
+    background: var(--color-page);
+    color: var(--color-body);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,
+  h2 {
+    color: var(--color-heading);
+    font-weight: 600;
+    text-wrap: balance;
+  }
+  h1 {
+    font-size: 2rem;
+    line-height: 1.25;
+    letter-spacing: -0.04em;
+  }
+  h2 {
+    font-size: 1.25rem;
+    line-height: 1.4;
+    letter-spacing: -0.02em;
+  }
+  h3,
+  strong,
+  dt {
+    color: var(--color-heading);
+  }
+  code,
+  pre,
+  kbd {
+    font-family: var(--font-mono);
+  }
+  /* One treatment for every code, JSON and preview block. */
+  pre {
+    overflow: auto;
+    border-radius: var(--radius-control);
+    background: var(--color-soft);
+    color: var(--color-heading);
+    font-size: 0.8125rem;
+    padding: 0.75rem;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    a,
+    button {
+      transition:
+        background-color 150ms,
+        box-shadow 150ms,
+        color 150ms;
+    }
+  }
+
+  /* One input shell for every text field, select and textarea, including
+     the ones react-querybuilder renders. */
+  input:not([type='checkbox'], [type='radio'], [type='hidden']),
+  select,
+  textarea {
+    border-radius: var(--radius-control);
+    background: var(--color-panel);
+    box-shadow: var(--shadow-field);
+    color: var(--color-heading);
+    font-size: 0.875rem;
+    /* The line height Button uses, so fields and buttons in a row match. */
+    line-height: 1.25rem;
+    /* Selects ignore line-height, so pin the height Button has too. */
+    min-height: 2.125rem;
+    padding: 0.375rem 0.625rem;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-muted);
+  }
+  input:not([type='checkbox'], [type='radio'], [type='hidden']):focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline-offset: 0;
+  }
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: var(--color-brand);
+    width: 1rem;
+    height: 1rem;
+  }
+}
+
+/* Table cells keep values such as dates and IDs on one line; the table
+   scrolls instead. In the components layer so a cell's own utilities, such
+   as whitespace-normal on a free-text column, win. */
+@layer components {
+  .data-table td {
+    padding: 0.5rem 0.75rem;
+    white-space: nowrap;
+  }
+}
+
+/* Below sm a table row becomes a card: each cell under its column name.
+   Unlayered so it wins over cell utilities such as text-right and min-w-*. */
+@media (width < 40rem) {
+  .data-table thead {
+    display: none;
+  }
+  .data-table tr {
+    display: block;
+    padding: 0.5rem 0;
+  }
+  .data-table td {
+    display: block;
+    min-width: 0;
+    padding: 0.25rem 0.75rem;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .data-table td:empty {
+    display: none;
+  }
+  .data-table td[data-label]:not([data-label=''])::before {
+    content: attr(data-label);
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+}
+
+/* react-querybuilder reads these variables. */
+:root {
+  --rqb-base-color: var(--color-brand);
+  --rqb-background-color: var(--color-soft);
+  --rqb-border-color: var(--color-line);
+  --rqb-border-radius: var(--radius-card);
+  --rqb-dnd-drop-indicator-color: var(--color-focus);
+  --rqb-dnd-drop-indicator-group-color: var(--color-focus);
+}
+.queryBuilder button {
+  /* The default Button: same height, padding and weight. */
+  border-radius: var(--radius-control);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-field);
+  color: var(--color-heading);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  padding: 0.375rem 0.875rem;
+  white-space: nowrap;
+}
+.queryBuilder button:hover {
+  background: var(--color-soft);
+}
+.queryBuilder .ruleGroup-notToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--color-heading);
+  font-size: 0.875rem;
+}
+
+/* The nav drawer slides in from the left; display and overlay transition
+   discretely so it also animates closed. */
+@media (prefers-reduced-motion: no-preference) {
+  .drawer,
+  .drawer::backdrop {
+    transition:
+      translate 0.2s ease-out,
+      opacity 0.2s ease-out,
+      display 0.2s allow-discrete,
+      overlay 0.2s allow-discrete;
+  }
+  .drawer:not([open]) {
+    translate: -100% 0;
+  }
+  .drawer:not([open])::backdrop {
+    opacity: 0;
+  }
+  @starting-style {
+    .drawer[open] {
+      translate: -100% 0;
+    }
+    .drawer[open]::backdrop {
+      opacity: 0;
+    }
+  }
+}
+
+/* The page behind an open drawer or dialog stays put. */
+html:has(dialog[open]) {
+  overflow: hidden;
+}
+
+/* A rolling digit's 0 to 9 column, one digit per line. */
+.roll::before {
+  content: '0\A 1\A 2\A 3\A 4\A 5\A 6\A 7\A 8\A 9';
+  white-space: pre;
 }
