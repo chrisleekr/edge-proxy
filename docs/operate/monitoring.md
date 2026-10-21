@@ -7,7 +7,7 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | Metric | Meaning |
 |---|---|
 | `edge_requests_total{class}` | Responses by class (`2xx` … `5xx`; `none` when the client left first) |
-| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path` and others |
+| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path` and others. `upstream_tls` is an https upstream that has no certificate for the request's Host; clients choose the Host, so it is counted without a log line |
 | `edge_inflight`, `edge_streams` | Concurrent requests and open WebSocket/SSE streams |
 | `edge_ready` | 1 when a policy is loaded and the edge isn't draining |
 | `edge_snapshot_version` | Policy version this replica runs |
