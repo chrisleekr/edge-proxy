@@ -7,4 +7,5 @@ web/admin/dist/app/
 .env
 /site/
 .venv/
-.claude/scheduled_tasks.lock
+/.claude/
+/tools

@@ -1,0 +1,69 @@
+# Cloud-shaped capacity environment for scripts/capacity-max.sh, layered on
+# compose.yaml. Needs a Docker VM with at least 8 CPUs, and a host with
+# cores to spare beyond those: a busy host takes time from the VM and slows
+# every part at once. Every part runs on its own cores, so the edge never
+# shares CPU with k6 or the mocks:
+#
+#   0-1  edge-1 (2 vCPU, 2 GiB, like a small cloud task)
+#   2    Valkey
+#   3    the four mock microservices, 0.25 CPU each (one core together)
+#   4-6  k6
+#   7    the gateway that routes to the services, admin, Postgres, IdP and
+#        the network delay sidecars
+#
+# Sidecars add delay on the outgoing packets of Valkey and each service, so
+# round trips cost what they would between cloud hosts in one region.
+
+x-service: &service
+  image: edge-proxy/tools:dev
+  cpuset: "3"
+  cpus: 0.25
+  mem_limit: 256m
+
+x-delay: &delay
+  image: edge-proxy/netem:dev
+  build:
+    context: .
+    dockerfile_inline: |
+      FROM valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+      RUN apk add --no-cache iproute2-tc
+  cap_add: [NET_ADMIN]
+  cpuset: "7"
+  entrypoint: [sh, -c, 'tc qdisc replace dev eth0 root netem delay "$$DELAY" && exec sleep infinity']
+
+services:
+  # The edge forwards everything to the gateway, which routes by path to the
+  # services, as a load balancer or Istio gateway does in production.
+  gateway:
+    image: edge-proxy/tools:dev
+    cpuset: "7"
+    command: [gateway, -routes, "/=http://catalog:8080,/api/orders=http://orders:8080,/api/flaky=http://orders:8080,/api/timeout=http://orders:8080,/login=http://account:8080,/private/=http://account:8080,/pages/=http://content:8080,/static/=http://content:8080"]
+    depends_on: [catalog, orders, account, content]
+  catalog: { <<: *service, command: [service, catalog] }
+  orders: { <<: *service, command: [service, orders] }
+  account: { <<: *service, command: [service, account] }
+  content: { <<: *service, command: [service, content] }
+
+  # About 0.5 ms more round trip to Valkey, 0.25 ms to each service.
+  delay-valkey: { <<: *delay, network_mode: service:valkey, environment: { DELAY: 500us }, depends_on: [valkey] }
+  delay-catalog: { <<: *delay, network_mode: service:catalog, environment: { DELAY: 250us }, depends_on: [catalog] }
+  delay-orders: { <<: *delay, network_mode: service:orders, environment: { DELAY: 250us }, depends_on: [orders] }
+  delay-account: { <<: *delay, network_mode: service:account, environment: { DELAY: 250us }, depends_on: [account] }
+  delay-content: { <<: *delay, network_mode: service:content, environment: { DELAY: 250us }, depends_on: [content] }
+
+  edge-1:
+    cpuset: "0,1"
+    mem_limit: 2g
+    environment: { UPSTREAM_URL: http://gateway:8080 }
+    depends_on: [gateway]
+  valkey: { cpuset: "2", mem_limit: 2g }
+  # k6's garbage collector, at its default, pauses long enough to put 10 to
+  # 40 ms on the p99 of a direct request; collecting less often keeps the
+  # load generator out of the figures, and the limit keeps memory bounded.
+  k6: { cpuset: "4-6", environment: { GOGC: "800", GOMEMLIMIT: 8GiB } }
+
+  admin: { cpuset: "7" }
+  seed: { cpuset: "7" }
+  postgres: { cpuset: "7" }
+  migrate: { cpuset: "7" }
+  idp: { cpuset: "7" }

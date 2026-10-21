@@ -31,9 +31,15 @@ This is the rule's **Then** block in the UI; its expression (here `http.request.
 | `penalty` | Optional, 1s to 24h: once over the limit, stay blocked this long |
 | `fail_mode` | What to do when Valkey can't answer: `open`, `closed` or `local` |
 
+## Before you block: shadow mode
+
+Start every rule in shadow mode, `"action": "log"`: it counts the requests it would have limited and lets them through. A rule added in the UI starts that way. **Stats** shows its **Over limit, log only** count against real traffic, with the clients it would hit, and **Needs attention** on the dashboard lists log-only rules with requests over their limit. Switch it to `block` once the numbers look right, and publish that change through a [canary](publishing.md#canary) so only part of the traffic sees it first. The [rollback guard](publishing.md#rollback-guard) compares a changed rule with what it found while it only logged.
+
 ## How a request is checked
 
-Rate limiting runs after the local backstop, CORS and JWT, and before header rules and the proxy. Each rule below is checked on its own; then the request gets one answer.
+Rate limiting runs after the [local backstop](#local-backstop) (each edge's own per-IP flood limit), CORS and JWT, and before header rules and the proxy. Each rule below is checked on its own; then the request gets one answer.
+
+A site-wide rule has the expression `true`, so it matches every request ([Several rules on one request](#several-rules-on-one-request)). "Limit ÷ fleet size" is the share of the limit each edge enforces on its own when Valkey can't answer a `fail_mode: local` rule ([When Valkey fails](#when-valkey-fails)).
 
 ```mermaid
 flowchart TD
@@ -269,10 +275,6 @@ Every rule then follows its `fail_mode`.
 
 - **`Retry-After`** is on every 429, in whole seconds, rounded up.
 - **`RateLimit-Policy` and `RateLimit`** (IETF draft) are sent when a config rule sets `ratelimit_headers: true`. There is one item per blocking rule, named by its ID, for example `RateLimit-Policy: "login";q=5;w=60` and `RateLimit: "login";r=2;t=41`. `log` rules are left out.
-
-## Before you block: shadow mode
-
-Publish a new rule with `"action": "log"` first. **Stats** shows its `would_limit` count against real traffic. Switch it to `block` once the numbers look right.
 
 ## Local backstop
 

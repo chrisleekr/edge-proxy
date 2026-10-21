@@ -1,10 +1,10 @@
 # Edge Proxy: Design
 
-Status: draft for discussion. Open points are marked **DECIDE**. Terms are defined in the [Glossary](#22-glossary).
+Terms are defined in the [Glossary](reference/glossary.md).
 
 ## 0. Purpose, principles, decisions
 
-The edge is a Go reverse proxy that sits **behind** an existing WAF/CDN/LB and enforces application-aware policy before forwarding to upstreams:
+The edge is a Go reverse proxy that sits **between** an existing WAF/CDN and the load balancer or gateway that routes your services. It enforces application-aware policy, then forwards every request, Host unchanged, to that one upstream:
 
 - rate limiting
 - JWT validation
@@ -13,7 +13,7 @@ The edge is a Go reverse proxy that sits **behind** an existing WAF/CDN/LB and e
 - locale detection
 - templated responses
 
-An admin service with an admin UI manages that policy. The edge does not replace the WAF or CDN.
+An admin service with an admin UI manages that policy. The edge does not replace the WAF or CDN, and it does not route: the load balancer or gateway behind it already knows which service serves each host and path, so the edge needs only its address.
 
 ### Principles (in priority order)
 
@@ -40,17 +40,17 @@ An admin service with an admin UI manages that policy. The edge does not replace
 | Publishing | No second approver. Every publish is a version you can view, compare and revert. Degraded publishes roll back automatically; every signal is configurable |
 | Deployables | Edge and admin are separate. Only the edge scales |
 | Delivery | One release |
-| Tests | 100% statement coverage for the edge and every package it imports, from scenario tests. Admin: scenario tests on critical paths, no coverage gate. Load tests run locally only |
+| Tests | 100% statement coverage for the edge and every package it imports, from scenario tests. Admin: scenario tests on critical paths, no coverage gate. Load tests run in Docker Compose: a smoke profile in CI, the full profile nightly in GitHub Actions and on GitLab schedules |
 | Logs | JSON, raw client IPs |
 
 ## 1. Architecture
 
 ```mermaid
 flowchart LR
-    CLIENT["Client"] --> FRONT["WAF / CDN / LB<br/>existing"]
+    CLIENT["Client"] --> FRONT["WAF / CDN<br/>existing"]
     FRONT --> EDGE["Edge<br/>N replicas, stateless"]
     EDGE -->|"1 round trip,<br/>rate limits only"| VK["Valkey"]
-    EDGE --> UP["Upstreams"]
+    EDGE --> UP["Upstream: LB or gateway<br/>routes to services"]
     EDGE -.->|"poll snapshot 5s"| ADMIN["Admin<br/>1-2 replicas, internal"]
     EDGE -.->|"push stats 10s"| ADMIN
     EDGE -.->|"JWKS refresh"| IDP["IdP"]
@@ -74,17 +74,22 @@ Solid lines are on the request path. Dotted lines are background work that never
 ### Repo layout (one Go module, two binaries)
 
 ```
-cmd/edge/            wiring, http.Server, shutdown
-cmd/admin/           admin API + UI, publish, snapshot endpoint, stats ingest, JWKS fetch, guard, audit
+cmd/edge/            thin main: calls edge.Main
+cmd/admin/           thin main: calls admin.Main
 internal/expr/       expression parser, renderer, type checker, compiler. Shared
 internal/snapshot/   config types, strict decode, Compile() (validates and compiles). Shared
-internal/ratelimit/  algorithms (Lua + local), backstop, penalty cache
+internal/ratelimit/  algorithms (Lua + local), backstop, penalty cache. Shared
 internal/jwks/       JWKS fetch/parse, SSRF guard. Shared
-internal/edge/       request pipeline: clientip, viewer, cors, jwt, locale, headers, respond, proxy, stats
-internal/admin/      identity, sessions, RBAC, audit, canary, guard
-internal/admindb/    Postgres queries, migrations
-web/admin/           admin UI: React + Vite + TypeScript + Tailwind, embedded into cmd/admin
-loadtest/            k6 scripts, mock CDN/LB/IdP/upstream, compose environment
+internal/envparse/   deployment config from env vars. Shared
+internal/edge/       wiring, http.Server, shutdown, and the request pipeline: clientip, viewer, cors, jwt, locale, headers, respond, proxy, stats
+internal/admin/      admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, guard, observed routes, first-start bootstrap
+internal/admindb/    Postgres queries, migrations, audit log
+internal/testenv/    testcontainers helpers and the Playwright browser server, for tests
+web/admin/           admin UI: React + Vite + TypeScript + Tailwind, embedded into the admin binary
+loadtest/            k6 scripts, mock upstream, IdP, LB, gateway, services and stream holder, compose environment
+build/               Dockerfiles for the edge, admin and load-test images
+docs/                MkDocs site
+scripts/             CI scripts and capacity runs
 ```
 
 ## 2. Request path
@@ -116,13 +121,13 @@ Steps 8 and 10 do network I/O. The rest run in memory.
 | 1 | **Guards** | Rejects with a fast 503 when concurrent **ordinary** requests exceed the in-flight cap. Long-lived streams (SSE, WebSocket) have a separate cap, so they can't starve ordinary traffic. `http.Server.MaxHeaderBytes` already capped header size | Shed overload before spending any work on it |
 | 2 | **Client IP + viewer fields** | Checks the ingress secret header if configured. Reads the client IP and trusted viewer metadata (country, ASN, scheme, HTTP version) from the configured CDN headers, **only** if the TCP peer is a trusted proxy ([§10](#10-client-identity-and-viewer-metadata)). Rejects ambiguous path encodings ([§3.2](#32-fields)) | Everything later keys on the real client. Spoofed values must be rejected first |
 | 3 | **Pin snapshot** | One `atomic.Pointer.Load` of the compiled config, which a background poller keeps current. During a canary, picks the active or candidate config by client hash ([§12.5](#125-before-going-live)). No I/O | Keeps one request on one config version even if the poller swaps it mid-request |
-| 4 | **Config phase** | Evaluates Configuration Rules ([§3](#3-rules-engine)). Resolves this request's settings: auth, accepted issuers, CORS policy, locale, response templates, body limit, upstream, upstream timeout. From here on, every edge-generated response carries the request's CORS headers and `Cache-Control: no-store` | Everything after depends on these settings |
+| 4 | **Config phase** | Evaluates config rules ([§3](#3-rules-engine)). Resolves this request's settings: auth, accepted issuers, CORS policy, locale, response templates, body limit, upstream timeout, rate-limit headers. From here on, every edge-generated response carries the request's CORS headers and `Cache-Control: no-store` | Everything after depends on these settings |
 | 5 | **Local backstop** | In-memory per-IP token bucket | Cheap flood protection before CPU-heavy JWT and network-bound Valkey; works when Valkey is down. It comes after the config phase so its 429 uses the request's template and CORS headers. The cost: a flood still pays for the config rules, about 70 µs per request on a laptop at the limit of 200 rules of 32 conditions (`BenchmarkMatch200Rules`) and under 1 µs for a realistic config |
 | 6 | **CORS** | Answers preflight when a CORS policy applies. With no policy, preflight is forwarded to the upstream like any request | Preflight needs no auth or quota. Browser JS can read edge 429/401 only with CORS headers (set from step 4) |
 | 7 | **JWT** | Verifies the token if the config phase requires auth. A verified-token cache means most requests skip signature checks | Rate-limit and header rules may use verified claims |
 | 8 | **Rate-limit phase** | Evaluates rate-limit rule expressions in memory. Checks the local penalty cache. Then sends **one pipelined batch** to Valkey for the rules that matched | The only shared, cross-replica decision, and the only network I/O before the upstream |
-| 9 | **Header phase** | Applies Header Transform Rules, then edge-managed headers ([§7](#7-header-transform-rules)). Locale is a lazy field: it's resolved the first time anything reads it, in step 8 or here ([§8](#8-locale-from-accept-language)) | Only for requests that will be forwarded |
-| 10 | **Proxy** | Enforces the per-upstream in-flight cap (the upstream is known only now). Applies the body limit (`http.MaxBytesReader`) and a body read deadline. Forwards over pooled connections, streaming bodies, SSE and WebSocket. Never retries | The actual job |
+| 9 | **Header phase** | Applies request header rules, then edge-managed headers ([§7](#7-request-header-rules)). Locale is a lazy field: it's resolved the first time anything reads it, in step 8 or here ([§8](#8-locale-from-accept-language)) | Only for requests that will be forwarded |
+| 10 | **Proxy** | Applies the body limit (`http.MaxBytesReader`) and a body read deadline. Forwards over pooled connections, streaming bodies, SSE and WebSocket. Never retries | The actual job |
 
 ### 2.2 Latency rules
 
@@ -131,33 +136,32 @@ Steps 8 and 10 do network I/O. The rest run in memory.
 | No parsing or compilation per request | Expressions, regexes, wildcards, CORS policies, templates and the locale matcher compile once per snapshot |
 | At most one Valkey round trip | All matched rate-limit rules go in one pipelined batch. **Accuracy note:** with Valkey Cluster, keys on different shards go to different nodes *in parallel*. Latency is the slowest shard's round trip, not the sum |
 | Skip the network whenever possible | The local penalty cache answers for subjects already blocked. Rules whose expression doesn't match cost no Valkey call. No matched rules means no Valkey call at all |
-| Bounded network waits | Per-call deadline on Valkey, then a breaker. `ResponseHeaderTimeout` and dial timeouts upstream |
+| Bounded network waits | Per-call deadline on Valkey, then a breaker. Upstream: dial and TLS handshake timeouts, and a per-request timer on `upstream_timeout` that `ModifyResponse` stops when response headers arrive |
 | No global locks, minimal allocation | Stats use `atomic` adds. Request fields are extracted lazily into a fixed per-request struct. Caches are sharded, so a lock covers one shard for a short map operation. Backstop and local buckets each hold their own mutex, contended only by requests for the same subject |
 | Expensive work is cached | Verified JWTs (by token hash) and locale results (by raw `Accept-Language`) |
 | Responses are never cached downstream | Every edge-generated response sends `Cache-Control: no-store`, so a CDN can't serve one client's 429 or 401 to others |
-| Warm before ready | Valkey pools are opened before ready (M4, best effort, bounded wait). Upstream pools are **not** pre-warmed: opening them needs a real request, which may have side effects, so the first requests per upstream pay connection setup. A failed warm-up never blocks readiness (P1) |
-| Runtime sized to the container | Go 1.25+ sets `GOMAXPROCS` from the cgroup CPU limit by default (go.dev/doc/go1.25). Set `GOMEMLIMIT` to about 90% of the container memory limit, so GC tightens before an OOM kill |
+| Warm before ready | Valkey pools are opened before ready (best effort, bounded wait). The upstream pool is **not** pre-warmed: opening it needs a real request, which may have side effects, so the first requests pay connection setup. An HTTPS upstream keeps idle connections per Host, so there the first requests for each Host pay it. A failed warm-up never blocks readiness (P1) |
+| Runtime sized to the container | Go 1.25+ sets `GOMAXPROCS` from the cgroup CPU limit by default ([Go 1.25 release notes](https://go.dev/doc/go1.25#container-aware-gomaxprocs)). A `GOMEMLIMIT` below the container memory limit makes the GC tighten before an OOM kill. The images don't set it, so the deployment does |
 | Measured, not assumed | Benchmarks gate per-request allocations and each step's cost ([§18](#18-testing)). No latency numbers are quoted until they're measured |
 
 ## 3. Rules engine
 
 Policy is a set of **rules**: *when incoming requests match **expression**, then **action/settings***. The admin UI edits a rule as a form:
 
-- Field / Operator / Value rows joined by **And** / **Or**.
-- An **All incoming requests** option.
+- **When incoming requests match:** Field / Operator / Value rows joined by **And** / **Or**. An empty condition is `true` and matches every request.
 - A live **Expression preview**, with **Edit expression** for typing it directly.
-- "Then the settings are…" with **+ Add** per setting.
-- **Save as Draft** / **Deploy**.
+- **Then:** the rule's settings or action.
+- **Apply to draft** changes the draft in the browser. **Save draft** saves the shared draft to admin, which validates it. **Publish to all traffic** (or to a canary percentage) on the publish page makes it live.
 
 ### 3.1 Phases
 
 | Phase (UI name) | Runs at | Action | When several rules match |
 |---|---|---|---|
-| `config` (Configuration Rules) | Step 4 | Set request settings (below) | **All apply in order; a later rule overwrites the same setting.** |
-| `rate_limit` (Rate Limiting Rules) | Step 8 | Count and possibly block ([§4](#4-rate-limiting)) | Site-wide rules (expression `true`, at most 2) are always evaluated. Other matching rules are evaluated in order, up to 5 per request. Blocked if any `block` rule says no |
-| `request_headers` (Header Transform Rules) | Step 9 | Header operations ([§7](#7-header-transform-rules)) | All apply in order |
+| `config` (Config rules) | Step 4 | Set request settings (below) | **All apply in order; a later rule overwrites the same setting.** |
+| `rate_limit` (Rate limit rules) | Step 8 | Count and possibly block ([§4](#4-rate-limiting)) | Site-wide rules (expression `true`, at most 2) are always evaluated. Other matching rules are evaluated in order, up to 5 per request. Blocked if any `block` rule says no |
+| `request_headers` (Request header rules) | Step 9 | Header operations ([§7](#7-request-header-rules)) | All apply in order |
 
-**Config-phase settings** (each one is an **+ Add** in the UI):
+**Config-phase settings** (each is left unset or set per rule):
 
 | Setting | Effect | Default when no rule sets it |
 |---|---|---|
@@ -166,61 +170,38 @@ Policy is a set of **rules**: *when incoming requests match **expression**, then
 | `locale` | on / off | global setting |
 | `responses` | Response kind → template name | global templates |
 | `body_limit` | Max request body bytes | global setting |
-| `upstream` | Name of an upstream defined in deployment config | host-based mapping |
 | `upstream_timeout` | Response-header timeout for this request | global setting |
 | `ratelimit_headers` | Emit `RateLimit` / `RateLimit-Policy` headers | off |
 
-**Rule order:** explicit within a phase (drag-and-drop in the UI). An **All incoming requests** rule is the expression `true`.
+**Rule order:** explicit within a phase (drag-and-drop in the UI). A rule that matches every request has the expression `true`.
 
 ### 3.2 Fields
 
-Each field has a type and a source. "Viewer" fields describe the client's connection to the CDN, which the edge can't observe itself because it sits behind a TLS-terminating proxy. Those fields come only from trusted headers.
+Every field, its type and its source are listed in the [Expressions reference](reference/expressions.md#fields).
 
-| UI field | Expression | Type | Source |
-|---|---|---|---|
-| URI Full | `http.request.full_uri` | string | Request (scheme, host, path, query) |
-| URI | `http.request.uri` | string | Request (path + query) |
-| URI Path | `http.request.uri.path` | string | Request, **normalized** (below) |
-| URI Query String | `http.request.uri.query` | string | Request, raw |
-| URI Query Argument | `http.request.uri.args["name"]` | string list | Request |
-| Hostname | `http.host` | string | Request, lowercased (`strings.ToLower`), port removed. Rule values must be lowercase |
-| Request Method | `http.request.method` | string | Request. Methods that aren't all uppercase are rejected with 400 at step 2, so rule values must be uppercase tokens |
-| Header | `http.request.headers["name"]` | string list | Request. The name must be an RFC 9110 token and is lowercased when saved |
-| Cookie | `http.cookie` | string | Request (whole header) |
-| Cookie (named) | `http.request.cookies["name"]` | string list | Request, parsed lazily once. The name must be a token |
-| Referer | `http.referer` | string | Request |
-| User Agent | `http.user_agent` | string | Request |
-| X-Forwarded-For | `http.x_forwarded_for` | string | Request. Client-controlled on the left; for matching only, never identity |
-| IP Source Address | `ip.src` | ip | Trusted client IP ([§10](#10-client-identity-and-viewer-metadata)). Compared without IPv6 zone, IPv4-mapped as IPv4 |
-| Country | `ip.src.country` | string | Viewer header, uppercased ISO 3166-1 alpha-2. Rule values must be uppercase |
-| Continent | `ip.src.continent` | string | From a viewer header mapped in `VIEWER_HEADERS`, uppercase codes. Deriving it from Country needs a verified ISO table and is not built |
-| AS Num | `ip.src.asnum` | int | Viewer header |
-| SSL/HTTPS | `ssl` | bool | Viewer header (the client's scheme) |
-| HTTP Version | `http.request.version` | string | Viewer header (the client's version) |
-| Client Certificate Verified | `client_cert.verified` | bool | Trusted header from whatever terminates mTLS |
-| Locale | `edge.locale` | string | [§8](#8-locale-from-accept-language). Not available in `config` |
-| JWT claim | `http.request.jwt.claims["name"]` | string list | Verified JWT ([§5](#5-jwt-and-jwks)). Not available in `config` |
+- **Typed fields:** each field has a type (string, string list, int, ip, bool), so validation rejects an operator that can't apply (`gt` on a string, `wildcard` on `ip.src`) before a rule is saved.
+- **Request fields** are extracted lazily ([§3.5](#35-evaluation-cost)).
+- **Identity fields** come only from trusted sources: `ip.src` is the trusted client IP ([§10](#10-client-identity-and-viewer-metadata)), and JWT claims are verified claims only ([§5](#5-jwt-and-jwks)). `http.x_forwarded_for` is client-controlled on the left, so it is for matching only, never identity.
+- **Phase availability:** JWT claims and `edge.locale` are resolved after the `config` phase runs, so validation rejects them there.
 
 **Viewer fields:**
-- The deployment setting `VIEWER_HEADERS` maps each viewer field to a header. The `cloudfront` and `cloudflare` presets fill it in (Appendix A).
+- "Viewer" fields (country, continent, AS number, scheme, HTTP version, client certificate) describe the client's connection to the CDN, which the edge can't observe itself because it sits behind a TLS-terminating proxy. They come only from trusted headers.
+- The deployment setting `VIEWER_HEADERS` maps each viewer field to a header. The `cloudfront` and `cloudflare` presets fill it in ([Client IP presets](deploy/edge.md#client-ip-presets)).
 - A field with no configured source is **unavailable**: hidden in the UI and rejected by validation, never silently empty.
 
 **Path normalization (security):**
-- Matching uses a copy of the path that has been percent-decoded once, with path parameters (`;x`) dropped from each segment, `//` collapsed and `.` removed. The forwarded path is unchanged.
-- The host is lowercased, without port, brackets or a trailing dot (`api.example.com.` is the same DNS name), for both routing and rules.
+- Matching uses a copy of the path that has been percent-decoded once, except `%2F`, with path parameters (`;x`) dropped from each segment, `//` collapsed and `.` removed.
+- The forwarded path keeps every escape the client sent. Only bytes a path can't carry raw (RFC 3986 §3.3), such as `|`, are percent-encoded, because Go's client can't send them; every server decodes them to the same path. Without this, Go would re-encode the decoded path whenever such a byte is present, turning `%2F` into `/`.
+- **`%2F` passes through.** Apps such as GitLab need it (`group%2Fproject` IDs, file paths), so the edge doesn't reject it. Rules see it inside its segment, as the gateway behind the edge routes it when it leaves escaped slashes unchanged (Envoy's `path_with_escaped_slashes_action: KEEP_UNCHANGED`, the default). So `wildcard "/api/v4/projects/*/members"` matches `/api/v4/projects/group%2Fproject/members`, and `/public/..%2Fadmin` is one segment, not a dot-segment. Decoding it to `/` would give rules a different path than the gateway routes on. Residual risk: an app that decodes `%2F` itself serves `/admin%2Fx` as `/admin/x`, which a rule on `/admin/` doesn't see, just as the gateway's own path routes don't. The encoded slash is detected in `URL.RawPath`, the path as sent: Go re-encodes `URL.EscapedPath` when the raw path contains a character such as `{` or `|`, which would hide it.
+- The host is lowercased, without port, brackets or a trailing dot (`api.example.com.` is the same DNS name), for rules, the access log and, with an HTTPS upstream, the TLS server name.
 - This stops `/%61dmin`, `//admin` or `/admin;jsessionid=1` (Tomcat and Spring route it to `/admin`) from bypassing a rule on `/admin`.
 - **Ambiguous encodings are rejected with 400** at step 2. Upstreams disagree on how to treat these, so neither interpretation is safe to match on:
-  - encoded slash `%2F`
   - encoded backslash `%5C`
   - NUL `%00`
   - a raw `\`
   - invalid UTF-8, such as the overlong `/` in `%c0%af`
   - a `..` segment, raw or encoded (`%2e%2e`). An upstream that doesn't resolve it (Express mounts, many Node routers) routes `/admin/../public` under `/admin`, while the resolved path would match `/public`. Browsers and RFC 3986 clients remove dot-segments before sending, so real clients never send one. Dropping `.` or collapsing `//` only keeps a path under the prefix it was already under, so those are normalized, not rejected
   - a path parameter on a dot-segment (`..;x`, `.;x`, `..%3Bx`). Tomcat reads it as `..`; nginx, Express and Go read it as a name, so dropping the parameter would match a different path than some upstreams route
-
-  The encoded-slash check reads the raw request target, not `URL.EscapedPath`: Go re-encodes the decoded path when the raw one contains a character such as `{` or `|`, which would turn `%2F` back into `/`.
-
-  Envoy offers the same choice for escaped slashes (`path_with_escaped_slashes_action`, `REJECT_REQUEST`). A global setting can allow `%2F` for APIs that need it.
 - **Non-uppercase methods are rejected with 400** at step 2. RFC 9110 methods are case-sensitive and every standard one is uppercase, but Go's server accepts any token, so `post` would slip past a rule on `POST` at an upstream that folds case.
 - **Warning** when a rule matches on `http.request.uri` or `http.request.full_uri`. Those fields are raw and not normalized.
 - **Residual risk:** an upstream that normalizes differently can still disagree. Config tests ([§12.5](#125-before-going-live)) should include encoded variants of protected paths.
@@ -234,26 +215,14 @@ Each field has a type and a source. "Viewer" fields describe the client's connec
 
 **Values that can never match are rejected** by validation, because a dead rule looks active in the UI while doing nothing:
 - uppercase letters in a case-sensitive comparison on `http.host`, lowercase on country or continent
+- a path value that does not start with `/` in `eq`, `in`, `starts_with`, or a wildcard that does not start with `*` (the edge rejects any other path)
 - a method value, header name or cookie name that is not an RFC 9110 token
 - an IP literal with an IPv6 zone
 - invalid UTF-8 anywhere (JSON storage would silently replace it, so the stored rule would differ from the validated one)
 
 ### 3.3 Operators
 
-| UI operator | Expression | Types | Semantics |
-|---|---|---|---|
-| equals / does not equal | `eq` / `ne` | all | Case-sensitive for strings |
-| contains / does not contain | `contains` / `not (… contains …)` | string | Case-sensitive substring |
-| starts with / does not start with | `starts_with(f, "x")` / `not …` | string | Case-sensitive |
-| ends with / does not end with | `ends_with(f, "x")` / `not …` | string | Case-sensitive |
-| wildcard | `wildcard` | string | **Case-insensitive (ASCII letters only)**, matches the **whole** value, `*` = zero or more characters, `**` is invalid, `\*` and `\\` escape. Non-ASCII letters are compared exactly |
-| strict wildcard | `strict wildcard` | string | As wildcard, case-sensitive |
-| is in / is not in | `in {…}` / `not (… in {…})` | string, int, ip | Set membership. IP sets accept IPs and CIDRs |
-| matches regex | `matches` | string | Go RE2 (guaranteed linear time). **Global setting, off by default.** Pattern ≤ 1 KB |
-| greater / less (or equal) | `gt` `ge` `lt` `le` | int | e.g. AS Num |
-| is true / is false | `f` / `not f` | bool | |
-
-**Logic:** `not` > `and` > `or`, plus parentheses.
+Every operator, the types it takes and its text form are in the [Expressions reference](reference/expressions.md#operators). The rule builder shows each by a plain label, such as "equals" or "is in", from the same operator list the parser uses, so the two cannot disagree.
 
 ### 3.4 Syntax, storage, builder
 
@@ -263,14 +232,7 @@ Each field has a type and a source. "Viewer" fields describe the client's connec
 - **Syntax:** our own grammar of dotted field names, word operators and functions, e.g. `http.host eq "example.com" and starts_with(http.request.uri.path, "/api/")`. Some semantics cite another vendor's documentation where noted; no compatibility with any vendor's language is promised.
 - **Builder vs text:** the visual builder edits an OR of AND-groups, which is what the And/Or rows express. Text mode allows any nesting; if it can't be shown as rows, the UI shows text only.
 - **One parser:** the admin UI never parses, renders or validates in the browser. Each change calls the admin API, which uses the same Go code as the edge ([§13.6](#136-admin-ui-stack)). The AST's JSON shape matches the UI builder's tree, so no conversion layer is needed.
-- **Limits:**
-
-  | Limit | Value |
-  |---|---|
-  | Expression length | ≤ 4000 characters |
-  | Conditions per rule | ≤ 32 |
-  | `in` set size | Bounded by expression length (roughly 250 to 300 IPv4 ranges). Larger sets would need named lists, not planned |
-  | Rules per phase | ≤ 200 |
+- **Limits** are in the [Expressions reference](reference/expressions.md#limits). They bound compile time, memory and the per-request scan ([§3.5](#35-evaluation-cost)). Text length is counted in bytes, so an `in` set is bounded by it too (roughly 250 to 300 IPv4 ranges); larger sets would need named lists, which are not planned. Rules per phase are capped at 200.
 
 **Why our own engine:**
 - **Not CEL:** `cel-go` v0.30.0 requires antlr4, protobuf and genproto (its `go.mod`). That's too heavy for the edge, and its syntax differs from the builder preview.
@@ -324,7 +286,7 @@ rate_limit_rules:
 
 **Evaluation:**
 - **Site-wide rules** (expression `true`) are always evaluated, wherever they sit in the list. At most 2 are allowed (a validation error beyond that). They give the site-wide per-IP ceiling, and the cap can never skip them.
-- **Other matching rules** are evaluated in order, up to 5 per request. Rules beyond 5 are skipped and `ratelimit.rules_capped` is incremented.
+- **Other matching rules** are evaluated in order, up to 5 per request. Rules beyond 5 are skipped and `edge_ratelimit_rules_capped_total` is incremented.
   - **Only rules that can block use the cap first.** Blocking rules take slots before shadow (`action: log`) rules, and a rule skipped for a missing key (`on_missing_key: skip`) takes no slot. Clients choose which rules match through the fields they send, so otherwise five matching shadow or skipped rules could push a blocking rule such as a login limit out of evaluation.
 - So a request costs at most 7 commands, all in one pipelined batch.
 - **Rules are independent counters, not atomic with each other.** A request blocked by one rule still consumes quota in the others it matched. Checking before consuming would need a second round trip, which P2 rules out.
@@ -366,7 +328,7 @@ Notes:
 | `constant` | One bucket for the rule. A hot key on one shard, so use only with low limits |
 
 - **Valkey key:** `rl:<algo>:<period ms>:<rule_id>:{<b64url(sha256(subject))[:16 bytes]>}`. The subject is a domain byte followed by length-prefixed values, or a different domain byte followed by the client IP for `fallback_ip`. So a client-chosen header value can never produce another client's fallback bucket. The hash bounds key size and keeps raw values out of Valkey. The `{}` hash tag spreads subjects across slots.
-- **Rule: attacker-controlled keys need a partner.** Clients can rotate header, cookie or query values to get a fresh bucket each time, and also `host` (any Host reaches the rule when a config rule routes every host) and `method` (any uppercase token is a valid method). So a rule keyed only on those is a validation error unless its own key also includes `ip` or `jwt_claim`, or a site-wide rule keyed on `ip` exists. Whether two arbitrary expressions overlap is undecidable, so validation doesn't try.
+- **Rule: attacker-controlled keys need a partner.** Clients can rotate header, cookie or query values to get a fresh bucket each time, and also `host` (the edge forwards any Host to the one upstream, so any Host reaches the rule) and `method` (any uppercase token is a valid method). So a rule keyed only on those is a validation error unless its own key also includes `ip` or `jwt_claim`, or a site-wide rule keyed on `ip` exists. Whether two arbitrary expressions overlap is undecidable, so validation doesn't try.
 - **JWT claims are available only when this request's `auth` setting verified a token.** Otherwise `jwt_claim` keys count as missing (`on_missing_key`).
 - **Rule: `on_missing_key` defaults to `fallback_ip`.** With `skip` (the AWS WAF and NGINX behavior), omitting the header bypasses the rule.
 
@@ -383,7 +345,7 @@ Notes:
 - **It runs `ratelimit.Step`'s token bucket,** not `x/time/rate`. Each IP's bucket locks only itself; a shard lock covers only the map lookup. That needs no extra dependency. The state survives snapshot swaps unless the backstop settings change.
 - **IPv6 is keyed by /64,** like the shared rate limits, so rotating addresses within one subscriber prefix doesn't create new buckets.
 - **Memory is bounded:** a sharded map with `max_entries` and an idle sweep.
-- **When the map is full, new IPs aren't tracked.** They pass the backstop, which is fail-open, and `backstop.untracked` is incremented. Sharing one overflow bucket would throttle innocent users together. The shared Valkey limits still apply to them.
+- **When the map is full, new IPs aren't tracked.** They pass the backstop, which is fail-open, and `edge_backstop_untracked_total` is incremented. Sharing one overflow bucket would throttle innocent users together. The shared Valkey limits still apply to them.
 
 ### 4.6 Valkey failure
 
@@ -511,12 +473,11 @@ Admin users enter URLs that admin and edges then fetch, so `internal/jwks` enfor
 - **Edge-generated responses from step 4 onward carry CORS headers.** Earlier ones can't ([§2.1](#21-steps)).
 - **`Vary: Origin`** is added whenever a CORS policy applied and the allowed origin depends on the request (any list other than a single fixed origin), so caches don't serve one origin's headers to another (Fetch standard, CORS protocol and HTTP caches).
 - **Preflight with no policy** is forwarded to the upstream unchanged.
-- **Preflight answers:** always `204` with `Cache-Control: no-store`. When the origin, the requested method (CORS-safelisted `GET`/`HEAD`/`POST` need no listing) and every requested header are allowed, the response echoes the requested method and headers in `Access-Control-Allow-Methods`/`-Headers`, plus `Access-Control-Max-Age`. Otherwise it carries no `Access-Control-*` headers, which the browser treats as a failed check.
-- **Allowed origin:** `*` sends `*`; a single listed origin is always sent as is; a list echoes the request's `Origin` when it is listed. Only the list form varies by request, so only it sends `Vary: Origin`.
-- `ModifyResponse` strips upstream `Access-Control-*` headers when a policy applied.
+- **A refused preflight carries no `Access-Control-*` headers** rather than an error status, which the browser treats as a failed check. What a preflight answer and the allowed origin look like is in [CORS](use/policy.md#cors).
+- `ModifyResponse` strips upstream `Access-Control-*` headers when a policy applied, so the edge's policy is the only one the browser sees.
 - **Validation rejects `*` together with credentials.**
 
-## 7. Header Transform Rules
+## 7. Request header rules
 
 ```yaml
 request_headers:
@@ -533,28 +494,23 @@ request_header_rules:
     ops: [ { op: forward, mode: allowlist, names: [Authorization, Content-Type, Accept, Cookie] } ]
 ```
 
-- **Operations:**
-  - `set`
-  - `append`
-  - `remove`
-  - `copy` (keeps the source). Copy and rename read the headers as forwarded, after the filter and earlier ops. When the source is absent the target is **removed**, so a client can't supply its own value for it by omitting the source.
-  - `rename`
-  - `forward` (replaces the forward filter; the last matching one wins)
-- **Placeholders:** `{{header:<n>}}`, `{{client_ip}}`, `{{jwt_claim:<n>}}`, `{{country}}`, `{{locale}}`, `{{request_id}}`. All are resolved from the per-request field struct. Header and claim values have control characters removed (CR/LF would split the header; the transport rejects other controls). Literal parts are validated free of them.
+The operations, placeholders and reserved headers are listed in [Header rules](use/policy.md#header-rules).
+
+- **Copy and rename with an absent source remove the target,** so a client can't supply its own value for it by omitting the source.
+- **Placeholders** are resolved from the per-request field struct, so they cost no extra parsing. Header and claim values have control characters removed (CR/LF would split the header; the transport rejects other controls). Literal parts are validated free of them.
 - **The forward filter always keeps reserved headers.** `ReverseProxy` sets `Connection`, `Upgrade` and `Te` before `Rewrite`, so an allowlist without them would break WebSockets and gRPC trailers.
 - **Order:**
   1. Forward filter.
   2. Rule operations, in rule order.
   3. **Edge-managed headers last**, which no rule can override: `X-Forwarded-*`, `X-Edge-Client-IP`, `X-Edge-Geo-*`, `X-Edge-Auth-*`, `X-Edge-Locale`, `X-Request-Id`.
-- **Reserved, never targetable:** `Host`, `Connection`, `Upgrade`, `Transfer-Encoding`, `Content-Length`, the client-IP and viewer source headers, and `X-Edge-*`.
-  - **Never readable either,** on every path that names a header: ops, `{{header:<n>}}`, `header:<n>` rate-limit keys and `http.request.headers["<n>"]` in expressions. A client can forge `X-Edge-*` before the edge replaces it (forging `X-Edge-Auth-Sub` into an upstream header would bypass authorization), and source headers can carry the ingress secret. The edge also strips client `X-Edge-*` and source headers at step 2, before any rule runs.
+- **Reserved headers are never targetable,** because the edge or the transport owns them.
+  - **Nor readable,** on every path that names a header: ops, header placeholders, `header:<n>` rate-limit keys and `http.request.headers["<n>"]` in expressions. A client can forge `X-Edge-*` before the edge replaces it (forging `X-Edge-Auth-Sub` into an upstream header would bypass authorization), and source headers can carry the ingress secret. The edge also strips client `X-Edge-*` and source headers from the forwarded request at step 9, before the header rules run.
 - **Warnings:** an allowlist that drops `Authorization`, `Cookie` or `Content-Type`; a copy or rename whose source any forward filter can drop.
 - **Config tests** see `upstream_headers` from the same step 9 code as live traffic (`Simulate`), including the strip of client `X-Edge-*` and source headers, without the deployment-dependent forwarding headers (`X-Forwarded-*`, `X-Edge-Client-IP`, `X-Request-Id`).
 
 ## 8. Locale from `Accept-Language`
 
-- **Off by default.** Turned on globally or by the `locale` config setting.
-- **Config:** `supported` (BCP 47 tags), `default`, `output_header` (default `X-Edge-Locale`).
+- **Off by default.** Turned on globally or by the `locale` config setting. The settings and how a locale is chosen are in [Locale](use/policy.md#locale).
 
 **Per request:**
 
@@ -587,24 +543,14 @@ responses:
     body: '<!doctype html><title>Too many requests</title><p>Try again in {{retry_after}} seconds.</p>'
 ```
 
-- **Kinds and their required status:** `bad_request` 400, `unauthorized` 401, `misdirected` 421, `payload_too_large` 413, `rate_limited` 429, `bad_gateway` 502, `unavailable` 503, `overloaded` 503, `gateway_timeout` 504. `global.defaults.responses` must map every kind, because the edge can send any of them on any request.
+- **Kinds and their required status:** `bad_request` 400, `unauthorized` 401, `payload_too_large` 413, `rate_limited` 429, `bad_gateway` 502, `unavailable` 503, `overloaded` 503, `gateway_timeout` 504. `global.defaults.responses` must map every kind, because the edge can send any of them on any request.
 - **Headers on every edge-generated response:** `Cache-Control: no-store`; `Retry-After` on 429 and 503; CORS headers from step 4 onward.
 - **Placeholders:** `{{retry_after}}`, `{{request_id}}`, `{{status}}`. All are edge-generated, so nothing from the request can be injected. Templates are split into literal and placeholder parts at compile time and rendered with appends. `{{request_id}}` is safe in JSON and HTML only because the edge accepts an incoming `X-Request-Id` solely in a restricted character set ([§11](#11-proxy-and-http-server)).
 - **Validation:** status 400–599, body ≤ 32 KB, allowed content types only, JSON valid after sample substitution.
 
 ## 10. Client identity and viewer metadata
 
-| `CLIENT_IP_SOURCE` | Client IP header | Viewer headers (preset) |
-|---|---|---|
-| `cloudfront` | `CloudFront-Viewer-Address` (`ip:port`) | `CloudFront-Viewer-Country`, `CloudFront-Viewer-ASN`, `CloudFront-Forwarded-Proto`, `CloudFront-Viewer-Http-Version` |
-| `cloudflare` | `CF-Connecting-IP` (`ip`) | `CF-IPCountry`; scheme from a trusted `X-Forwarded-Proto` |
-| `header:<Name>:<ip\|ip_port>` | any | via `VIEWER_HEADERS` |
-| `xff` | `X-Forwarded-For`, walked right to left past trusted proxies | via `VIEWER_HEADERS` |
-| `remote_addr` | TCP peer | none |
-
-**Sources for the header names:**
-- CloudFront: "Adding CloudFront request headers" in the CloudFront developer guide.
-- Cloudflare: "HTTP request headers" in Cloudflare's docs. It also documents `True-Client-IP` (Enterprise) and `CF-Connecting-IPv6` with Pseudo IPv4.
+`CLIENT_IP_SOURCE` names where the client IP comes from: a CDN preset (`cloudfront`, `cloudflare`) that also fills in the viewer headers, a named header, `X-Forwarded-For` walked right to left past trusted proxies, or the TCP peer (`remote_addr`). The headers each preset reads are in [Client IP presets](deploy/edge.md#client-ip-presets).
 
 **Trust needs three controls together:**
 
@@ -632,24 +578,24 @@ responses:
 - `SetURL(upstream)`
 - `Out.Host = In.Host`
 - **Forwarding headers, set explicitly. Don't call `SetXForwarded()`.**
-  - In go1.27.2 `reverseproxy.go`, `SetXForwarded` takes the client IP from `In.RemoteAddr`, which here is the LB. It also sets `X-Forwarded-Proto` from `In.TLS`, which here is always `http` because TLS ends at the CDN/LB.
+  - In go1.27.3 `reverseproxy.go`, `SetXForwarded` takes the client IP from `In.RemoteAddr`, which here is the LB. It also sets `X-Forwarded-Proto` from `In.TLS`, which here is always `http` because TLS ends at the CDN/LB.
   - The edge sets instead:
     - `X-Forwarded-For` = the trusted client IP ([§10](#10-client-identity-and-viewer-metadata))
     - `X-Forwarded-Proto` = the viewer `ssl` field (`https`/`http`), or `http` if no viewer source is configured
     - `X-Forwarded-Host` = `In.Host`
   - Incoming `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto` are already removed from `Out` before `Rewrite` is called (the `ReverseProxy.Rewrite` doc comment).
 - **Query string:** Go also removes unparsable query parameters from `Out` before `Rewrite`. We keep that default and don't copy `In.URL.RawQuery` back. The upstream then sees the same parameters the rules matched on. The `Rewrite` doc comment warns that copying the raw query can cause security issues when the proxy and upstream interpret it differently.
-- then [§7](#7-header-transform-rules)
+- then [§7](#7-request-header-rules)
 
-**Upstreams:**
-- `UPSTREAMS` in deployment config defines named upstreams, plus a host → name map.
-- The `upstream` config setting can pick a **name**, never a URL, so admin users can't point traffic anywhere new.
-- One shared `http.Transport` per upstream, with `MaxIdleConnsPerHost` far above its default of 2, plus dial, TLS and `ResponseHeaderTimeout`.
-- **A host with no upstream mapping** gets 421 with the `misdirected` template.
+**Upstream:**
+- `UPSTREAM_URL` in deployment config is the one load balancer or gateway every request goes to. Policy can't change it, so admin users can't point traffic anywhere new.
+- The edge doesn't route. `Host` is forwarded unchanged and the upstream routes by host and path, as it did before the edge was added.
+- **HTTPS upstream:** the TLS server name and the certificate check use the request's host, the same name as `Host`. A load balancer or Istio gateway that picks its certificate and listener by SNI then serves that host. The dialer always connects to `UPSTREAM_URL`'s address; the host only names the server. A host the upstream has no certificate for fails with 502.
+- One shared `http.Transport`. Its idle pool is keyed by host for an HTTPS upstream, and clients choose the host, so the total is capped as well (`UPSTREAM_MAX_IDLE`).
 - **The edge never retries upstream requests.** A request may not be safe to repeat, and retries multiply load during an incident. (Go's `Transport` itself may retry a request that failed on a reused idle connection before any response; that's the stdlib's own behavior and stays.)
 
 **Streaming:**
-- **SSE:** ReverseProxy flushes immediately for `text/event-stream` and `ContentLength == -1` (go1.27.2 `reverseproxy.go`).
+- **SSE:** ReverseProxy flushes immediately for `text/event-stream` and `ContentLength == -1` (go1.27.3 `reverseproxy.go`).
 - **WebSocket:** handled through the stdlib's upgrade path. Hijacking clears connection deadlines (`server.go` `hijackLocked`).
 - Rate limiting and JWT apply at connect only.
 - **Stats:** a stream's latency is its time to response headers. Its lifetime would fill the top histogram bucket, which the guard's `p99_latency` reads. A WebSocket is counted and logged as 101; the access log's `duration_ms` is the stream's lifetime.
@@ -659,7 +605,7 @@ responses:
 **`http.Server`:**
 - `WriteTimeout = 0`; anything else would cut SSE.
 - `ReadHeaderTimeout` set.
-- **No global `ReadTimeout`,** because it would cut long uploads and streams. A **body read deadline** is set per request with `http.ResponseController.SetReadDeadline`, from config (default 60s, extendable for upload paths). Slow-body clients can't hold connections forever.
+- **No global `ReadTimeout`,** because it would cut long uploads and streams. A **body read deadline** is set per request with `http.ResponseController.SetReadDeadline`, from the required `global.defaults.body_read_timeout` (the starter policy sets 30s). No rule overrides it. Slow-body clients can't hold connections forever.
 - `MaxHeaderBytes` set explicitly (the default is 1 MB).
 - `IdleTimeout` above the front LB's idle timeout, on the internal server too.
 - **Framing:** conflicting `Content-Length` values get 400. With `Content-Length` and `Transfer-Encoding: chunked` together, Go drops `Content-Length` (RFC 9112 §6.3) but keeps the connection open, although RFC 9112 §6.1 says to close it, and the edge can't see the dropped header. Each request is re-framed to the upstream, so the upstream sees what the edge checked; a front that framed by `Content-Length` would disagree with the edge.
@@ -695,7 +641,7 @@ keys: [ { issuer_id: corp, jwks_url: ..., fetched_at: ..., jwks: ... } ]   # lat
 **`<config>`** (tests are stored with versions in admin; edges don't receive them):
 
 ```yaml
-schema: 1
+schema: 2
 version: 42
 kill_switch: { rate_limit: false, auth: false }
 global: { backstop: {...}, defaults: {...}, cors_policies: {...}, responses: {...}, locale: {...}, request_headers: {...} }
@@ -719,7 +665,7 @@ request_header_rules: [...]
 | Decode | Unknown fields rejected; types and ranges |
 | Fields | Limits, periods, status codes, CIDRs, header tokens, reserved headers, template sizes |
 | Expressions | [§3.6](#36-expression-validation) |
-| Cross-object | Referenced templates, CORS policies, issuers and upstream names exist. Attacker-key partner rule. CORS `*` + credentials |
+| Cross-object | Referenced templates, CORS policies and issuers exist. Attacker-key partner rule. CORS `*` + credentials |
 | Budgets | Rule counts, conditions, set sizes. Serialized `<config>` ≤ 8 MB. A benchmark checks compiled memory for the worst allowed config, which during a canary is held twice |
 | Database | `CHECK` and foreign keys as the last line |
 
@@ -734,10 +680,10 @@ request_header_rules: [...]
 **Startup** tries admin, then the cache file, then the bootstrap file, until one validates and compiles:
 1. **Admin.**
 2. **Local cache file:** written after every successful poll. It only helps where the platform keeps disk across restarts.
-3. **Bootstrap file:** built into the container image. The image build pipeline calls admin `GET /export` and stores the result with its `exported_at` time.
+3. **Bootstrap file:** mounted at `BOOTSTRAP_PATH`; the edge image holds only the binary. The deployment refreshes it within the age limit below, for example with a scheduled job calling admin's `GET /api/export`, which returns `{envelope, tests}`. The edge decodes the file strictly (unknown fields are rejected), so the file is the `envelope` alone, carrying its `exported_at` time. See [Where an edge gets its policy](deploy/index.md#where-an-edge-gets-its-policy).
 
 **Bootstrap age limit:**
-- **Used only if** `now - exported_at < BOOTSTRAP_MAX_AGE` (deployment config, default `7d`).
+- **Used only if** `now - exported_at < BOOTSTRAP_MAX_AGE` (deployment config, default `168h`; Go durations, so no `d` unit).
 - **Too old:** the edge stays not-ready, logs `bootstrap_too_old` with the age, and keeps retrying admin with backoff. Running replicas keep serving. An old policy could be missing current auth or limits, so serving it would quietly weaken protection.
 - **Emergency override:** `BOOTSTRAP_ALLOW_STALE=true` lets an old bootstrap serve. It's logged at error level on every startup and reported in the stats heartbeat, so admin shows "replica X is running a stale bootstrap".
 
@@ -749,8 +695,9 @@ request_header_rules: [...]
 - An edge keeps its current snapshot if a new one has a higher major `schema`.
 - A build reads every `schema` from `MinSchema` to its `max_schema`, so a version saved under an older schema still loads on an upgraded edge.
 - A field added in a later schema is omitted from JSON when unset and needs that schema when set. A config that doesn't use it then encodes exactly as before, so edges not yet upgraded, which reject unknown fields, keep loading snapshots from an admin upgraded first. A test pins the schema 1 encoding.
+- Schema 2 has no `upstream` config setting and no 421 `misdirected` response kind, because the edge forwards everything to one upstream. Compile reads a schema 1 config by dropping its `misdirected` template choices from a copy, so the stored version is served unchanged; a schema 1 rule that sets `upstream` fails to decode, because its routing can't be kept.
 - Admin won't publish a schema the oldest reporting edge can't read. Each stats report carries the edge's `max_schema`; publish, revert and import return 409 naming the edge while it is live (reported within the last minute).
-- Admin won't publish while a live edge runs with different deployment settings (`UPSTREAMS`, `CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER`, `ALLOW_REGEX`) than admin validates against. That edge would reject the config and keep its old snapshot, and the guard would only ever see `insufficient_data`. Each stats report carries a fingerprint of the edge's `snapshot.Deployment`; publish and import return 409 naming the edge. Reverts and guard rollbacks skip the check: they restore content edges already served, and an edge token reporting a bogus fingerprint must not block the way back. Edges that report no fingerprint aren't checked.
+- Admin won't publish while a live edge runs with different deployment settings (`CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER`, `ALLOW_REGEX`) than admin validates against. That edge would reject the config and keep its old snapshot, and the guard would only ever see `insufficient_data`. Each stats report carries a fingerprint of the edge's `snapshot.Deployment`; publish and import return 409 naming the edge. Reverts and guard rollbacks skip the check: they restore content edges already served, and an edge token reporting a bogus fingerprint must not block the way back. Edges that report no fingerprint aren't checked.
 
 Reverts and rollbacks are covered in [§12.7](#127-versions-and-revert).
 
@@ -798,10 +745,10 @@ tests:
     expect: { upstream_headers: { X-Tenant: acme } }
 ```
 
-They run through `/simulate` with the same compiler as the edge, on every save, and a failure **blocks publish**.
+They run through the edge's own `Simulate` with the same compiler as the edge, on every save, and a failure **blocks publish**.
 
-- **Wire format** (JSON): `request` takes `method` (default `GET`), `host`, `path` (as sent, query included), `ip` (default `192.0.2.1`), `headers`, `country`, `asn`, `ssl` and `jwt_claims` (one value each). `expect` checks only what it lists: `rejected`, `preflight`, `config_rules`, `rate_limit_rules`, `settings` (by key: `auth_mode`, `accepted`, `cors_policy`, `locale`, `responses`, `body_limit`, `upstream`, `upstream_timeout`, `ratelimit_headers`) and `upstream_headers` (first value; `""` means absent).
-- A test follows the edge's step order and stops where the edge would: a CORS preflight the edge answers, required auth with no `jwt_claims` (`rejected: auth`), or a missing key under `on_missing_key: reject`. The backstop, quotas and the `UPSTREAM_HOSTS` fallback depend on the running edge and aren't simulated.
+- **Request and expectation fields** are in [Config tests](use/policy.md#config-tests). `expect` checks only what it lists, so a test pins the behavior it is about and survives unrelated edits.
+- A test follows the edge's step order and stops where the edge would: a CORS preflight the edge answers, required auth with no `jwt_claims` (`rejected: auth`), or a missing key under `on_missing_key: reject`. The backstop and quotas depend on the running edge and aren't simulated.
 - A failing test doesn't stop a save; it is reported with the save and blocks publish.
 
 **Canary:**
@@ -813,9 +760,9 @@ They run through `/simulate` with the same compiler as the edge, on every save, 
    - So the comparison **excludes the top-K most-limited subjects** in both cohorts, and compares ratios rather than counts.
    - Guard decisions also need the `min_requests` sample in each cohort.
 4. Steps are configurable (e.g. 1% → 10% → 50% → 100%), with a minimum time and request count per step.
-5. **DECIDE:** manual or automatic promotion. Recommended: manual at first.
+5. Promotion is manual only (`POST /api/canary/promote`).
 6. Rule state is keyed by rule ID and algorithm, so unchanged rules share counters across cohorts.
-7. `--no-canary` exists for emergencies. It's audited and still guarded.
+7. A publish without `canary_percent` goes to all traffic at once. It's audited, and the guard still watches it for `window` after publish, against the previous version ([§12.6](#126-rollback-guard-every-signal-configurable)).
 
 ### 12.6 Rollback guard (every signal configurable)
 
@@ -843,7 +790,7 @@ guard:
 - **Per-publish override:** a publisher can change the guard for one publish, with a required, audited reason.
 - **Fixed:** never roll back a rollback, and every automatic action is audited and alerted.
 - **How it runs:** on the leader, every `evaluate_every`.
-  - During a canary it compares the candidate with active over the same minutes since the step started (at most `window`), and renews the canary's expiry (10-minute lease), so edges drop the candidate on their own if admin goes away.
+  - During a canary it compares the candidate with active over the same minutes since the step started (at most `window`), and renews the canary's expiry (10-minute lease) once less than half of it, or less than two `evaluate_every` intervals, is left, so edges drop the candidate on their own within 10 minutes if admin goes away. The expiry is part of the snapshot ETag, so renewing on every run would make every edge download and recompile an unchanged snapshot on every guard run (every 30 seconds by default).
   - After full rollout it compares the new version during its first `window` with the previous version over the `window` before the publish.
   - Both cohorts need `min_requests`, else the outcome is `insufficient_data`. Rule counts leave out the most-limited subjects in each cohort, but only heavy hitters: a subject holding at least 5% of a rule's limited requests in a minute. Many clients limited a little each is the over-blocking the guard exists to catch. The cost: an attacker spread over enough IPs that each stays under 5% is counted, and can trip `changed_rule_limited_ratio` on a rule aimed at them. That is accepted: the result is one audited rollback to a known-good version, and a rule published against an ongoing attack should carry a guard override with its reason.
   - The outcome (decision and every signal's value and baseline) is stored on the version. An alert is audited when it starts, not on every run.
@@ -866,7 +813,7 @@ Every publish is a numbered, immutable version you can open, compare and revert 
 | `status` | `active`, `canary`, `superseded`, `rolled_back` |
 | `config` | The full config, without JWKS keys (see below) |
 | `test_results`, `guard_outcome` | What happened when it went live |
-| `change_summary` | e.g. "+2 rules, ~1 changed, −0", computed at publish |
+| `change_summary` | in words, such as "2 rules added, 1 rule changed", computed at publish |
 
 Configs are small: they're bounded by the budgets in [§12.2](#122-validation-one-validator-everywhere). Keeping every version forever costs little.
 
@@ -887,7 +834,7 @@ Configs are small: they're bounded by the budgets in [§12.2](#122-validation-on
 **Revert semantics:**
 
 1. **A revert creates a new version** (N+1) whose content is version K's. History is never rewritten; versions only go up ([§12.3](#123-distribution)).
-2. **It is validated against today's deployment.** An old version can reference something that no longer exists, e.g. an upstream name removed from deployment config, or a template since deleted.
+2. **It is validated against today's deployment.** An old version can reference something that no longer exists, e.g. a viewer field the CDN no longer sends, or a template since deleted.
    - Validation errors block the revert, and the UI says exactly what's missing.
    - The old version's own config tests run too, since tests are versioned with config.
 3. **JWKS keys are not reverted.** Keys are environmental state, not config. The reverted version embeds the **current** latest-good keys. Restoring old keys could re-accept a key the IdP has revoked.
@@ -905,7 +852,7 @@ Configs are small: they're bounded by the budgets in [§12.2](#122-validation-on
 - There is one shared draft, with optimistic concurrency ([§12.2](#122-validation-one-validator-everywhere)), so concurrent editors don't overwrite each other.
 - **The draft records `base_version`,** the active version it was started from.
 - **Before the first save,** the draft is the active version (or, when nothing is published, a starter config with the default response templates and no rules) at revision 0. Saving it with `If-Match: "0"` creates the draft.
-- **Publishing when `base_version` is no longer active** (e.g. a revert or guard rollback happened meanwhile) is blocked. The UI shows a three-way view: what changed in the draft, what changed in the active version, and the result of applying the draft on top of the current active version. The publisher must **rebase** (accept that result) before publishing. A revert therefore can't be silently undone by publishing an older draft.
+- **Publishing when `base_version` is no longer active** (e.g. a revert or guard rollback happened meanwhile) is blocked. The UI shows a three-way view: what changed in the draft, what changed in the active version, and the result of applying the draft on top of the current active version. The publisher must **rebase** (accept that result) before publishing. A revert therefore can't be silently undone by publishing an older draft. While a canary runs, a draft based on the canary version has nothing to rebase: rebasing onto active would strip the canary's changes.
   - **Merge rules:** rules are matched by ID per phase. Rules the draft added, removed or edited keep the draft's state; rules the draft left alone take active's state (edited, removed, or added at active's position). `kill_switch`, `global` and `auth` are taken whole from the draft if it changed them, else from active. Where both changed the same rule or section, the draft wins and the view lists it as a conflict.
 - "Copy to draft" replaces the draft after a confirm that shows what would be lost.
 - Publishing turns the draft into the next version.
@@ -940,7 +887,6 @@ type SecondFactor interface {
 - `users`
 - `user_identities (provider, subject) → user_id`
 - `local_credentials`
-- `user_second_factors`
 - `roles`, `role_permissions`, `user_roles`, `group_role_mappings`
 - `sessions`
 - `api_tokens`
@@ -965,6 +911,8 @@ type SecondFactor interface {
 - `__Host-` cookie, `HttpOnly`, `Secure`, `SameSite=Lax`.
 - Idle (`SESSION_IDLE_TIMEOUT`, default 30m) and absolute (`SESSION_MAX_AGE`, default 12h) expiry. Rotated on login: a session ID the browser already had is revoked. A password change, role change or disable ends every session of that user. Revocable server-side.
 
+**No lockout:** a user can't disable their own account, and a role change or disable that would leave no enabled user with `users.manage` is refused (409). Without this, only the CLI could recover.
+
 **CSRF:** stdlib `http.CrossOriginProtection` (Go `net/http/csrf.go`).
 
 **Requests:** each JSON body is one value, read through [`http.MaxBytesReader`](https://pkg.go.dev/net/http#MaxBytesReader): 10 MB for API calls, 1 MB for a stats report, 8 KB for login. A larger body gets 413 and data after the value gets 400. The server sets `ReadTimeout` 30s and `IdleTimeout` 120s, and no `WriteTimeout`, because audit export streams its response.
@@ -976,9 +924,10 @@ type SecondFactor interface {
 - Local login can be limited to break-glass accounts, which require MFA.
 
 **Bootstrap and machines:**
-- The first `admin` is created from the CLI (`admin create-user <name> admin`, password on stdin). There are no default credentials.
+- The first `admin` is created from the CLI (`admin create-user <name> admin`, password on stdin), or at first start from `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD_FILE` when no user exists yet. There are no default credentials.
+- `BOOTSTRAP_PUBLISH_DEFAULT=true` publishes the starter policy at first start when no version exists yet. Both bootstrap steps are audited with actor `bootstrap` (actions `user.create` and `config.publish`).
 - `admin migrate` runs migrations as the owner role (`MIGRATION_DATABASE_URL`) and grants `DB_RUNTIME_ROLE` its limited access.
-- Edges use a service token or mTLS, limited to `GET /v1/snapshot` and `POST /v1/edge/report`.
+- Edges send a bearer token: an edge token created in admin (`POST /api/tokens` with kind `edge`) or the deployment's `EDGE_SERVICE_TOKEN_FILE`. Either is limited to `GET /v1/snapshot` and `POST /v1/edge/report`.
 
 ### 13.2 Authorization
 
@@ -988,7 +937,7 @@ Handlers check **permissions** (`require("config.publish")`), never role names.
 |---|---|
 | `viewer` | `config.read`, `stats.read`, `audit.read` |
 | `editor` | viewer + `config.write`, `config.test` |
-| `publisher` | editor + `config.publish`, `config.rollback`, `canary.manage` |
+| `publisher` | editor + `config.publish`, `config.rollback`, `canary.manage`, `routes.manage` |
 | `admin` | publisher + `users.manage`, `settings.manage`, `tokens.manage` |
 
 - API token scopes are a subset of the owner's permissions.
@@ -1023,31 +972,25 @@ Handlers check **permissions** (`require("config.publish")`), never role names.
 - **Key rotation:** keys are ordered, oldest first (`AUDIT_HMAC_PREVIOUS_KEYS`, then `AUDIT_HMAC_KEY`). A row may not use a key older than the row before it, so a leaked retired key can't sign new rows.
 - **Incremental verification** first re-checks the last row it verified, so deleting rows already verified is caught at the next run. Rows deleted before any run reached them are what the external anchors catch.
 - **Verification:** incremental every few minutes and full daily, on the leader. A break is a critical alert.
-- **Retention:** monthly partitions, never dropped.
+- **Retention:** one unpartitioned table; rows are never dropped.
 
 **Admin UI audit screen** (read-only for everyone):
 - filters
 - before/after diff
-- an integrity badge ("verified to seq N" or red "broken at N")
+- an integrity badge ("intact to event N" or red "tampering found at event N")
 - export with HMACs (each export is audited)
 
 ### 13.4 API
 
-- **Rules and config:** CRUD for rules, templates, CORS policies, issuers and settings. Every write is validated.
-- **Expression helpers** (used by the builder): `GET /expr/schema`, `POST /expr/parse`, `/expr/render`, `/expr/validate`.
-- **Publishing:**
-  - `POST /publish`, `POST /versions/{v}/revert`, `POST /versions/{v}/copy-to-draft`
-  - `GET /versions`, `GET /versions/{v}`, `GET /diff/{a}/{b}?view=semantic|raw`, `GET /rules/{id}/history`
-  - `/canary` (start, promote, abort)
-  - `/settings/guard`
-- **Testing:** `POST /simulate`, `/tests/run`.
-- **Portability:** `GET /export` returns `{envelope, tests}`: the envelope is the bootstrap file (active config and its keys), the tests travel with it. `POST /import` publishes a config through every publish check (validation, tests, keys) as `source: import`.
-- **Identity:** `/auth/*`, `/users`, `/roles`, `/tokens`.
-- **Audit:** `GET /audit`, `POST /audit/verify`, `POST /audit/export` (POST because each is itself audited; export streams rows). No endpoint edits audit rows.
-- **Edges:** `GET /v1/snapshot` (the ETag fingerprints what the envelope is built from, except the fleet size: active version, canary row and each key row's `xmin`. An unchanged snapshot is a 304 without loading any config; 503 until the first publish, so edges use their cache or bootstrap), `POST /v1/edge/report` (answers with the live `fleet_size`). Only edge service tokens may call them.
-- **Canary:** `POST /publish` with `canary_percent` (needs `canary.manage` too) starts one; `/canary/step`, `/canary/promote`, `/canary/abort` (with a reason). No other publish, revert or import runs during a canary.
+Every route with its permission is in the [Admin API reference](reference/api.md). The design choices behind it:
+
+- **One shared draft** holds the whole config and its tests. Every save is validated, and `If-Match` on the draft revision stops one operator's save from overwriting another's.
+- **Expression helpers** (`/api/expr/*`) exist so the browser never parses, renders or validates an expression ([§3.4](#34-syntax-storage-builder)).
+- **Import** publishes through every publish check (validation, tests, keys) as `source: import`, so staging promotion can't skip a gate.
+- **Audit reads that write** (`verify`, `export`) are POST because each writes its own audit row. No endpoint edits audit rows.
+- **Edge endpoints** (`GET /v1/snapshot`, `POST /v1/edge/report`) accept only edge service tokens. The snapshot ETag fingerprints what the envelope is built from, except the fleet size: active version, canary row and each key row's `xmin`. An unchanged snapshot is a 304 after one query, with no transaction and no config loaded, so polling every 5s from every edge stays cheap. It is 503 until the first publish, so edges use their cache or bootstrap. The report is answered with the live `fleet_size`.
+- **Canary:** no other publish, revert or import runs during a canary (409 until it is promoted or aborted), so the guard compares only the candidate against the active version.
 - **Background jobs** run on the replica holding the leader lock: JWKS refresh every 10 minutes (only changed key sets are written, each change audited), incremental audit verification and an anchor log line every 5 minutes, a full verification and stats retention daily, and the guard. Saving a draft also fetches keys for any issuer that has none yet; a failure there is a warning.
-- **Dashboards:** `GET /stats`, `/fleet`.
 
 ### 13.5 Admin UI screens
 
@@ -1060,7 +1003,7 @@ Handlers check **permissions** (`require("config.publish")`), never role names.
 - Tests and simulate
 - Diff, publish and canary
 - Versions: timeline, view, semantic and raw compare, revert, per-rule history ([§12.7](#127-versions-and-revert))
-- Fleet (version per edge)
+- Fleet (per edge: versions loaded, `UPSTREAM_URL`, config source, last report)
 - Stats (charts, most-limited keys)
 - Audit
 - Users, roles and tokens
@@ -1089,7 +1032,8 @@ Handlers check **permissions** (`require("config.publish")`), never role names.
 |---|---|---|
 | Rule builder | `react-querybuilder`, `@react-querybuilder/dnd` | Field / Operator / Value rows with per-field operator lists (`getOperators`) and value editors (`getValueEditorType`, `getValues`). Nested And/Or groups, group `not`, drag-and-drop ([docs](https://react-querybuilder.js.org/docs)) |
 | Styling | Tailwind CSS | Native elements (`select`, `table`, `form`) are accessible as they are; no component registry or Radix dependency |
-| Expression and section editors | CodeMirror 6 | Small, chosen over Monaco for size. Templates, CORS, issuers, settings and a rule's action fields are edited as JSON; save runs the one validator and returns errors with their paths |
+| Visual language | Design tokens in `web/admin/src/index.css` | Achromatic light and dark themes that follow the system setting, with colour kept for status, so a red or amber state is never lost among brand colour. Dark mode is a black canvas for long sessions in dark rooms. Edges are 1px shadows so controls in a row align exactly. Geist Sans and Geist Mono, bundled because the admin CSP blocks font CDNs |
+| Expression, body and JSON editors | CodeMirror 6 | Small, chosen over Monaco for size. A rule's action fields, templates, CORS, issuers, settings and the simulated request are forms, with JSON as a fallback; each draft edit is checked with `POST /api/draft/check`, which runs the one validator and returns errors with their paths |
 | Rule reordering | `@dnd-kit/core`, `@dnd-kit/sortable` | Drag-and-drop for the ordered rule lists |
 | Data fetching | TanStack Query | Debounced server calls with caching |
 
@@ -1098,16 +1042,16 @@ Versions compare with the semantic diff; the raw view shows both JSON documents 
 **How the builder keeps one source of truth (the Go parser):**
 
 1. **The stored expression AST is designed to be the same JSON shape as react-querybuilder's rule-group tree:** `{combinator, not, rules: [{field, key, operator, value} | group]}`. The only step between them drops the three bookkeeping keys the builder adds (`id`, `path`, `valueSource`), which the strict API decoder would reject. Keyed fields use a custom field selector that sets `key`.
-2. **Every builder change** is debounced and posted to `POST /expr/render`. The Go code returns:
+2. **Every builder change** is debounced and posted to `POST /api/expr/render`. The Go code returns:
    - the canonical preview text
    - the character count
    - validation errors with their positions
 
    The browser never formats or validates expressions itself; no second implementation in TypeScript.
-3. **Edit expression (text mode):** CodeMirror text goes to `POST /expr/parse`, which returns the AST.
+3. **Edit expression (text mode):** CodeMirror text goes to `POST /api/expr/parse`, which returns the AST.
    - If the AST fits the row model, the builder shows it.
    - If not, because it's nested deeper than rows can show, the UI stays in text mode. This is the rule from [§3.4](#34-syntax-storage-builder).
-4. **Field and operator lists** come from `GET /expr/schema`. That's the same field and operator tables the edge compiles with, including which fields are *available* in this deployment and phase. The UI therefore can't offer something the validator rejects.
+4. **Field and operator lists** come from `GET /api/expr/schema`. That's the same field and operator tables the edge compiles with, including which fields are *available* in this deployment and phase. The UI therefore can't offer something the validator rejects.
 
 **Build and serving:**
 
@@ -1131,13 +1075,6 @@ Versions compare with the semantic diff; the raw view shows both JSON documents 
   - revert
   - read the audit log
 - TypeScript strict mode and ESLint in CI.
-
-**Prototype result:** react-querybuilder is kept. The risk spike (`web/admin/e2e/builder.spec.ts`) confirmed, with the dnd-kit adapter from `@react-querybuilder/dnd`:
-
-- a rule dragged from the root into a nested group moves there in the AST sent for preview
-- a keyed field sends `key`, and a list operator sends a JSON array
-- text parsed by the server, with a nested negated group, shows as nested rows
-- the builder adds `valueSource` to rules on reset, so it is stripped with `id` and `path`
 
 TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 
@@ -1166,11 +1103,10 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 3. **Overload is shed:**
    - an in-flight cap for ordinary requests (step 1)
    - a separate cap for streams
-   - a per-upstream cap (step 10)
    - `MaxHeaderBytes`, body limits and the body read deadline
 4. **No single point of failure:** at least 2 edges across zones with one-zone-loss headroom. Admin can be 1 or 2.
 5. **Kill switch** in the snapshot.
-6. **Edge-bypass runbook:** the front LB can route straight to upstreams. Tested.
+6. **Edge bypass:** the CDN can send traffic straight to the load balancer or gateway behind the edge, which routes it as before, because the edge never routes ([Bypass the edge](operate/runbooks.md#bypass-the-edge)).
 7. **Graceful shutdown** ([§11](#11-proxy-and-http-server)).
 
 ## 15. Observability
@@ -1180,6 +1116,7 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 - **Format:** JSON lines via `log/slog`.
 - **OTel HTTP semantic-convention names** (stable):
   - `http.request.method`
+  - `server.address` (the `Host` header, lowercased, without port)
   - `url.path`
   - `http.response.status_code`
   - `client.address` (raw)
@@ -1187,14 +1124,16 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
   - `edge.config_version`
   - `edge.cohort`
   - `edge.config_rules`
+  - `edge.query_keys` (the query's parameter names, sorted and unique, at most 32)
+  - `edge.query_keys_dropped` (keys not logged: a pair without `=`, which can be a bare token; a key that does not match `[A-Za-z0-9_.[\]-]{1,64}`; keys past 32)
   - `edge.rate_limit_rule`
   - `edge.decision`
   - `edge.auth` (`verified`, `cached`, `missing`, `invalid`, `pass_no_keys`; absent when auth is off)
   - `request_id`
   - `duration_ms`
-- **Access logs are written asynchronously:** a bounded channel feeds a writer goroutine. When the channel is full, the line is dropped and `log.dropped` is incremented. Logging never blocks a request.
-- **Sampling:** allowed requests are sampled. Limited requests, errors and 5xx are always logged.
-- **Redaction:** never log `Authorization`, `Cookie` or query strings.
+- **Access logs are written asynchronously:** a bounded channel feeds a writer goroutine. When the channel is full, the line is dropped and `edge_log_dropped_total` is incremented. Logging never blocks a request.
+- **Sampling:** allowed requests below 500 are sampled, upstream 4xx included. Every rejection (any decision other than `allow`) and every 5xx is always logged. A sampled line carries `edge.sample_rate`, so a reader can count it as 1/rate requests.
+- **Redaction:** never log `Authorization`, `Cookie` or query values. Parameter names are logged so routes can be grouped by query shape; a key that could itself be a secret is only counted.
 
 ### 15.2 Stats: push to admin
 
@@ -1203,17 +1142,30 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
   - Updated only on a limit, and **sampled** 1 in 16 so an attack doesn't serialize on its mutex. Counts are estimates (sampled count × 16).
   - **Space-Saving** (Metwally, Agrawal, El Abbadi, 2005) per config version: at most 256 subjects; a new subject replaces the smallest and inherits its count. Any subject above 1/256 of the sampled limits stays tracked, and counts never underestimate. Each report carries the top 20 per version, then starts over.
   - Entries carry the rule, the rate-limit key (which holds only a hash of the subject) and a **display value** for the admin UI: the IP or /64, `AS<n>`, host, method or country in full, and header, cookie, query and claim values as at most their first 4 characters and never more than half of the value, e.g. `X-Api-Key=sk_l…` (a 4-character value shows 2), with unprintable characters shown as `?`. Admin refuses a report whose rule IDs, keys or display values contain NUL, which Postgres refuses in `jsonb` and which would fail the whole minute's batch. Secrets such as API keys are never shown in full; the key's hash tells subjects with one prefix apart.
-- **Reporter:** every 10s each replica posts deltas + top-K + `{instance, version, cohort, config_source, bootstrap_age}`. It authenticates with the edge service token ([§13.1](#131-identity-extensible)); admin rejects unauthenticated reports, so a forged report can't trigger the guard. On failure the report is dropped.
+- **Reporter:** every 10s each replica posts `{instance, config_source, bootstrap_age_seconds, interval_seconds, max_schema, deployment, upstream}` (`deployment` is the deployment config fingerprint, `upstream` its `UPSTREAM_URL`) plus, per config version, count deltas and top-K. It authenticates with the edge service token ([§13.1](#131-identity-extensible)); admin rejects unauthenticated reports, so a forged report can't trigger the guard. On failure the report is dropped.
 - **Admin:**
   - Aggregates in memory, per minute and config version, bounded (at most 1000 most-limited subjects per minute and version).
-  - Writes one batch per minute into `edge_stats_minute`. Each admin replica writes its own rows for the reports it received, and readers sum across replicas, so replicas never merge each other's arrays. On a write failure the minute is dropped. On shutdown admin stops accepting connections, waits for reports in flight, then writes everything it still holds, giving up after 5s so an unresponsive Postgres can't keep the replica from exiting.
-  - 30-day retention by a daily delete on the leader. Partitioning can come later if volume needs it.
-  - `fleet` keeps each edge's last report; `fleet_size` counts edges seen in the last minute. Admin answers each report with it.
+  - Writes one batch every 10s into `edge_stats_minute`, the minute in progress included: each write replaces the row with the minute's running sum, so the dashboard is at most one report and one write behind. Each admin replica writes its own rows for the reports it received, under its name plus its start time so a restarted replica never overwrites its previous run's minute, and readers sum across replicas, so replicas never merge each other's arrays. On a write failure a finished minute is dropped; the minute in progress is written again on the next one. On shutdown admin stops accepting connections, waits for reports in flight, then writes everything it still holds, giving up after 5s so an unresponsive Postgres can't keep the replica from exiting.
+  - 30-day retention by a daily delete on the leader.
+  - `fleet` keeps each edge's last report, which the Fleet screen shows with the edge's `UPSTREAM_URL`; `fleet_size` counts edges seen in the last minute. Admin answers each report with it.
 - **Why push, not pull:**
   - Pull needs per-platform replica discovery and a network path into every replica. That breaks P3.
   - Pull misses short-lived replicas.
   - Pull is too slow for canary and guard decisions.
 - **`/metrics`:** the edges also expose Prometheus text format on the internal port, for platform scrapers.
+
+### 15.3 Observed routes: built from access logs
+
+Routes are built from the access lines the edges already write, so the edge does no extra work for them. A log shipper reads the edge containers' stdout, and nothing else, and posts access lines to admin; the edge never waits for it. Any process can write a line that looks like an access line, so the shipper must not collect other containers.
+
+- **Ingest:** `POST /v1/logs/access`, one access line per line (newline-delimited JSON), at most 4 MiB a request. A line over 64 KiB is skipped alone. Lines are counted only once the whole body is read, so a failed request adds nothing. Only the deployment's shipper token (`LOG_INGEST_TOKEN_FILE`) may post, and it may do nothing else; admin refuses to start if it equals the edge token. Two ingests run at once; a third gets 429 and the shipper sends the batch again.
+- **Lines used:** `msg` is `access` and host, method and path are present. Rejections of the request line itself (`path`, `method`) say nothing about a route and are skipped, as is any line with NUL, which Postgres refuses in `jsonb`.
+- **Grouping:** a route is host, method and path template. A segment of digits becomes `{id}`, a UUID `{uuid}`, 16 or more hex digits `{hex}`, and 20 or more letters and digits with both, anything with `@`, or anything longer than 64 characters, `{token}`. Query key names go through the same rules. Other segments are stored as they are and shown to anyone with `stats.read`. Operator patterns, where `*` is one segment, are tried first, host patterns before every-host ones, then the most literal. Admin suggests a pattern when 20 or more literal routes share a parent. Creating one merges the routes it now groups, leaving those a more specific pattern groups, in the same transaction as its audit row; creates run one at a time. Lines still held in memory are grouped with the current patterns when they are flushed.
+- **Counts:** per route and hour: logged requests, status classes, latency buckets (the edge's bounds), decisions, matched config rules, the rate-limit rule, and query shapes (sorted key names). A line counts once, except a sampled line (`edge.sample_rate` below 1), which counts as 1/rate requests, at most 1,000,000, rounded up or down at random so the expected total is exact. The scaled requests are kept as `estimated` so the UI can mark them; rejections and 5xx are always logged and stay exact. Each replica sums in memory and adds its deltas to the shared rows every 10s, in one order on every replica so flushes never deadlock, and rows are never read back and rewritten. On failure the deltas are dropped.
+- **Bounds:** 5,000 stored routes and 10,000 route hours between flushes. A route seen only with error answers, such as a login whose every request is rate limited, is stored apart and marked, at most 500 of them, so a scanner's 404s and rejections can't push other routes out; the mark clears on its first 1xx to 3xx answer, which takes a place among the 5,000 or is not grouped, so the two limits bound the table together. Traffic that isn't stored, and templates over 512 characters or 32 segments, are counted as not grouped. Per route and hour, 20 query shapes of at most 256 characters and 200 rule IDs or decisions, with the rest summed under `*`; reads cap the summed range the same way.
+- **Coverage:** lines served under a policy version, divided by the requests the edges reported in `edge_stats_minute`. It falls below 100% when lines are dropped, or when edges sample without saying their rate.
+- **What applies to a route:** admin runs the edge's `Simulate` on a sample of the route, with placeholders filled and the most common query shape. Each rule is then classed as always, never or depends. Conditions on host, method and path are compiled by `internal/expr` and run against several sample paths, including ones built from the condition's own values; a regex on a path with placeholders is unknown. Agreement across samples is evidence, not proof. Conditions on any other field are unknown and named by their label. `and`, `or` and `not` combine these with three-valued logic.
+- **Retention:** route hours are kept 30 days, and routes with no hours left are dropped, by the leader's daily job. Deleting a route, or all routes, is audited; new traffic collects them again.
 
 ## 16. Capacity inputs
 
@@ -1227,7 +1179,7 @@ Worked example with **hypothetical** inputs, to show the method:
 | Parameter | Derivation (hypothetical) |
 |---|---|
 | Valkey deadline | Budget +10 ms, Valkey p99 1.5 ms → about 5 ms |
-| Breaker | An error ratio over 1s, not a consecutive-error count; at high RPS, counts trip too fast |
+| Breaker | 5 consecutive failures on a node open it for 1s. Consecutive failures rather than an error ratio keep it to three atomics |
 | Valkey ops/s | 20k RPS × 1.5 matched rules = 30k ops/s → shard count after a benchmark |
 | Valkey memory | 1M IPs/min × 2 rules × about 120 B ≈ 240 MB |
 | Edge replicas | Measured 5k RPS per replica → 4, ×1.5 for losing 1 of 3 zones → 6 |
@@ -1235,26 +1187,17 @@ Worked example with **hypothetical** inputs, to show the method:
 | Log sampling | 20k RPS × 400 B = 8 MB/s unsampled → sample allowed requests at 1–10% |
 | Backstop | Above the busiest legitimate client, e.g. an office NAT |
 
-Per-replica figures come from the load tests ([§18.3](#183-load-local-only)). Measured on a 2 vCPU laptop: 1.55 Valkey calls per request for the scenario mix, 124 bytes per key, 21 µs of Valkey CPU per call, and at least 5,300 RPS per edge vCPU.
+Per-replica figures come from the load tests ([§18.3](#183-load)). Measured on a 2 vCPU laptop: 1.55 Valkey calls per request for the scenario mix, 124 bytes per key, 21 µs of Valkey CPU per call, and at least 5,300 RPS per edge vCPU.
 
 ## 17. Deployment contract
 
-The complete variable lists with defaults are in [Edge deployment](deploy/edge.md) and [Admin deployment](deploy/admin.md).
+Every variable with its default is in [Edge settings](deploy/edge.md) and [Admin settings](deploy/admin.md). Example AWS and Cloudflare setups are in [Platform notes](deploy/index.md#platform-notes).
 
 | Concern | Contract |
 |---|---|
-| Artifacts | Two OCI images (edge, admin), configured by env/flags |
-| Edge ports | `LISTEN_ADDR` (public, default `:8080`); `INTERNAL_ADDR` (default `:9090`: `/livez`, `/readyz`, `/metrics`) |
-| Trust | `CLIENT_IP_SOURCE` (`cloudfront`, `cloudflare`, `header:<Name>:<ip\|ip_port>`, `xff`, `remote_addr`), `TRUSTED_PROXIES` (CIDRs or IPs), `VIEWER_HEADERS` (`field=Header,...`, adds to the preset), optional `INGRESS_SECRET_HEADER` + `INGRESS_SECRET_VALUES` (comma-separated, several for rotation) |
-| Upstreams | `UPSTREAMS` (`name=URL,...`), `UPSTREAM_HOSTS` (`host=name,...`), `UPSTREAM_DIAL_TIMEOUT`, `UPSTREAM_MAX_IDLE_PER_HOST` |
-| Valkey | `VALKEY_URL` (valkey-go `ParseURL` forms: standalone, Sentinel via `master_set`, Cluster via extra `addr` parameters, TLS via `rediss://`, ACL user and password, `dial_timeout`), `VALKEY_TIMEOUT` (per batch, default 50ms until the capacity inputs set it). Cluster needs `cluster-require-full-coverage no` ([§4.6](#46-valkey-failure)). Every key has a TTL |
-| Snapshot | `ADMIN_URL` + `EDGE_SERVICE_TOKEN` (or `EDGE_SERVICE_TOKEN_FILE`, for a mounted secret; not both), `SNAPSHOT_CACHE_PATH`, `BOOTSTRAP_PATH` (tried in that order; at least one required), `BOOTSTRAP_MAX_AGE` (default `168h`; Go durations, so no `d` unit), `BOOTSTRAP_ALLOW_STALE` (emergency), `POLL_INTERVAL` (default 5s), `STATS_INTERVAL` (default 10s) |
-| Limits | `EXPECTED_REPLICAS` (fallback for `fail_mode: local`, M4), `MAX_INFLIGHT`, `MAX_STREAMS`, `MAX_UPSTREAM_INFLIGHT`, `MAX_HEADER_BYTES`, `TOKEN_CACHE_SIZE` ([§5.3](#53-verification)). Defaults are conservative until the capacity inputs ([§16](#16-capacity-inputs)) arrive. An open SSE or WebSocket stream also holds a `MAX_UPSTREAM_INFLIGHT` slot, so size it for the streams an upstream serves plus its ordinary concurrency |
-| JWKS | `JWKS_ALLOWED_HOSTS` (optional) |
-| Logs and stats | `INSTANCE` (replica name in reports, default the hostname), `LOG_SAMPLE_RATE` (share of allowed, non-5xx requests logged) |
-| Runtime | `GOMEMLIMIT` ≈ 90% of the memory limit; `GOMAXPROCS` left to Go's cgroup default |
-| Timing | `READ_HEADER_TIMEOUT`, `IDLE_TIMEOUT` (default 75s, above common 60s LB idle timeouts), `DRAIN_DELAY`, `SHUTDOWN_TIMEOUT` |
-| Admin | `LISTEN_ADDR` (default `:8081`), `DATABASE_URL` (runtime role without audit `UPDATE`/`DELETE`/`TRUNCATE`), `MIGRATION_DATABASE_URL` + `DB_RUNTIME_ROLE` (for `admin migrate`), `AUDIT_HMAC_KEY_ID` + `AUDIT_HMAC_KEY` (base64, ≥ 32 bytes), `AUDIT_HMAC_PREVIOUS_KEYS` (`id=base64,...`, oldest first), `PASSWORD_BLOCKLIST_PATH`, `SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, `JWKS_ALLOWED_HOSTS`, `ADMIN_TRUSTED_PROXIES` (CIDRs or IPs of admin's own HTTPS proxy), `INSTANCE`, and the edges' `UPSTREAMS`, `CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER` and `ALLOW_REGEX`, so admin validates config against the deployment its edges run in ([§12.3](#123-distribution)). OIDC provider settings later |
+| Artifacts | Two OCI images (edge, admin), configured by environment variables only. Admin's arguments choose a command (`serve`, `migrate`, `create-user`), not settings |
+| Trust | Trusted proxies, the client-IP source, the upstream URL, secrets and the deployment settings admin validates against (`CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER`, `ALLOW_REGEX`, [§12.3](#123-distribution)) come only from the deployment, never from admin-editable config |
+| Runtime | `GOMAXPROCS` is left to Go's cgroup default; `GOMEMLIMIT` is set by the deployment ([§2.2](#22-latency-rules)) |
 | Placement | Edge: at least 2 across zones. Admin: internal network only |
 
 ## 18. Testing
@@ -1263,11 +1206,10 @@ The complete variable lists with defaults are in [Edge deployment](deploy/edge.m
 
 **Edge: 100% statement coverage, enforced in CI.**
 
-- **Scope:** every package in the module **except an explicit admin-only list**: `cmd/admin`, `internal/admin`, `internal/admindb`, `loadtest`.
-  - This gates `internal/expr` from day one, before `cmd/edge` exists.
+- **Scope:** every package in the module **except an explicit admin-only list**: `cmd/admin`, `internal/admin`, `internal/admindb`, `loadtest`, `web/admin`, plus the test tooling in `internal/testenv`.
   - New packages are gated by default.
   - **CI also fails if `cmd/edge` imports any admin-only package** (`go list -deps ./cmd/edge`). The edge/admin split is therefore enforced, not just documented.
-- **Shared packages** (`expr`, `snapshot`, `jwks`) are in scope because the edge runs them. Admin gets that coverage for free.
+- **Shared packages** (`expr`, `snapshot`, `ratelimit`, `jwks`, `envparse`) are in scope because the edge runs them. Admin gets that coverage for free.
 - **Measurement:** coverage is merged from:
   - unit and integration tests run with `-coverpkg=<edge-scope packages>` (`scripts/ci/test.sh`)
   - end-to-end runs of `cmd/edge` built with `go build -cover` (`GOCOVERDIR`, merged with `go tool covdata`)
@@ -1283,7 +1225,7 @@ The complete variable lists with defaults are in [Edge deployment](deploy/edge.m
 
 The admin UI is covered by a small set of end-to-end browser smoke tests for the rule builder, publish and revert. Its UI code has no coverage target.
 
-**Browser stream tests:** `TestBrowserStreams` (`internal/edge`, run with `BROWSER_SMOKE=1`) serves a small page (`internal/edge/testdata/browser`) through a real edge, and Playwright (`web/admin/browser`) runs it in Chromium, Firefox and WebKit:
+**Browser stream tests:** `TestBrowserStreams` (`internal/edge`, run with `BROWSER_SMOKE=1`) serves a small page (`internal/edge/testdata/browser`) through a real edge, and Playwright (`web/admin/edge-streams`) runs it in Chromium, Firefox and WebKit:
 - EventSource is counted as a stream and resumes with `Last-Event-ID` after the upstream ends it.
 - An edge rejection closes the EventSource instead of retrying.
 - A streamed fetch body arrives chunk by chunk.
@@ -1294,7 +1236,7 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 - **Scenario-based:** a real situation plus its observable outcome. Never write a test to reach a line.
 - **Valid inputs only:** a line reachable only by impossible input is dead code; delete it.
 - **Straightforward:** table-driven, behavior-named cases, one behavior per case.
-- **Real dependencies:** Valkey and Postgres in testcontainers. Mocks only for the CDN, IdP and upstream, shared with the load tests.
+- **Real dependencies:** Valkey and Postgres in testcontainers. Mocks only for the IdP, the upstream and the services behind it, shared with the load tests.
 - **Hard-to-trigger failures** are injected at a narrow boundary and tested as scenarios.
 - **No coverage exclusions** in edge scope.
 
@@ -1339,19 +1281,20 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 - Locale hit vs miss.
 - Each Lua script.
 
-### 18.3 Load (local only)
+### 18.3 Load
 
 **Tool:** k6 (Docker image `grafana/k6:2.3.0`) against `loadtest/compose.yaml`. Nothing goes through AWS, a WAF or Cloudflare.
 
 **The compose environment runs:**
 - 3 edges
-- 1–2 admins
+- 1 admin
 - Postgres
 - Valkey (standalone and 3-shard cluster)
-- **Mock CDN:** injects `CloudFront-Viewer-*` (bracketed and unbracketed IPv6) or `CF-*` from k6-supplied values, so one machine can simulate millions of client IPs through the real presets.
+- **No mock CDN:** k6 sends `CloudFront-Viewer-Address` itself from inside `TRUSTED_PROXIES`, so one machine can simulate millions of client IPs through the real `cloudfront` preset.
 - **Mock LB:** idle timeout and draining.
 - **Mock IdP.**
 - **Mock upstream:** latency, status, SSE and WebSocket echo.
+- **Vector log shipper** (`make demo` only): posts edge-1's access lines to admin's `POST /v1/logs/access`.
 
 **When:** a smoke profile on every merge; the full profile nightly and before release.
 
@@ -1371,16 +1314,16 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 | Rolling restart via mock LB | No 5xx |
 | Lose 1 of 3 edges | Target load held |
 
-**As built (M9):** `make load` runs the Tier 1 smoke: 3 edges, admin, Postgres, standalone Valkey, mock upstream and mock IdP (`loadtest/tools`). k6 sends the CloudFront viewer header itself from inside `TRUSTED_PROXIES`, standing in for the CDN without adding a hop to the latency it measures. It checks:
+**Smoke profile:** `make load` runs the Tier 1 smoke: 3 edges, admin, Postgres, standalone Valkey, mock upstream and mock IdP (`loadtest/tools`). k6 sends the CloudFront viewer header itself from inside `TRUSTED_PROXIES`, standing in for the CDN without adding a hop to the latency it measures. It checks:
 
 - edge overhead against the upstream directly, at 300 RPS
-- one login quota shared by three edges (100 per minute: 100 to 130 allowed per 40s run so far, as the sliding window spans two minutes; separate counters would allow 300)
+- one login quota shared by three edges (100 per minute: 100 to 130 allowed per 40s run, as the sliding window spans two minutes; separate counters would allow 300)
 - JWT auth end to end with the mock IdP's ES256 keys
 - a 20s Valkey outage under load: no failed requests, readiness steady, and limits enforced again once Valkey returns
 
 `make capacity` steps one edge through fixed rates with scenario-shaped traffic and reports per-unit costs (edge CPU, Valkey calls, bytes per key, CPU per call) for [§16](#16-capacity-inputs); a worked sizing is in the docs' Capacity planning page. `make container` checks that the edge image becomes ready from a bootstrap snapshot with no admin or Valkey.
 
-First measurements, on Docker Desktop with **2 vCPUs and 4 GB shared by every container including k6**, so they are a floor, not the edge's capacity:
+Measurements on Docker Desktop with **2 vCPUs and 4 GB shared by every container including k6**, so they are a floor, not the edge's capacity:
 
 | Measure | Result |
 |---|---|
@@ -1388,9 +1331,9 @@ First measurements, on Docker Desktop with **2 vCPUs and 4 GB shared by every co
 | One edge, no errors | Up to 9.3k RPS achieved; k6 dropped iterations from 4k RPS, where p99 was 11 ms |
 | Valkey down 20s | 0 failed requests, p99 5–36 ms, readiness 100% |
 
-**As built (full profile):** `make load-full` (`scripts/ci/load-full.sh`, nightly in GitHub Actions and on GitLab schedules) runs every row of the table above. It adds a mock LB (`loadtest/tools lb`: round robin over edges whose `/readyz` passes), a stream holder (`loadtest/tools streams`: SSE and RFC 6455 WebSocket), and a second compose project with a 3-shard Valkey cluster. `ONLY=<regex>` runs a subset. The default profile uses 20k IPs and a 5 minute stream hold; `PROFILE=release` uses 1M IPs and 1h. Load-test publishes carry a guard override with a reason, because they limit traffic on purpose.
+**Full profile:** `make load-full` (`scripts/ci/load-full.sh`, nightly in GitHub Actions and on GitLab schedules) runs every row of the table above. It adds a mock LB (`loadtest/tools lb`: round robin over edges whose `/readyz` passes), a stream holder (`loadtest/tools streams`: SSE and RFC 6455 WebSocket), and a second compose project with a 3-shard Valkey cluster. `ONLY=<regex>` runs a subset. The default profile uses 20k IPs and a 5 minute stream hold; `PROFILE=release` uses 1M IPs and 1h. Load-test publishes carry a guard override with a reason, because they limit traffic on purpose.
 
-Measured on the same 2 vCPU machine, per scenario across runs (the release profile has not run yet):
+Measured on the same 2 vCPU machine with the default profile, per scenario across runs:
 
 | Scenario | Result |
 |---|---|
@@ -1405,7 +1348,7 @@ Measured on the same 2 vCPU machine, per scenario across runs (the release profi
 | 10k SSE/WebSocket for 5 min | 0 failures; edge memory about 220 MB, flat; drain 36 s, exit 0 |
 | Rolling restart; losing 1 of 3 edges | 0 errors, 0 dropped |
 
-Findings fixed along the way: the guard subtracted every top-K key from the cohort counts, so a publish that blocked many keys a little was invisible to it; now only keys holding at least 5% of a rule's limited requests are excluded ([§12.6](#126-rollback-guard-every-signal-configurable)). An open stream holds a `MAX_UPSTREAM_INFLIGHT` slot ([§17](#17-deployment-contract)), so stream-heavy deployments must size that cap for their peak streams. Thresholds stay conservative (p99 under 50 ms) until the capacity inputs ([§16](#16-capacity-inputs)) are given.
+The guard excludes from the cohort counts only keys holding at least 5% of a rule's limited requests, so a publish that blocks many keys a little stays visible to it ([§12.6](#126-rollback-guard-every-signal-configurable)). An open stream holds a `MAX_STREAMS` slot, not a `MAX_INFLIGHT` one ([§17](#17-deployment-contract)), so stream-heavy deployments must size `MAX_STREAMS` for their peak streams. Thresholds stay conservative (p99 under 50 ms) until the capacity inputs ([§16](#16-capacity-inputs)) are given.
 
 **Local testing can't prove these, so they're handled differently:**
 
@@ -1415,34 +1358,18 @@ Findings fixed along the way: the guard subtracted every top-K key from the coho
 | Real cross-zone Valkey latency | `tc netem` injection; the deadline is tuned from production p99 |
 | Real WAF/CDN behavior | Owned by the WAF/CDN, out of scope |
 
-## 19. Delivery: one release, built in dependency order
-
-| Order | Build |
-|---|---|
-| 1 | `internal/expr`, `internal/snapshot` (validate, compile, test runner) |
-| 2 | Edge core: guards, client IP/viewer, phases, proxy, streaming, shutdown, logs, metrics, warm-up |
-| 3 | Rate limiting: algorithms, keys, penalty, shadow, backstop, fail modes |
-| 4 | CORS, header rules, locale, responses |
-| 5 | JWT/JWKS lifecycle, SSRF guard |
-| 6 | Admin: identity, RBAC, audit, rules API + expression helpers, publish/rollback, tests, simulate |
-| 7 | Stats push, fleet, canary, guard, admin UI |
-| 8 | Load tests and the coverage gate (go-live gate) |
-
-**Launch safely:** every rate-limit rule starts in `action: log`, and auth and locale are enabled on a few paths only. Rules are then promoted with the canary. The code ships at once; enforcement turns on gradually.
-
-## 20. Open decisions
+## 19. Open decisions
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Rule builder drag-and-drop across nested groups | Prototype react-querybuilder for a day before committing ([§13.6](#136-admin-ui-stack)) |
-| D2 | Canary promotion | Manual first, automatic later |
+| D2 | Canary promotion | Manual only today; automatic promotion is not built |
 | D3 | Close WebSockets at token `exp` | No; the upstream owns session lifetime |
 | D4 | `matches` regex operator | Off by default |
 | D5 | Capacity inputs | Latency budget and peak RPS ([§16](#16-capacity-inputs)) |
 | D6 | h2c with the LB | Only if the LB requires it |
 | D7 | Guard thresholds | Start conservative; tune from alerts |
 
-## 21. Deferred
+## 20. Deferred
 
 - Counting by response status (e.g. only failed logins).
 - Response header transform rules.
@@ -1452,116 +1379,6 @@ Findings fixed along the way: the guard subtracted every top-K key from the coho
 - Multi-region quotas.
 - OIDC: designed, built after local auth.
 
-## 22. Glossary
+## 21. Glossary
 
-| Term | Meaning |
-|---|---|
-| **Accept-Language** | Request header listing preferred languages with weights |
-| **Advisory lock** | Postgres lock on an application-chosen number; used for leader election and audit ordering |
-| **Algorithm confusion** | Attack where a token claims an unintended `alg` |
-| **Allowlist / denylist** | Only these permitted / these excluded |
-| **Append-only** | Rows can be added, never changed or removed |
-| **Argon2id** | Memory-hard password hash; OWASP's first choice |
-| **AST** | Abstract syntax tree; the structured form of an expression |
-| **Backstop** | Always-on local per-IP limiter in each replica |
-| **BCP 47** | Language tag standard, e.g. `en-AU`, `zh-Hant` |
-| **Break-glass account** | Emergency local login for when the IdP is down; MFA required |
-| **Breaker** | Stops calling a failing dependency for a cool-down, then probes |
-| **Burst** | Requests above the steady rate tolerated at once |
-| **Canary / cohort** | Applying new config to a sticky share of clients first / the requests served by one version |
-| **CDN** | Content Delivery Network |
-| **CEL** | Common Expression Language; considered and not used |
-| **CGNAT / NAT** | Address translation; many users share one IP |
-| **Characteristic** | Request attribute used to build a rate-limit key |
-| **CIDR** | IP range notation, e.g. `10.0.0.0/8` |
-| **Cold start** | A replica starting with nothing in memory |
-| **Compile** | Validate config and build ready-to-run structures off the request path |
-| **Config test** | Stored sample request + expected rules/settings/headers; failures block publish |
-| **Control plane / data plane** | Manages config (admin) / handles traffic (edge) |
-| **CORS / preflight** | Browser cross-origin rules / the `OPTIONS` check before a cross-origin request |
-| **Coverage (statement)** | Share of statements executed by tests |
-| **CSRF** | Cross-Site Request Forgery |
-| **ETag / If-None-Match / 304** | Version tag; server replies `304 Not Modified` if unchanged |
-| **Expression** | A rule's condition, built from fields, operators and values |
-| **External anchor** | Latest audit hash stored outside Postgres, to detect deleted newest rows |
-| **Fail-open / fail-closed** | On dependency failure: allow / reject |
-| **Fetch standard** | WHATWG spec defining CORS |
-| **Fixed / sliding window** | Count per fixed slot / blended estimate over the last period |
-| **GCRA / TAT** | Generic Cell Rate Algorithm / its state, Theoretical Arrival Time |
-| **go:embed** | Go directive that compiles files (here, the built UI) into the binary |
-| **GOMAXPROCS / GOMEMLIMIT** | Go's CPU parallelism setting / soft memory limit for the GC |
-| **Guard** | Admin process that watches a publish and rolls back on configured signals |
-| **h2c** | HTTP/2 without TLS |
-| **Hash chain / HMAC** | Each record hashes the previous one / keyed hash that can't be forged without the key |
-| **Hash slot / hash tag** | Valkey Cluster key placement; `{...}` decides the slot |
-| **Hijack** | Go taking over a raw connection (WebSocket) |
-| **Hop-by-hop headers** | Per-connection headers; not forwarded |
-| **Hot key** | A key with a disproportionate share of traffic |
-| **IdP** | Identity Provider |
-| **In-flight cap** | Max concurrent requests; excess rejected fast |
-| **JWKS / `kid`** | Issuer's public key set / key ID in a token |
-| **JWT; `sub` `iss` `aud` `exp` `nbf`** | JSON Web Token; subject, issuer, audience, expiry, not-before |
-| **k6** | Load-testing tool with scripted scenarios and thresholds |
-| **Kill switch** | Snapshot flag disabling enforcement globally |
-| **LB** | Load balancer |
-| **Leader election** | Choosing one replica to run once-only jobs |
-| **Leaky / token bucket** | Drains / refills at a steady rate; overflow / empty means limited |
-| **Little's law** | Concurrency = arrival rate × time in system |
-| **LKG** | Last-known-good config or keys |
-| **Locale** | User language preference, e.g. `ko`, `en-AU` |
-| **Lua script / EVALSHA** | Atomic server-side Valkey script / calling it by hash |
-| **MFA / TOTP / WebAuthn** | Multi-factor auth / one-time codes / passkeys |
-| **mTLS** | Both sides present certificates |
-| **OCI image** | Standard container image format |
-| **OIDC / PKCE** | OpenID Connect / protection for the authorization-code flow |
-| **Optimistic concurrency** | A write fails if someone saved since you loaded |
-| **OTel** | OpenTelemetry |
-| **p99** | 99th-percentile latency |
-| **Path normalization** | Decoding and resolving a path before matching, to prevent bypasses |
-| **Penalty** | Keep blocking a subject for a time after it exceeds |
-| **Permission / RBAC** | One allowed action / roles bundling permissions |
-| **Phase** | A point in the request path where one kind of rule runs |
-| **Pipelining** | Several commands in one network round trip |
-| **Playwright** | Browser automation tool used for UI end-to-end tests |
-| **Problem details** | RFC 9457 JSON error format |
-| **Pseudo IPv4** | Cloudflare feature mapping IPv6 clients to IPv4 |
-| **Push / pull (stats)** | Sources send / collector fetches |
-| **RE2** | Go's regex engine; guaranteed linear time |
-| **react-querybuilder** | React library for Field / Operator / Value query builders with nested groups |
-| **Readiness / liveness** | "Send me traffic" / "I am alive" |
-| **Replica** | One running instance |
-| **RPS** | Requests per second |
-| **SAML / LDAP** | Other enterprise login protocols |
-| **Sentinel / Cluster** | Valkey HA modes: managed failover / sharding |
-| **Shadow mode** | `action: log`; records, never blocks |
-| **Snapshot** | Immutable, versioned, complete compiled-ready config |
-| **SPA** | Single-page application; the UI runs in the browser and calls the API |
-| **Space-Saving (top-K)** | Fixed-memory tracking of the K most frequent items |
-| **SSE** | Server-Sent Events; a streaming HTTP response |
-| **SSRF** | Tricking a server into fetching an internal URL |
-| **Tamper-evident** | Changes are detectable even if not preventable |
-| **Testcontainers** | Starts real dependencies in containers for tests |
-| **Upstream** | Service the edge forwards to |
-| **Valkey** | Open-source Redis-compatible in-memory store |
-| **Viewer field** | Fact about the client's connection to the CDN, from a trusted header |
-| **WAF** | Web Application Firewall |
-| **WebSocket** | Upgraded HTTP connection with two-way messages |
-| **Wildcard / strict wildcard** | Whole-value `*` match, case-insensitive / case-sensitive |
-| **XFF** | `X-Forwarded-For` header |
-| **Zone** | Independent failure domain in a region |
-
-## Appendix A. Example deployment profiles
-
-**AWS:**
-- CloudFront → (VPC origin) internal ALB → edge.
-- `CLIENT_IP_SOURCE=cloudfront`, `TRUSTED_PROXIES=<ALB subnets>`. Add the viewer headers with an origin request policy.
-- ALB idle timeout defaults to 60s, so `IDLE_TIMEOUT` must be at least 75s.
-- Fargate `stopTimeout` defaults to 30s (max 120s); `DRAIN_DELAY + SHUTDOWN_TIMEOUT` must fit inside it.
-- ElastiCache for Valkey.
-- AWS WAF stays in front.
-
-**Cloudflare:**
-- Cloudflare → origin LB → edge.
-- `CLIENT_IP_SOURCE=cloudflare`.
-- The origin accepts only Cloudflare: IP ranges, Authenticated Origin Pulls or a tunnel.
-- `TRUSTED_PROXIES=<LB addresses>`.
+Terms are defined in the [Glossary](reference/glossary.md).

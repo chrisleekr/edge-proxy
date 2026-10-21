@@ -2,7 +2,7 @@
 # Static checks. golangci-lint runs from its pinned image so no local install is needed.
 set -euo pipefail
 
-golangci_image="golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f"
+golangci_image="golangci/golangci-lint:v2.15.0@sha256:fbfcfd12a6f8d7f1b97b3362ca80fc2a244d46863148c73cb88e7793af96c481"
 
 if [[ -z "$(go list ./... 2>/dev/null || true)" ]]; then
   echo "no Go packages yet; nothing to lint"

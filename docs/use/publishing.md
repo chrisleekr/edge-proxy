@@ -29,6 +29,7 @@ There is one shared draft. Saving it validates the whole config; an invalid draf
 - a canary is in progress (promote or abort it first);
 - the active version changed since the draft started (**Rebase** first);
 - a live edge can't read the config's schema version (upgrade edges first);
+- a live edge runs with different deployment settings than admin (`CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER` or `ALLOW_REGEX`), because that edge would reject the config and keep its old one. Admin answers 409 naming the edge; make the [settings](../deploy/admin.md#variables) match. Reverts and guard rollbacks skip this check;
 - a rule requires auth from an issuer whose keys (JWKS) admin has never fetched. A publisher can override this one with a reason, for example "IdP is down, publishing anyway".
 
 Edges poll admin every 5 seconds and switch to the new version atomically. **Fleet** shows which edges run which version.
@@ -43,7 +44,7 @@ Enter a **canary percent** when publishing to send only part of the traffic to t
 | **Promote to all traffic** | Send all traffic to the new version |
 | **Abort** | Send all traffic back, with a reason |
 
-If admin goes away during a canary, edges drop the canary on their own after 10 minutes.
+If admin goes away during a canary, edges drop the canary on their own within 10 minutes.
 
 ## Rollback guard
 

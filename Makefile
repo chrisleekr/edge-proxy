@@ -1,12 +1,17 @@
-.PHONY: test lint vuln fuzz bench ui docs docs-serve container load load-full capacity ci infra-up infra-down demo demo-down
+# Plain `make` lists the targets.
+.DEFAULT_GOAL := help
+
+.PHONY: help test lint vuln fuzz bench ui screenshots docs docs-serve container load load-full capacity capacity-max ci infra-up infra-down demo demo-down demo-traffic demo-outage
 
 # Unit + integration tests, then the 100% edge coverage gate.
 test:
 	./scripts/ci/test.sh
 
+# Go vet, golangci-lint, shellcheck and the citation check.
 lint:
 	./scripts/ci/lint.sh
 
+# Known vulnerabilities in dependencies (govulncheck).
 vuln:
 	./scripts/ci/vuln.sh
 
@@ -14,6 +19,7 @@ vuln:
 fuzz:
 	./scripts/ci/fuzz.sh
 
+# Every benchmark, briefly, so they keep compiling and passing.
 bench:
 	./scripts/ci/bench.sh
 
@@ -21,10 +27,16 @@ bench:
 ui:
 	./scripts/ci/ui.sh
 
+# Docs screenshots match the UI; `./scripts/ci/screenshots.sh update`
+# rewrites them after a deliberate UI change. Part of `make ui`.
+screenshots:
+	./scripts/ci/screenshots.sh
+
 # Strict docs build (broken links and orphan pages fail it).
 docs:
 	./scripts/ci/docs.sh
 
+# Docs site with live reload.
 docs-serve:
 	uv run --locked --group docs mkdocs serve
 
@@ -40,10 +52,15 @@ load:
 load-full:
 	./scripts/ci/load-full.sh
 
-# Capacity scenario against one edge: p99 against BUDGET_MS, edge CPU,
-# Valkey calls and bytes per key at each of STEPS (reported, not gated).
+# Capacity scenario against one edge, at each of STEPS (reported, not gated).
+# Reports p99 against BUDGET_MS, edge CPU, Valkey calls and bytes per key.
 capacity:
 	./scripts/capacity-scenario.sh
+
+# Maximum RPS of one 2 vCPU / 2 GiB edge in a cloud-shaped local environment
+# (loadtest/compose.capacity.yaml). Needs a Docker VM with at least 8 CPUs.
+capacity-max:
+	./scripts/capacity-max.sh
 
 # Same gates CI runs, in order.
 ci: lint test fuzz bench vuln ui docs container load
@@ -52,15 +69,39 @@ ci: lint test fuzz bench vuln ui docs container load
 infra-up:
 	docker compose up -d --wait
 
+# Stop the local Valkey and Postgres and delete their data.
 infra-down:
 	docker compose down -v
 
-# Local demo: admin UI on 127.0.0.1:8081, one edge on 127.0.0.1:8080, seeded
-# with a sample policy. Reuses the load-test environment. Docker's port
-# forward hides the peer address, so the demo trusts any peer; the port is
-# bound to 127.0.0.1. Never do this in a deployment.
+# Start the demo: admin UI on 127.0.0.1:8081, edge on 127.0.0.1:8080.
+# Sign in as admin / local-dev-login. Seeded with the demo policy
+# (loadtest/tools/demo-policy.json): an example of each rule type, template,
+# CORS policy, issuer and setting.
+# Reuses the load-test environment. Docker's port forward hides the peer
+# address, so the demo trusts any peer; the port is bound to 127.0.0.1.
+# Never do this in a deployment.
 demo:
-	cd loadtest && export TRUSTED_PROXIES=0.0.0.0/0,::/0 && docker compose -p edge-demo build && docker compose -p edge-demo up -d --wait edge-1 upstream
+	cd loadtest && export TRUSTED_PROXIES=0.0.0.0/0,::/0 SEED_POLICY=demo VALKEY_TIMEOUT=$${VALKEY_TIMEOUT:-150ms} && docker compose -p edge-demo build && docker compose -p edge-demo up -d --wait edge-1 upstream log-shipper
 
+# Send traffic to the running demo until Ctrl+C; watch it on the dashboard.
+# It exercises every rule, template, CORS policy and issuer in the demo
+# policy (loadtest/k6/demo.js). RATE per second (200), IPS client addresses (300), DURATION
+# cap (24h). Not a test: nothing is asserted. make load cannot run beside
+# the demo: both use the same fixed subnet.
+demo-traffic:
+	cd loadtest && export TRUSTED_PROXIES=0.0.0.0/0,::/0 && docker compose -p edge-demo --profile k6 build k6 && \
+		docker compose -p edge-demo run --rm --no-deps k6 run --quiet -e RATE=$${RATE:-200} -e IPS=$${IPS:-300} -e DURATION=$${DURATION:-24h} /scripts/demo.js
+
+# Pause the demo's Valkey for OUTAGE seconds (90) while demo-traffic runs,
+# so each fail mode shows on the dashboard. Over 60s, because login-per-ip
+# (fail_mode closed) answers from its 1m penalty cache until that expires.
+demo-outage:
+	cd loadtest && docker compose -p edge-demo pause valkey && trap 'docker compose -p edge-demo unpause valkey' EXIT && trap 'exit 130' INT TERM && sleep $${OUTAGE:-90}
+
+# Stop the demo and delete its data; make demo starts it fresh.
 demo-down:
-	cd loadtest && docker compose -p edge-demo down -v
+	cd loadtest && docker compose -p edge-demo --profile demo down -v
+
+# This list: each target with the first line of its comment.
+help:
+	@awk '/^# /{ if (!d) d = substr($$0, 3); next } /^[a-z][a-z-]*:/{ split($$0, t, ":"); printf "  %-14s %s\n", t[1], d } { d = "" }' $(MAKEFILE_LIST)

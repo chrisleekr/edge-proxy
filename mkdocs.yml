@@ -16,10 +16,6 @@ validation:
     not_found: warn
     anchors: warn
 
-# The milestone plan is a build record, not reader documentation.
-exclude_docs: |
-  implementation-plan.md
-
 theme:
   name: material
   features:
@@ -61,7 +57,9 @@ markdown_extensions:
       permalink: true
 
 nav:
-  - Home: index.md
+  - Home:
+      - index.md
+      - Compared with vendors: vendor-comparison.md
   - Get started: get-started.md
   - Use:
       - Policy: use/policy.md
@@ -72,6 +70,7 @@ nav:
       - deploy/index.md
       - Edge settings: deploy/edge.md
       - Admin settings: deploy/admin.md
+      - Kubernetes with Helm: deploy/kubernetes.md
       - Capacity planning: deploy/capacity.md
   - Operate:
       - Monitoring: operate/monitoring.md
@@ -79,7 +78,7 @@ nav:
   - Reference:
       - Expressions: reference/expressions.md
       - Admin API: reference/api.md
-      - Compared with vendors: vendor-comparison.md
+      - Glossary: reference/glossary.md
   - Build:
       - Development: build/development.md
       - Design: design.md
