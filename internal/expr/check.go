@@ -17,6 +17,9 @@ type Env struct {
 	ViewerAvailable func(field string) bool
 	// AllowRegex enables the "matches" operator (off by default).
 	AllowRegex bool
+	// RelativePaths accepts a path literal without its leading "/", as
+	// checks did before, so a version stored then still loads.
+	RelativePaths bool
 }
 
 // Issue is one validation problem, located by a path such as "rules[1].rules[0]".
@@ -135,6 +138,7 @@ func (c *checker) key(f FieldDef, key, path string) {
 }
 
 func (c *checker) value(f FieldDef, op OpDef, v Value, path string) {
+	f.Slash = f.Slash && !c.env.RelativePaths
 	switch {
 	case op.NoValue:
 		if !v.IsZero() {

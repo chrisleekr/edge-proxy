@@ -178,9 +178,10 @@ var clientControlled = map[string]bool{
 // edge before activation. It returns the compiled config, or nil and every
 // error found. Warnings are returned either way.
 func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
+	schema1 := c.Schema == 1
 	c = upgrade(c)
 	v := &validator{
-		d: d, c: c,
+		d: d, c: c, schema1: schema1,
 		out:     &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}},
 		viewer:  setOf(d.ViewerFields, caseSensitive),
 		sources: setOf(d.SourceHeaders, foldCase),
@@ -218,6 +219,8 @@ type validator struct {
 	viewer, sources           map[string]bool
 	issuers, locales, ruleIDs map[string]bool
 	siteWideIP                bool
+	// schema1 is set when the stored config predates schema 2.
+	schema1 bool
 }
 
 func (v *validator) err(path, format string, args ...any) {
@@ -894,9 +897,18 @@ func (v *validator) placeholderProblem(ph Placeholder) string {
 // locales the edge never produces, and warns on the raw URI fields, which
 // an encoded path slips past.
 func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Matcher {
-	m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(f string) bool { return v.viewer[f] }, AllowRegex: v.d.AllowRegex})
+	env := expr.Env{Phase: phase, ViewerAvailable: func(f string) bool { return v.viewer[f] }, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1}
+	m, issues := expr.Compile(n, env)
 	for _, is := range issues {
 		v.errs = append(v.errs, expr.Issue{Path: p + "." + is.Path, Msg: is.Msg})
+	}
+	// Schema 1 accepted a path without its leading "/"; refusing it now
+	// would stop an upgraded edge loading the version it serves.
+	if m != nil && v.schema1 {
+		env.RelativePaths = false
+		for _, is := range expr.Check(n, env) {
+			v.warn(p+"."+is.Path, "%s", is.Msg)
+		}
 	}
 	rawWarned := false
 	walk(n, false, func(r expr.Node, _ bool) {

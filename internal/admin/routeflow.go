@@ -127,7 +127,7 @@ func classify(n expr.Node, phase expr.Phase, k routeKey, deps map[string]bool) i
 			deps["Path value"] = true
 			return 0
 		}
-		m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(string) bool { return true }, AllowRegex: true})
+		m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(string) bool { return true }, AllowRegex: true, RelativePaths: true})
 		if issues != nil {
 			// Only a config that no longer compiles gets here, and that is
 			// refused before classify runs.

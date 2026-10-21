@@ -166,6 +166,25 @@ func TestSchema1MisdirectedResponseIsDropped(t *testing.T) {
 	}
 }
 
+// A path literal without its leading "/" was accepted before schema 2. A
+// stored schema 1 version with one still loads, with a warning, so an
+// upgraded edge doesn't refuse the version it is serving. Schema 2 refuses it.
+func TestPathWithoutLeadingSlashIsAWarningOnlyInSchema1(t *testing.T) {
+	for _, schema := range []int{1, 2} {
+		c := validConfig()
+		c.Schema = schema
+		c.ConfigRules[0].Expression = expr.Node{Combinator: "and", Rules: []expr.Node{{Field: "http.request.uri.path", Operator: "not_starts_with", Value: expr.Value{One: "api/"}}}}
+		out, warns, errs := Compile(c, testDeployment)
+		got := expr.Issues(append(errs, warns...)).Error()
+		if !strings.Contains(got, `paths start with "/"`) {
+			t.Fatalf("schema %d: issues = %s, want the leading-slash problem", schema, got)
+		}
+		if (out != nil) != (schema == 1) {
+			t.Fatalf("schema %d: compiled = %v, errors = %s", schema, out != nil, expr.Issues(errs))
+		}
+	}
+}
+
 // A schema 1 rule that sent requests to a named upstream can't be honored by
 // an edge with one upstream, so the version is refused rather than rerouted.
 func TestSchema1UpstreamRuleIsRefused(t *testing.T) {
