@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +50,41 @@ func TestHTTPSUpstreamIsNamedByTheRequestHost(t *testing.T) {
 		}
 	}
 	edgeError(t, h.do("GET", "/", nil, "Host", "other.example.com"), 502, "bad_gateway")
+}
+
+// A client can send any Host. One the load balancer has no certificate for
+// is a 502 counted as upstream_tls, with no warn line per request, whether
+// the load balancer refuses the name or presents a certificate without it.
+func TestHTTPSUpstreamWithoutACertificateForTheHostIsNotLogged(t *testing.T) {
+	cert, roots := selfSigned(t, "api.example.com")
+	old := upstreamRoots
+	upstreamRoots = roots
+	t.Cleanup(func() { upstreamRoots = old })
+	for name, getCert := range map[string]func(*tls.ClientHelloInfo) (*tls.Certificate, error){
+		"refuses the name": func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if hi.ServerName == "api.example.com" {
+				return &cert, nil
+			}
+			return nil, fmt.Errorf("no listener for %q", hi.ServerName)
+		},
+		"presents another name": func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			lb := httptest.NewUnstartedServer(http.NotFoundHandler())
+			lb.TLS = &tls.Config{GetCertificate: getCert}
+			lb.StartTLS()
+			t.Cleanup(lb.Close)
+			h := newHarness(t, map[string]string{"UPSTREAM_URL": lb.URL})
+			h.load(envelope(testConfig(1)))
+			edgeError(t, h.do("GET", "/", nil, "Host", "other.example.com"), 502, "bad_gateway")
+			if got := h.srv.m.rejected[reasonUpstreamTLS].Load(); got != 1 {
+				t.Errorf("upstream_tls counted %d times, want 1", got)
+			}
+			if strings.Contains(h.logs.String(), "upstream request failed") {
+				t.Error("a client-chosen Host produced a warn line")
+			}
+		})
+	}
 }
 
 // HTTP/1.0 allows a request with no Host. Over HTTPS the edge then names the

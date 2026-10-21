@@ -198,10 +198,23 @@ func (e *Edge) proxyError(st *reqState, r *http.Request, err error) {
 		e.m.rejected[reasonClientGone].Add(1)
 	case errors.As(err, &ne) && ne.Timeout():
 		e.reject(st, kGatewayTimeout, reasonUpstreamTimeout)
+	case isTLSRefusal(err):
+		// The LB has no certificate for this Host. Clients choose the Host,
+		// so this is counted, not logged per request.
+		e.reject(st, kBadGateway, reasonUpstreamTLS)
 	default:
 		e.log.Warn("upstream request failed", "error", err.Error(), "request_id", st.requestID)
 		e.reject(st, kBadGateway, reasonUpstreamError)
 	}
+}
+
+// isTLSRefusal reports a handshake the upstream refused, or whose certificate
+// doesn't name the request's host. crypto/tls returns a received alert as a
+// *net.OpError with Op "remote error".
+func isTLSRefusal(err error) bool {
+	var cve *tls.CertificateVerificationError
+	var oe *net.OpError
+	return errors.As(err, &cve) || errors.As(err, &oe) && oe.Op == "remote error"
 }
 
 // body enforces the limit and read deadline and records why reading failed,

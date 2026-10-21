@@ -26,6 +26,7 @@ const (
 	reasonPayloadTooLarge
 	reasonUpstreamTimeout
 	reasonUpstreamError
+	reasonUpstreamTLS
 	reasonBodyTimeout
 	reasonClientGone
 	reasonPanic
@@ -36,7 +37,7 @@ var reasonNames = [numReasons]string{
 	"overloaded", "streams_overloaded", "untrusted_peer", "ingress_secret",
 	"client_ip", "path", "method", "no_snapshot", "auth", "backstop", "rate_limited", "rate_limit_key",
 	"rate_limit_unavailable",
-	"payload_too_large", "upstream_timeout", "upstream_error", "body_timeout", "client_gone", "panic",
+	"payload_too_large", "upstream_timeout", "upstream_error", "upstream_tls", "body_timeout", "client_gone", "panic",
 }
 
 // metrics are process-wide counters, exposed on /metrics in Prometheus text

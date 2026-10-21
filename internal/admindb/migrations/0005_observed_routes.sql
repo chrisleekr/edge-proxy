@@ -57,13 +57,15 @@ CREATE FUNCTION add_counts(a jsonb, b jsonb, cap int) RETURNS jsonb LANGUAGE sql
         GROUP BY 1) capped
 $$;
 
-CREATE FUNCTION add_counts(a jsonb, b jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
-    SELECT add_counts(a, b, 2147483647)
-$$;
-
--- sum_counts sums rows of counts when reading a time range.
+-- sum_counts sums rows of counts when reading a time range. The jsonb form
+-- collects the rows and sums them once: merging each row into a running
+-- total rebuilds the total every time, quadratic in a long range's keys.
 CREATE AGGREGATE sum_counts(bigint[]) (SFUNC = add_counts, STYPE = bigint[], INITCOND = '{}');
-CREATE AGGREGATE sum_counts(jsonb) (SFUNC = add_counts, STYPE = jsonb, INITCOND = '{}');
+CREATE FUNCTION sum_counts_final(rows jsonb[]) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT coalesce(jsonb_object_agg(k, n), '{}') FROM (
+        SELECT k, sum(v::bigint) AS n FROM unnest(rows) r, jsonb_each_text(r) e(k, v) GROUP BY k) summed
+$$;
+CREATE AGGREGATE sum_counts(jsonb) (SFUNC = array_append, STYPE = jsonb[], FINALFUNC = sum_counts_final, INITCOND = '{}');
 
 INSERT INTO role_permissions (role, permission) VALUES
     ('publisher', 'routes.manage'),
