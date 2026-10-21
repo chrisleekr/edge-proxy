@@ -292,9 +292,15 @@ function SignOut() {
   const qc = useQueryClient();
   // Null for a role without config.read, which has no draft.
   const d = useOptionalDraft();
+  const [error, setError] = useState<unknown>();
   const logout = async () => {
     if (d?.dirty && !confirm('Sign out and lose your unsaved changes to the draft?')) return;
-    await api('POST', '/api/auth/logout');
+    // A failed sign out leaves the session open, so the user must see it.
+    try {
+      await api('POST', '/api/auth/logout');
+    } catch (e) {
+      return setError(e);
+    }
     navigate('/', { force: true });
     // Reset, not clear: App watches the me query, and a reset query loses
     // its data and refetches, so App sees the 401 and shows sign in.
@@ -302,9 +308,12 @@ function SignOut() {
     await qc.resetQueries({ queryKey: ['me'] });
   };
   return (
-    <button type="button" className="rounded-control px-3 py-1 font-medium whitespace-nowrap text-heading shadow-field hover:bg-soft" onClick={() => void logout()}>
-      Sign out
-    </button>
+    <>
+      <ErrorBox error={error} />
+      <button type="button" className="rounded-control px-3 py-1 font-medium whitespace-nowrap text-heading shadow-field hover:bg-soft" onClick={() => void logout()}>
+        Sign out
+      </button>
+    </>
   );
 }
 

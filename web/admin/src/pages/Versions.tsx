@@ -1,12 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api, type Diff, etag, type Json, Problem, type Version, type VersionDetail as Detail } from '../api';
+import { api, type Diff, etag, type Json, Problem, type GuardGate, type Version, type VersionDetail as Detail } from '../api';
 import { draftKey, useDraft } from '../draft';
 import { Link, navigate } from '../router';
 import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Notice, Input, NotFound, Page, Pending, Table, download, statusName, when, who } from '../ui';
 import { describe, DiffView, isEmpty } from './DiffView';
 import { outcomeSays, whyKept } from '../guard';
-import { canaryPercent, OverrideReason, useVersions } from './Publish';
+import { canaryPercent, guardAfter, OverrideReason, useVersions } from './Publish';
 
 const statusTone = (s: string) => (s === 'active' ? 'green' : s === 'canary' ? 'amber' : s === 'rolled_back' ? 'red' : 'slate');
 
@@ -96,6 +96,7 @@ function Import() {
   const [file, setFile] = useState<{ name: string; config: Json; tests: Json } | { name: string; problem: string }>();
   const [message, setMessage] = useState('');
   const [override, setOverride] = useState('');
+  const guard = useQuery({ queryKey: ['guard'], queryFn: () => api<GuardGate>('GET', '/api/settings/guard') });
   const run = useMutation({
     mutationFn: () =>
       api<{ version: number }>('POST', '/api/import', { ...(file && 'config' in file ? { config: file.config, tests: file.tests } : {}), message, override_reason: override }),
@@ -130,7 +131,7 @@ function Import() {
           <ConfirmButton
             title="Publish the imported config?"
             action="Publish import"
-            confirm={`Every edge starts serving the config from ${ready ? file.name : 'the file'} to every request. The guard watches it and rolls back if a signal trips.`}
+            confirm={`Every edge starts serving the config from ${ready ? file.name : 'the file'} to every request.${guardAfter(guard.data)}`}
             disabled={!ready || !message || run.isPending}
             onConfirm={() => run.mutate()}
           >

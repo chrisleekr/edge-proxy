@@ -261,6 +261,9 @@ export function Bars({ r }: { r: Range }) {
           if (drag) setDrag([drag[0], i]);
         }}
         onPointerUp={zoomIn}
+        // A vertical swipe hands the pointer to page scrolling with no pointerup.
+        onPointerCancel={() => setDrag(null)}
+        onLostPointerCapture={() => setDrag(null)}
         onPointerLeave={() => !byKey && setHover(null)}
         onFocus={() => {
           setByKey(true);

@@ -18,6 +18,16 @@ export function canaryPercent(text: string) {
 // The server decides rollback only when a tripped signal is in rollback mode.
 const canRollBack = (g: GuardGate) => g.enabled && g.max_auto_rollbacks_per_publish > 0 && Object.values(g.signals).some((x) => x.mode === 'rollback');
 
+// guardAfter says what the guard does once a publish serves all traffic.
+export const guardAfter = (g: GuardGate | undefined) =>
+  !g
+    ? ''
+    : canRollBack(g)
+      ? ' The guard watches it and rolls back if a rollback check trips.'
+      : g.enabled
+        ? ' The guard watches it but only alerts and never rolls back, so roll back yourself if needed.'
+        : ' The guard is off, so nothing rolls it back automatically.';
+
 // useVersions lists published versions for roles that can read config;
 // for others it stays empty instead of asking and being refused.
 export function useVersions() {
@@ -186,7 +196,7 @@ export function Publish({ can }: { can: (p: string) => boolean }) {
                       : 'The guard compares the two but only alerts and never aborts the canary, so watch it and step up, promote or abort it yourself on this page.'
                     : 'Step up, promote or abort it on this page.'
                 }`
-              : 'Every edge starts serving the saved draft to every request. The guard watches it and rolls back if a signal trips.'}
+              : `Every edge starts serving the saved draft to every request.${guardAfter((guardOverride ?? guard.data) as GuardGate | undefined)}`}
           </Confirm>
         )}
       </Card>

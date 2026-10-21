@@ -200,7 +200,8 @@ function Tokens() {
   // A token can hold only permissions its creator has.
   const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me') });
   const create = useMutation({
-    mutationFn: () => api<{ token: string }>('POST', '/api/tokens', form),
+    // Scopes stay in the form when the kind changes, and edge tokens refuse them.
+    mutationFn: () => api<{ token: string }>('POST', '/api/tokens', form.kind === 'user' ? form : { ...form, scopes: [] }),
     // Cleared so a second Enter cannot make a duplicate token.
     onSuccess: () => (setForm({ ...form, name: '', scopes: [], expires_in: '' }), qc.invalidateQueries({ queryKey: ['tokens'] })),
   });

@@ -191,6 +191,8 @@ export function Tests({ canTest, canWrite }: { canTest: boolean; canWrite: boole
   const run = useMutation({ mutationFn: () => api<TestResult[]>('POST', '/api/tests/run') });
   const [request, setRequest] = useState<JsonObject>({ method: 'GET', host: 'api.example.com', path: '/' });
   const [requestOK, setRequestOK] = useState(true);
+  // JSON such as null parses but is no request, and the form cannot show it.
+  const isRequest = typeof request === 'object' && request !== null && !Array.isArray(request);
   const [asJSON, setAsJSON] = useState(false);
   // Remounts the form when JSON replaced the request, so its rows reload.
   const [formKey, setFormKey] = useState(0);
@@ -279,13 +281,13 @@ export function Tests({ canTest, canWrite }: { canTest: boolean; canWrite: boole
           )}
           <div className="mt-3">
             {/* The form cannot show text that does not parse, so JSON must be valid to leave it. */}
-            <Button disabled={!requestOK} onClick={() => (setAsJSON(!asJSON), setFormKey((k) => k + 1))}>
+            <Button disabled={!requestOK || !isRequest} onClick={() => (setAsJSON(!asJSON), setFormKey((k) => k + 1))}>
               {asJSON ? 'Use the form' : 'Edit the request as JSON'}
             </Button>
           </div>
         </div>
         <div className="mt-3 flex flex-col items-start gap-2">
-          <Button variant="primary" disabled={!canTest || !requestOK || sim.isPending} onClick={() => (setAdded(''), sim.mutate({ version, request }))}>
+          <Button variant="primary" disabled={!canTest || !requestOK || !isRequest || sim.isPending} onClick={() => (setAdded(''), sim.mutate({ version, request }))}>
             {sim.isPending ? 'Simulating…' : 'Simulate'}
           </Button>
           <Hint>
@@ -293,9 +295,11 @@ export function Tests({ canTest, canWrite }: { canTest: boolean; canWrite: boole
               ? 'Your role cannot simulate requests.'
               : !requestOK
                 ? 'Fix the JSON in Request first.'
-                : version === '' && unsavedConfig
-                  ? 'Runs the saved draft: your unsaved rule and setting changes are not included. Save the draft to simulate them.'
-                  : undefined}
+                : !isRequest
+                  ? 'Request must be a JSON object.'
+                  : version === '' && unsavedConfig
+                    ? 'Runs the saved draft: your unsaved rule and setting changes are not included. Save the draft to simulate them.'
+                    : undefined}
           </Hint>
         </div>
         <ErrorBox error={sim.error} />

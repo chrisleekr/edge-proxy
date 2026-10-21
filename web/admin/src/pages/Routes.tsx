@@ -885,7 +885,9 @@ function TrafficFlow({ id, r }: { id: number; r: RouteDetailData }) {
   const v = flow.data?.version;
   const config = useQuery({
     queryKey: shown === 'draft' ? ['route-flow-draft'] : ['version', v],
-    queryFn: () => (shown === 'draft' ? api<Draft>('GET', '/api/draft').then((d) => d.config) : api<VersionDetail>('GET', `/api/versions/${v}`).then((d) => d.config)),
+    // The whole response is cached: other pages read ['version', v] as a VersionDetail.
+    queryFn: () => (shown === 'draft' ? api<Draft>('GET', '/api/draft') : api<VersionDetail>('GET', `/api/versions/${v}`)),
+    select: (d: Draft | VersionDetail) => d.config,
     enabled: !!flow.data && (shown === 'draft' || v != null),
   });
   return (
