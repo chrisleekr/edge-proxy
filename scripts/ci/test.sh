@@ -50,9 +50,13 @@ if [[ -d cmd/edge ]]; then
 fi
 
 total="$(go tool cover -func=cover.out | awk '/^total:/ {print $3}')"
-if [[ "${total}" != "100.0%" ]]; then
-  echo "edge coverage is ${total}; 100.0% required. Uncovered functions:" >&2
-  go tool cover -func=cover.out | grep -v '100.0%' >&2
+# The total is rounded, so one uncovered statement in thousands still prints
+# 100.0%. Each package's run lists every block, so a block is uncovered only
+# when its counts sum to zero.
+uncovered="$(awk 'NR > 1 { c[$1] += $3; n[$1] = $2 } END { for (k in c) if (c[k] == 0 && n[k] > 0) print k }' cover.out | sort)"
+if [[ -n "${uncovered}" ]]; then
+  echo "edge coverage is ${total}; every statement must be covered. Uncovered blocks:" >&2
+  echo "${uncovered}" >&2
   exit 1
 fi
 echo "edge coverage ${total}"

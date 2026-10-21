@@ -225,4 +225,9 @@ func TestLoadDeployment(t *testing.T) {
 	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudfront"})); err != nil {
 		t.Fatalf("without TRUSTED_PROXIES and UPSTREAM_URL: %v", err)
 	}
+	// A deployment the edges would refuse is refused here too, so admin never
+	// validates config against a client-IP source no edge runs with.
+	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "x-real-ip"})); err == nil || !strings.Contains(err.Error(), "CLIENT_IP_SOURCE") {
+		t.Fatalf("unknown CLIENT_IP_SOURCE: %v", err)
+	}
 }
