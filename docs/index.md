@@ -24,7 +24,7 @@ A CDN or WAF could be that layer, but for application policy it hits the same li
 
 Edge Proxy fixes these behind whatever CDN you already run, with a stateless Go proxy and a separate admin service: exact limits from one shared Valkey counter, verified identity as a rate-limit key, edge headers clients can't forge, one policy model on any cloud, tested and canaried changes, and a defined degraded mode for every dependency.
 
-If approximate per-IP limits and static headers are all you need, a vendor alone is simpler. See [Compared with vendors](vendor-comparison.md).
+If approximate per-IP limits and static headers are all you need, a vendor alone is simpler. See [Compared with vendors](vendor-comparison.md). For why Edge Proxy doesn't build on Envoy, APISIX, Kong or another gateway, see [Why a custom proxy](why-custom-proxy.md).
 
 ```mermaid
 flowchart LR
@@ -57,4 +57,5 @@ Solid lines are on the request path. Dotted lines are background work: if admin 
 | Find your way around the admin UI | [Dashboard](use/dashboard.md) |
 | Run it in production | [Deploy](deploy/index.md), then [Operate](operate/monitoring.md) |
 | Change the code | [Development](build/development.md) and the full [Design](design.md) |
+| Know why it isn't built on Envoy or another gateway | [Why a custom proxy](why-custom-proxy.md) |
 | Look up a term | [Glossary](reference/glossary.md) |

@@ -42,6 +42,7 @@ An admin service with an admin UI manages that policy. The edge does not replace
 | Delivery | One release |
 | Tests | 100% statement coverage for the edge and every package it imports, from scenario tests. Admin: scenario tests on critical paths, no coverage gate. Load tests run in Docker Compose: a smoke profile in CI, the full profile nightly in GitHub Actions and on GitLab schedules |
 | Logs | JSON, raw client IPs |
+| Build vs buy | A Go proxy on `httputil.ReverseProxy`, not plugins for an existing gateway. Each gateway decides part of the request path this edge needs to control: the rate-limit algorithm, one Valkey round trip for all limits, the behavior per rule when Valkey is down, and limits on verified JWT claims ([Why a custom proxy](why-custom-proxy.md)) |
 
 ## 1. Architecture
 
