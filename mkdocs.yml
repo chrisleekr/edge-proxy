@@ -59,6 +59,7 @@ markdown_extensions:
 nav:
   - Home:
       - index.md
+      - Why a custom proxy: why-custom-proxy.md
       - Compared with vendors: vendor-comparison.md
   - Get started: get-started.md
   - Use:

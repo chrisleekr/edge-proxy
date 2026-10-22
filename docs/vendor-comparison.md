@@ -1,5 +1,7 @@
 # Compared with vendors
 
+For Envoy, APISIX, Kong and other gateways you run yourself, see [Why a custom proxy](why-custom-proxy.md).
+
 **Why run this proxy if you already have Cloudflare, AWS WAF + CloudFront, Azure Front Door, Google Cloud Armor, Fastly or Akamai?**
 
 Don't run it *instead of* a vendor. Run it *behind* one when you need application policy the vendors offer only through custom edge code or Enterprise add-ons:
