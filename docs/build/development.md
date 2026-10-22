@@ -85,10 +85,11 @@ Releases are cut by [release-please](https://github.com/googleapis/release-pleas
 1. Merging to `main` updates a Release PR with the next version and its changelog. `feat` bumps the minor version, `fix` the patch, and `!` or `BREAKING CHANGE` the major.
 2. Merging the Release PR tags `v<x.y.z>`, updates `CHANGELOG.md` and creates the GitHub release.
 3. The release workflow then runs `scripts/ci/publish.sh`, which pushes `chrisleekr/edge-proxy` and `chrisleekr/edge-proxy-admin` for amd64 and arm64, tagged with the version and `latest`.
+4. Once both images are pushed, it sends an `edge-proxy-released` dispatch to [chrisleekr/helm-charts](https://github.com/chrisleekr/helm-charts), which opens a PR that bumps the chart's `appVersion` to the new version.
 
 CI rejects a PR whose title or commits aren't Conventional Commits (`scripts/ci/commits.sh`), since release-please skips subjects it can't parse.
 
-GitHub needs the secrets `RELEASE_TOKEN` (a token that can open PRs, so CI runs on the Release PR), `DOCKER_USERNAME` and `DOCKER_PASSWORD`.
+GitHub needs the secrets `RELEASE_TOKEN`, `DOCKER_USERNAME` and `DOCKER_PASSWORD`. `RELEASE_TOKEN` opens the Release PR, so CI runs on it, and sends the chart dispatch, so it also needs Contents write on `chrisleekr/helm-charts` (or the classic `repo` scope). Without it the dispatch fails after the images are pushed, and no chart PR opens.
 
 Run `make load-full PROFILE=release` before merging a Release PR.
 
