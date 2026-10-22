@@ -67,7 +67,7 @@ Replacing a gateway's limiter and failure handling is most of what this project 
 ### Who the client is
 
 - JWTs are checked per route against your identity providers' keys, and a route can accept several issuers.
-- The client IP address is read only from proxies listed in `TRUSTED_PROXIES` ([edge settings](deploy/edge.md)).
+- Edge Proxy reads the client IP address from a header only when the request comes from a proxy listed in `TRUSTED_PROXIES`, and never falls back to the connecting address. That check covers only the hop in front of Edge Proxy, so the value it reads must be set by your CDN or load balancer, never passed through from the client ([client IP sources](deploy/edge.md#client-ip-presets)).
 - Edge Proxy sends your services the client IP address, the country and the verified user's issuer and subject in `X-Edge-*` headers. It removes any copies a client sent first, so services can trust them as long as they can only be reached through Edge Proxy ([headers your upstream can trust](use/policy.md#headers-your-upstream-can-trust), [bypass the edge](operate/runbooks.md#bypass-the-edge)).
 
 ### Headers, CORS, locale and responses
