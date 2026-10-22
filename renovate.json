@@ -28,6 +28,18 @@
     },
     {
       "customType": "regex",
+      "description": "The Playwright browser server in internal/testenv must be the same release as @playwright/test.",
+      "managerFilePatterns": [
+        "/^internal/testenv/playwright\\.go$/"
+      ],
+      "matchStrings": [
+        "PlaywrightVersion = \"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "@playwright/test",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
       "description": "scripts/ci/lint.sh pins the golangci-lint image in a shell variable.",
       "managerFilePatterns": [
         "/^scripts/ci/lint\\.sh$/"

@@ -7,7 +7,7 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | Metric | Meaning |
 |---|---|
 | `edge_requests_total{class}` | Responses by class (`2xx` … `5xx`; `none` when the client left first) |
-| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path` and others |
+| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path` and others. `upstream_tls` is an https upstream that has no certificate for the request's Host; clients choose the Host, so it is counted without a log line |
 | `edge_inflight`, `edge_streams` | Concurrent requests and open WebSocket/SSE streams |
 | `edge_ready` | 1 when a policy is loaded and the edge isn't draining |
 | `edge_snapshot_version` | Policy version this replica runs |
@@ -20,7 +20,7 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | `edge_log_dropped_total`, `edge_stats_dropped_total` | Log lines dropped because the buffer was full; stats reports admin did not accept |
 | `edge_background_panics_total` | Recovered panics in background loops |
 
-The edge exports no latency histogram. Measure latency at your load balancer, from the access log's `duration_ms`, or on **Stats** in the admin UI. For SSE and WebSocket, **Stats** counts the time to response headers, while `duration_ms` is the stream's whole lifetime.
+`/metrics` has no latency metric. Each edge reports a latency histogram to admin with its stats, which the rollback guard's p99 latency check reads; for SSE and WebSocket it counts the time to response headers. In the admin UI, latency is on **Routes**: p95 and p50 per route, from the access log's `duration_ms`, which for SSE and WebSocket is the stream's whole lifetime. **Stats** shows no latency. You can also measure it at your load balancer.
 
 ## Alerts worth having
 
@@ -33,14 +33,14 @@ The edge exports no latency histogram. Measure latency at your load balancer, fr
 | `rate(edge_valkey_errors_total[5m]) > 0` | Rate limits are on their `fail_mode` | [Valkey down](runbooks.md#valkey-down) |
 | `increase(edge_auth_total{result="pass_no_keys"}[10m]) > 0` | Tokens pass unchecked: keys were never fetched | [IdP down](runbooks.md#identity-provider-down) |
 | `edge_bootstrap_age_seconds > 0` | Running from a bootstrap file | Restore admin; the edge switches over on its next successful poll |
-| `rate(edge_rejected_total{reason=~"overloaded\|streams_overloaded\|upstream_overloaded"}[5m]) > 0` | Capacity limits hit | Scale edges or raise `MAX_*` |
+| `rate(edge_rejected_total{reason=~"overloaded\|streams_overloaded"}[5m]) > 0` | Capacity limits hit | Scale edges or raise `MAX_*` |
 | `increase(edge_background_panics_total[10m]) > 0` or `edge_rejected_total{reason="panic"}` rising | A bug | Collect logs and report it |
 
 ## Logs
 
 Both binaries write JSON lines to stdout.
 
-**Edge access log** (`msg: access`): method, normalized path, status, `request_id`, `edge.decision` (`allow` or the rejection reason), `duration_ms`, client IP, config version and cohort. Query strings, `Authorization` and `Cookie` are never logged. Rejections and 5xx are always logged; other requests follow `LOG_SAMPLE_RATE`.
+**Edge access log** (`msg: access`): method, host (`server.address`), normalized path, query key names (`edge.query_keys`, and `edge.query_keys_dropped` counting keys not logged because they looked like secrets or were past the first 32), status, `request_id`, `edge.decision` (`allow` or the rejection reason), `duration_ms`, client IP, config version and cohort (`edge.cohort`: `candidate` when the request's client is in the [canary](../use/publishing.md#canary), otherwise `active`), the config rules that matched (`edge.config_rules`), the rate-limit rule that answered 429 (`edge.rate_limit_rule`) and the JWT result (`edge.auth`: `verified`, `cached`, `missing`, `invalid` or `pass_no_keys`). Query values, `Authorization` and `Cookie` are never logged. Rejections and 5xx are always logged; other requests follow `LOG_SAMPLE_RATE`, and when it is below 1 their lines carry it as `edge.sample_rate`.
 
 **Admin messages to alert on:**
 
@@ -53,4 +53,4 @@ Both binaries write JSON lines to stdout.
 
 ## Admin health
 
-Admin has no health endpoint. Probe `GET /` (the UI, always 200) for liveness. Admin being down never affects traffic.
+Admin has no health endpoint. Probe `GET /` for liveness: it serves the UI with 200 when the UI is embedded, as in the admin image; a build without the UI answers 404 there. Admin being down never affects traffic.

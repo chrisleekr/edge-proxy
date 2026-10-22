@@ -17,7 +17,40 @@ It runs one edge with traffic shaped like a public API: 50% `/api/`, 45% pages a
 | Valkey calls/req | Valkey operations per request |
 | bytes per key, µs per call | Valkey memory per key and Valkey CPU per call |
 
-Run it on hardware like your production edges, with k6 on a separate machine if you can. On a shared machine the load generator competes with the edge: dropped iterations and p99 spikes at low edge CPU are the load generator, not the edge.
+Run it on hardware like your production edges, with k6 on a separate machine if you can. On a shared machine the load generator competes with the edge: dropped iterations and p99 spikes at low edge CPU are the load generator, not the edge. k6's own garbage collector adds 10–40 ms to the p99 of even a direct request at its default; `make capacity-max` runs it with `GOGC=800` and `GOMEMLIMIT=8GiB`.
+
+## Find one edge's maximum
+
+```bash
+BUDGET_MS=10 DURATION=60s START=1000 make capacity-max
+```
+
+It runs one edge as a small cloud task (2 vCPU pinned, 2 GiB) in front of four mock microservices, with k6 on its own cores and the mocks sharing one core, 0.25 CPU each (`loadtest/compose.capacity.yaml`, needs a Docker VM with at least 8 CPUs and 16 GiB of memory):
+
+| Service | Routes |
+|---|---|
+| `catalog` | `/api/items` (2–8 KB, median 15 ms, p99 120 ms), `/api/fast`, `/api/slow` (0.3–2 s) |
+| `orders` | `POST /api/orders` (1–64 KB body), `/api/flaky` (2% 503), `/api/timeout` (past a 1 s upstream timeout) |
+| `account` | `POST /login` (per-IP limit with a 5 minute penalty), `/private/*` (JWT required) |
+| `content` | `/pages/*` (30 KB, localized), `/static/*` (100 KB or 1 MB) |
+
+Each service reports its own time in `Server-Timing`, so the run measures what the edge adds to each request: k6's time minus the service's. Traffic includes CORS preflight, missing and fresh tokens, and 20 abusive IPs. Valkey gets 0.5 ms more round trip and each service 0.25 ms, as between hosts in one region.
+
+The rate doubles until a step fails, or halves down to 100 RPS when the first step fails, then narrows to within 5%. The highest passing rate is then repeated for the spread and reported as the maximum. A run that stops early reports the range it found instead. A step passes when the added p99 is within `BUDGET_MS`, at most 0.1% of answers are unexpected, and k6 sent at least 99% of the target. It is **invalid**, and the run stops, when k6 or the mocks ran out of CPU, k6 printed no result, or the step was noisy three times. It is **noisy**, and runs again, when a direct call to a service, without the edge, took over `FLOOR_MS` (2.5 ms) at p99, or had no samples: the host stalled.
+
+Run it on a quiet, dedicated Linux host or in one cloud region. On a laptop the host's own load sets the tail, as below.
+
+**Measured** on Docker Desktop (10-vCPU VM) on a 10-core laptop also running desktop apps. The table is a one-off manual comparison, not script output: nginx 1.29 in the edge's slot with upstream keepalive, the same policy with no rate-limit rules, and all three called in the same k6 iteration:
+
+| 125 RPS, no rate-limit rules (no Valkey calls) | p50 | p99 | p99.9 |
+|---|---|---|---|
+| Direct to the service | 0.54 ms | 2.07 ms | 7.11 ms |
+| nginx | 0.68 ms | 2.73 ms | 7.92 ms |
+| Edge | 0.77 ms | 2.96 ms | 7.91 ms |
+
+With the full policy (1.85 Valkey calls per request), the edge added **1.4 ms at p50** at every rate from 125 to 2,000 RPS. The difference from nginx is the one Valkey round trip. Every answer was the expected one, and the edge used 36–71 MiB.
+
+The laptop found no maximum. The direct call's own p99 ranged from 1 ms to 980 ms across runs as the host's load average went from 6 to 53. On quiet steps the edge's added p99 was already 6.9 ms at 125 RPS, over 5 ms, while the edge used 10% CPU, and the 10 ms search stopped at rates where the edge used under half a core.
 
 ## Worked example
 
@@ -53,12 +86,11 @@ Valkey used **124 bytes per key** and **21 µs of CPU per call**. With `STREAMS=
 | Valkey memory | The site-wide sliding-window key lives up to 2 minutes: 1M IPs/min × 2 min, plus 5% for login ≈ 2.1M keys × 124 B ≈ 260 MB, × 1.5 for overhead | **≈ 400 MB in total**, 512 MB per shard leaves room |
 | `VALKEY_TIMEOUT` | Well inside the 10 ms budget, above in-region Valkey p99 (1–2 ms) | **5ms** |
 | `MAX_STREAMS` | 10k streams ÷ 8 pods left after losing a zone = 1,250 per pod; default is 1,000. At the cap, 2,500 × 72 KiB ≈ 180 MiB of the 1 GiB pod | **2500** |
-| `MAX_UPSTREAM_INFLIGHT` | Little's law after a zone loss: 5k RPS × 0.2 s = 1,000 concurrent, × 2 for bursts, plus 1,250 streams; default is 2,000 | **4000** |
-| `MAX_INFLIGHT` | 2,000 ordinary concurrent requests at worst | **10000** (default) |
+| `MAX_INFLIGHT` | Little's law after a zone loss: 5k RPS × 0.2 s = 1,000 concurrent, × 2 for bursts | **10000** (default) |
 | Backstop (**Settings → Backstop**) | Per pod. Connections pin a client to a pod, so the NAT's 300 RPS can land on one. Default is 100/s, burst 200, which would block it | **limit 1000/s, burst 2000** |
 | `LOG_SAMPLE_RATE` | 40k RPS × ~400 B ≈ 16 MB/s of access logs unsampled | **0.05** (rejections and 5xx are always logged) |
 
-Three of the defaults (`MAX_STREAMS`, `MAX_UPSTREAM_INFLIGHT`, backstop) are too low for this scenario. That is why sizing from your own numbers matters.
+Two of the defaults (`MAX_STREAMS`, backstop) are too low for this scenario. That is why sizing from your own numbers matters.
 
 ## Then prove it
 

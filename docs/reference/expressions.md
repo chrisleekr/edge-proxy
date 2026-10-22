@@ -28,8 +28,9 @@ true
 
 | Field | Type | Notes |
 |---|---|---|
-| `http.request.full_uri`, `http.request.uri`, `http.request.uri.path`, `http.request.uri.query` | string | The path is normalized; ambiguous encodings such as `%2F`, and `..` segments, are rejected with 400 before any rule runs |
-| `http.request.uri.args["name"]` | list | Query arguments |
+| `http.request.uri.path`, `http.request.uri.query` | string | The path is normalized; ambiguous encodings such as `%5C`, and `..` segments, are rejected with 400 before any rule runs. `%2F` stays encoded inside its segment, so match `group%2Fproject`; `%2F` hiding a `.` or `..` part (`..%2Fadmin`) is rejected. A path always starts with `/`, so `eq "search"` is rejected: use `eq "/search"`. The query is not decoded: match query values on `http.request.uri.args` |
+| `http.request.full_uri`, `http.request.uri` | string | Not normalized: the path usually keeps the client's percent-encoding, so `/%61dmin` does not match `"/admin"`. `full_uri` is `https://` when `ssl` is true, otherwise `http://`, then `http.host` (an IPv6 address in square brackets), then `http.request.uri`. A rule using them gets a warning; match on `http.request.uri.path` or `http.request.uri.args` |
+| `http.request.uri.args["name"]` | list | Query arguments. Names and values are percent-decoded once, and `+` is a space. The name matches exactly, case included: `args["debug"]` does not match `?DEBUG=1`, which an upstream that ignores name case still reads. Pairs containing `;` or a malformed `%` escape are skipped, and are also dropped from the forwarded query |
 | `http.host` | string | Lowercase |
 | `http.request.method` | string | Uppercase |
 | `http.request.headers["name"]` | list | Header name lowercase |
@@ -61,7 +62,7 @@ A field marked "needs a trusted viewer header" is refused by validation unless t
 
 On a list field (headers, cookies, query args, claims), a condition matches if **any** value matches. A negated condition means **no** value matches.
 
-In wildcards, `*` matches any characters; `\*` and `\\` are the only escapes.
+In wildcards, `*` matches any characters and the pattern must match the whole value. `\*` and `\\` are the only escapes, and `**` is rejected as a likely typo. `wildcard` folds case for ASCII letters only; other letters must match exactly.
 
 ## Limits
 

@@ -14,7 +14,7 @@ Traffic keeps flowing through every failure below. What changes is how policy is
 `/readyz` returns 503 only while no policy is loaded or while draining.
 
 1. Check the edge log for `no snapshot source succeeded; staying not ready`.
-2. Make sure admin is reachable from the edge, the edge token is valid (**Users → tokens**) and something has been published.
+2. Make sure admin is reachable from the edge, the edge token is valid (created on **Users**, or the same `EDGE_SERVICE_TOKEN_FILE` on admin and the edge) and something has been published (or admin has `BOOTSTRAP_PUBLISH_DEFAULT=true`).
 3. If admin is down, give the edge a cache file or a fresh bootstrap file ([Deploy](../deploy/index.md#where-an-edge-gets-its-policy)).
 
 ## Valkey down
@@ -46,6 +46,24 @@ Traffic keeps flowing through every failure below. What changes is how policy is
 
 **Settings → Kill switch**, then save and publish. **Disable rate limiting** makes every rate-limit rule log-only; **Disable JWT checks** stops requiring tokens. The per-IP backstop still applies. Both are audited. Turn them off the same way.
 
+## Bypass the edge
+
+Use this only when the edges themselves can't serve, for example a bad image on every replica. If the edges are up and a policy is wrong, [revert it](#a-bad-publish) or use the [kill switch](#stop-rate-limiting-or-jwt-checks-now) instead.
+
+1. Point the CDN origin, or the load balancer target, at the load balancer or gateway in `UPSTREAM_URL` instead of the edge. It routes by `Host` and path as before, so services need no change. Where the CDN allows it, move one host at a time.
+2. If that load balancer or gateway admits only the edge (a firewall rule, security group or NetworkPolicy), open it to the hop that now sends traffic.
+3. When the edges are fixed and `/readyz` returns 200 on each, point the CDN or load balancer back at the edge.
+
+While bypassed, nothing the edge does applies:
+
+- No rate limits, per-IP backstop or penalties.
+- No JWT checks: requests without a valid token reach services.
+- No CORS answers, header rules, locale detection or templated responses from the edge.
+- Client-sent `X-Edge-*` headers are no longer stripped, so a service that trusts `X-Edge-Auth-Sub` or `X-Edge-Client-IP` sees whatever the client sent. Strip them at the gateway first, or make sure no service relies on them.
+- The ingress secret header (`INGRESS_SECRET_HEADER`) and the client-IP and viewer source headers are no longer removed, so the gateway and every service receive the secret. Remove it at the gateway, or rotate `INGRESS_SECRET_VALUES` after the bypass if anything behind it logs request headers.
+- `X-Forwarded-For` is no longer reset to the client address alone, so a gateway set to trust one proxy hop, such as Istio with `numTrustedProxies: 1`, may read a proxy's address as the client.
+- No access logs or stats from that traffic, so **Routes**, **Stats** and the rollback guard don't see it.
+
 ## Audit chain broken
 
 `audit chain broken` means a row no longer matches its HMAC chain.
@@ -59,6 +77,8 @@ Traffic keeps flowing through every failure below. What changes is how policy is
 |---|---|
 | Audit HMAC key | Add the current pair to `AUDIT_HMAC_PREVIOUS_KEYS` as `id=key`, set a new `AUDIT_HMAC_KEY_ID` and `AUDIT_HMAC_KEY`, restart admin |
 | Edge token | Create a new edge token, roll the edges with it, then revoke the old one in **Users** |
+| Deployment edge token (`EDGE_SERVICE_TOKEN_FILE`) | Change the file for admin and the edges, then restart admin and the edges |
+| Log shipper token (`LOG_INGEST_TOKEN_FILE`) | Put the new token in admin's file and in the shipper's config, then restart admin and the shipper |
 | Ingress secret | Add the new value to `INGRESS_SECRET_VALUES`, roll edges, switch the CDN, then remove the old value |
 | A user's password | The user changes it on **Account**. An admin can disable a user in **Users** |
 

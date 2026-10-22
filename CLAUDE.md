@@ -4,7 +4,7 @@
 
 ## Project
 
-Edge Proxy is a lightweight Go reverse proxy that sits behind any WAF/CDN/LB and enforces policy rules (typed rule expressions, grouped in phases) before forwarding to upstreams. That policy covers:
+Edge Proxy is a lightweight Go reverse proxy that sits between a WAF/CDN and the one load balancer or gateway that routes the services (CDN → edge → LB/gateway → services). It enforces policy rules (typed rule expressions, grouped in phases), then forwards every request, Host unchanged, to that single `UPSTREAM_URL`. It never routes. That policy covers:
 
 - distributed rate limiting (Valkey)
 - JWT validation
@@ -46,7 +46,7 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - Caches are sharded.
   - Per-IP limiters lock only themselves.
 - **Trust comes only from deployment config.**
-  - Trusted proxies, the client-IP source, upstreams, OIDC providers and secrets come from env/flags, never from admin-editable config.
+  - Trusted proxies, the client-IP source, the upstream URL, OIDC providers and secrets come from environment variables, never from admin-editable config.
   - The one exception is JWKS URLs, and every JWKS fetch goes through the SSRF guard in `internal/jwks`.
 - **Forwarding headers are set explicitly from trusted values.** Never call `ProxyRequest.SetXForwarded()`: it uses the LB's address and the edge's own TLS state.
 - **Every edge-generated response sends `Cache-Control: no-store`.** CORS responses whose allowed origin varies send `Vary: Origin`.
@@ -85,11 +85,13 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
 | `internal/jwks` | JWKS fetch, parse, SSRF guard. Shared |
 | `internal/edge` | Wiring, `http.Server`, shutdown, and the request pipeline: client IP, JWT, CORS, header rules, locale, responses, proxy, stats |
 | `internal/envparse` | Deployment config from env vars. Shared |
-| `internal/admin` | Admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, rollback guard |
+| `internal/admin` | Admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, rollback guard, observed routes (access-log ingest, route patterns, route flow), first-start bootstrap |
 | `internal/admindb` | Postgres queries, migrations, audit log |
+| `internal/testenv` | Testcontainers helpers and the Playwright browser server. Test tooling, outside edge scope |
 | `web/admin` | Admin UI SPA and the Go package that embeds it |
-| `loadtest` | k6 scripts, mock upstream and IdP, seed (`loadtest/tools`), compose environment |
+| `loadtest` | k6 scripts; mock upstream, IdP, LB, gateway and microservices; seed (`loadtest/tools`); compose environments |
 | `build` | Dockerfiles for the edge, admin and load-test images |
+| `scripts` | CI steps (`scripts/ci`) and capacity scripts |
 | `docs` | MkDocs site (`mkdocs.yml`): user, operator and developer docs, plus the full design |
 
 ## Testing policy
@@ -141,6 +143,7 @@ How tests must be written:
 - `make fuzz` (`scripts/ci/fuzz.sh`): every fuzz target for `FUZZTIME` (default 20s). Use `FUZZTIME=5m` before merging parser or matcher changes.
 - `make bench` (`scripts/ci/bench.sh`): every benchmark, briefly, so they keep compiling and passing.
 - `make ui` (`scripts/ci/ui.sh`): admin UI `npm ci`, ESLint, typecheck and build, then the Playwright smoke tests against a real admin and Postgres (`TestUISmoke`, run only with `UI_SMOKE=1`) and the edge's SSE, streamed fetch and WebSocket tests in Chromium, Firefox and WebKit (`TestBrowserStreams`, run only with `BROWSER_SMOKE=1`).
+- `make screenshots` (`scripts/ci/screenshots.sh`): renders the admin pages shown in the docs from fixed data in a pinned Playwright browser in Docker and fails when any differs from `docs/assets/screenshots`; `scripts/ci/screenshots.sh update` rewrites them. It runs inside `make ui`.
 - `make docs` (`scripts/ci/docs.sh`): strict MkDocs build; broken links, anchors and pages missing from the nav fail it. Docs state only what the code does; check a claim against the code before writing it.
 - `make demo` / `make demo-down`: the local demo used by the Get started guide (load-test compose, one edge).
 - `make ci`: lint, test, fuzz, bench, vuln, ui, docs, container, load, in CI order.
@@ -150,7 +153,8 @@ How tests must be written:
 - `make load` (`scripts/ci/load.sh`): Tier 1 k6 smoke and a Valkey outage against `loadtest/compose.yaml`.
 - `make load-full` (`scripts/ci/load-full.sh`): the full load profile (outages, accuracy, 200 rules, hot key, penalty, JWT and locale, publish and canary under load, over-blocking canary, streams and drain, rolling restart, losing an edge, Valkey cluster). Nightly in CI; `PROFILE=release` before a release.
 - `make capacity` (`scripts/capacity-scenario.sh`): one edge at fixed rates with scenario-shaped traffic; reports p99 against `BUDGET_MS`, edge CPU, Valkey calls per request, bytes per key and CPU per call, and with `STREAMS=N` edge memory per open stream (reported, not gated).
-- **Releases:** GitHub only; GitLab CI never cuts a version, it only pushes a rolling `latest` from `main` to its own registry. release-please (`release-please-config.json`) from Conventional Commits; `scripts/ci/publish.sh` pushes multi-arch images on a release tag. Dependency updates come from Renovate (`renovate.json`) as `chore` commits, so they never cut a release.
+- `make capacity-max` (`scripts/capacity-max.sh`): the maximum rate of one 2 vCPU / 2 GiB edge within `BUDGET_MS` added at p99, in front of a mock gateway routing to four mock microservices with network delay (`loadtest/compose.capacity.yaml`). Not a CI gate; run it on a quiet host.
+- **Releases:** GitHub only; GitLab CI never cuts a version, it only pushes a rolling amd64-only `latest` from `main` to its own registry. release-please (`release-please-config.json`) from Conventional Commits; `scripts/ci/publish.sh` pushes multi-arch images on a release tag. Dependency updates come from Renovate (`renovate.json`) as `chore` commits, so they never cut a release.
 
 ## Quality gates (CI must enforce)
 
@@ -162,15 +166,18 @@ How tests must be written:
 | Fuzz smoke (`scripts/ci/fuzz.sh`) | Parsers and matchers on the trust boundary: no panics, agreement with reference implementations |
 | `govulncheck ./...` | Known vulnerabilities in dependencies |
 | Zero-allocation tests + benchmarks run (`scripts/ci/bench.sh`) | Request-path allocations (gated by tests). ns/op is reported, not gated: shared runners are too noisy |
-| k6 smoke (Tier 1) | End-to-end behavior under load, including Valkey and admin outages |
+| k6 smoke (Tier 1) | End-to-end behavior under load, including a Valkey outage. Admin, Postgres and IdP outages run in `make load-full` |
 | Container build + smoke | Image starts and becomes ready from a bootstrap snapshot |
+| Docs screenshots match the UI (`scripts/ci/screenshots.sh`) | A UI change can't leave the docs showing the old UI |
+| Docs reference tables match the code (`TestDocsListEvery*` in `internal/admin/docs_test.go`) | Every env var, admin API route with its permission, and expression field is documented, and nothing documented is gone |
 
 ## Writing rules
 
 - Comments are terse and factual. They explain *why*, not *what*.
 - No em dashes. No marketing adjectives.
 - No architecture decision records or `architecture/` directory. Explain notable decisions in the merge request and update `docs/design.md`.
-- Never cite an issue or MR number, an ADR, a design section (`design §4.6`) or a doc path in code, tests, docs or commit messages. State the reason itself. Sections of named standards (`RFC 9110 §15.5.2`) are fine, and docs cross-reference with Markdown links, which `make docs` checks. `scripts/ci/citations.sh` (run by `make lint`) enforces this.
+- Never cite an issue or MR number, an ADR, a design section (`design §4.6`) or a doc path in code, tests, docs or commit messages. State the reason itself. Sections of named standards (`RFC 9110 §15.5.2`) are fine, and docs cross-reference with Markdown links, which `make docs` checks. `scripts/ci/citations.sh` (run by `make lint`) catches ADR numbers, `docs/design` paths, `design §` and bare `§N` citations; issue and MR numbers and other doc paths are left to review.
+- A change to behavior, settings, API or UI updates the docs and the screenshots in the same MR.
 - Docs are concise and state only current, useful facts. No "checked on" or "updated on" dates and no change history; git records when.
 - Link every source where it is used. No separate list of bare URLs.
 - Mermaid in `docs/` has no `classDef` or `style`: the Material theme colours diagrams for light and dark, and custom fills make labels unreadable in one of them. Never convey meaning by colour alone.
@@ -188,7 +195,7 @@ How tests must be written:
 - **Trust and spoofing:**
   - Trusting a client-IP or geo header from a peer outside `TRUSTED_PROXIES`.
   - Falling back to `remote_addr` when the client-IP header is missing.
-  - Matching on a path with ambiguous encodings (`%2F`, `%5C`, `%00`) instead of rejecting it.
+  - Matching on a path with ambiguous encodings (`%5C`, `%00`) instead of rejecting it, or decoding `%2F` to `/` for matching (it stays inside its segment, as the gateway routes it).
   - Rate-limit rules keyed only on attacker-controlled values (header, cookie, query) without an IP or JWT-claim partner rule.
   - Header-based exemptions.
   - Using unverified JWT claims for anything.
@@ -215,7 +222,7 @@ How tests must be written:
 - **Resource use:**
   - Unbounded maps, caches, channels or goroutines.
   - Parsing or compiling expressions, regexes or templates per request.
-  - A rule whose upstream is a URL rather than a deployment-defined name.
+  - Routing in the edge: per-host or per-rule upstreams, or any upstream besides `UPSTREAM_URL`. The LB or gateway behind the edge routes.
   - Locks or allocations on the request path where an atomic or a precompiled structure works.
 - **Tests:**
   - Tests written to hit lines rather than behaviors.
@@ -223,5 +230,5 @@ How tests must be written:
   - Coverage exclusions in edge scope.
   - Mocking Valkey or Postgres.
 - **Logging and dependencies:**
-  - Logging `Authorization`, `Cookie` or query strings.
+  - Logging `Authorization`, `Cookie` or query values (key names are fine).
   - Adding a runtime dependency to the edge for something the stdlib or a few dozen lines can do.

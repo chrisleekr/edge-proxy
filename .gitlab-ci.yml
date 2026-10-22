@@ -1,21 +1,44 @@
 # Same gates as .github/workflows/ci.yml; both call scripts/ci/*.sh.
 stages: [check, publish]
 
+# A new commit cancels the older pipeline's interruptible jobs on the same
+# ref. publish-latest is not interruptible, so a started publish finishes.
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+
+# GitLab caches only paths inside the project; Go skips dot directories in
+# ./..., so .cache is never built, linted or tested.
+variables:
+  GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
+  GOCACHE: $CI_PROJECT_DIR/.cache/go-build
+  GOLANGCI_LINT_CACHE: $CI_PROJECT_DIR/.cache/golangci-lint
+  # ui only: npm packages and the three Playwright browsers.
+  npm_config_cache: $CI_PROJECT_DIR/.cache/npm
+  PLAYWRIGHT_BROWSERS_PATH: $CI_PROJECT_DIR/.cache/ms-playwright
+
 default:
-  image: golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8
+  image: golang:1.27.3@sha256:957861185dbf29d93668ace41e011d091c6e779953d47f0316ef2cc58e28fe2b
   # Lets auto-cancel stop a superseded pipeline.
   interruptible: true
+  # One cache per job: race, fuzz and cover builds differ, so a shared key
+  # would hand each job another job's build cache.
+  cache:
+    key:
+      prefix: $CI_JOB_NAME
+      files: [go.sum]
+    paths: [.cache/]
 
 lint:
   stage: check
-  image: golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f
+  image: golangci/golangci-lint:v2.15.0@sha256:fbfcfd12a6f8d7f1b97b3362ca80fc2a244d46863148c73cb88e7793af96c481
   script:
     - ./scripts/ci/lint.sh
 
 # Docker for testcontainers: tests and Valkey benchmarks start real Valkey.
 .docker: &docker
   services:
-    - name: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+    - name: docker:29.9.1-dind@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
       alias: docker
       # TLS off so dind starts without certificates (testcontainers GitLab guide).
       command: ["--tls=false"]
@@ -55,12 +78,14 @@ commits:
     BASE: $CI_MERGE_REQUEST_DIFF_BASE_SHA
     HEAD: $CI_COMMIT_SHA
     GIT_DEPTH: 0
+  cache: []
   script:
     - ./scripts/ci/commits.sh
 
 docs:
   stage: check
-  image: ghcr.io/astral-sh/uv:0.12.19-python3.12-alpine@sha256:23ab7187a462696e85e168d2a042493d45c8d06c8a90d9aa820b8b83da09f118
+  image: ghcr.io/astral-sh/uv:0.13.4-python3.12-alpine@sha256:9033906810b07383055e7b59907ab2a534f6356e5ab91de14d753420fac345b6
+  cache: []
   script:
     - ./scripts/ci/docs.sh
 
@@ -68,23 +93,25 @@ docs:
 ui:
   stage: check
   <<: *docker
+  cache:
+    key:
+      prefix: $CI_JOB_NAME
+      files: [go.sum, web/admin/package-lock.json]
+    paths: [.cache/]
   script:
     - ./scripts/ci/ui.sh
 
-# Image and load jobs drive Docker directly; the docker image ships the
-# compose plugin, and the scripts are POSIX sh for it.
-container:
-  stage: check
-  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
-  <<: *docker
-  script:
-    - ./scripts/ci/image.sh
-
+# The image build and smoke, then the load smoke, in one job: compose reuses
+# the layers image.sh just built on this job's daemon instead of building
+# them again. The docker image ships the compose plugin, and the scripts are
+# POSIX sh for it.
 load:
   stage: check
-  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  image: docker:29.9.1@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
   <<: *docker
+  cache: []
   script:
+    - ./scripts/ci/image.sh
     - ./scripts/ci/load.sh
   artifacts:
     when: always
@@ -95,9 +122,10 @@ load:
 # schedule before a release.
 load-full:
   stage: check
-  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  image: docker:29.9.1@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
   <<: *docker
   timeout: 3h
+  cache: []
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
   script:
@@ -109,22 +137,29 @@ load-full:
 
 
 # Rolling latest from main to this project's registry; no version tags (those
-# come from release-please on GitHub). Branches only run the container job's
+# come from release-please on GitHub). Branches only run the load job's
 # local build and smoke test, so no dev tags are pushed.
 publish-latest:
   stage: publish
-  image: docker:29.9.0@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+  image: docker:29.9.1@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
   interruptible: false
+  cache: []
   # Its own TLS daemon: this job sends registry credentials, unlike the test
   # jobs that share the plain-TCP one.
   services:
-    - name: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+    - name: docker:29.9.1-dind@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376
     DOCKER_TLS_CERTDIR: "/certs"
     DOCKER_TLS_VERIFY: "1"
     DOCKER_CERT_PATH: "/certs/client"
+    # The rolling latest only feeds an amd64 deployment; releases stay multi-arch.
+    PLATFORMS: linux/amd64
+    # GitLab's registry rejects an attestation manifest pushed before the image
+    # manifest it describes, and BuildKit pushes them in no fixed order, so a
+    # push fails at random. Releases keep their provenance.
+    BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
   rules:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:

@@ -73,20 +73,17 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration) 
 	}
 }
 
-// run writes lines until ctx ends, then drains what is buffered.
+// run writes lines until ctx ends and nothing is buffered. Once ctx ends,
+// select picks either ready case at random, so buffered lines are written
+// by the same case either way and run returns only when the buffer is empty.
 func (a *accessLog) run(ctx context.Context) {
 	for {
 		select {
 		case rec := <-a.ch:
 			guard(a.m, a.log, "access log", func() { a.emit(rec) })
 		case <-ctx.Done():
-			for {
-				select {
-				case rec := <-a.ch:
-					a.emit(rec)
-				default:
-					return
-				}
+			if len(a.ch) == 0 {
+				return
 			}
 		}
 	}
