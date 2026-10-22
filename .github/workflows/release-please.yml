@@ -56,3 +56,24 @@ jobs:
       - run: ./scripts/ci/publish.sh chrisleekr/edge-proxy "$TAG" latest
         env:
           TAG: ${{ needs.release.outputs.tag_name }}
+
+  notify-helm-charts:
+    # After publish: the chart PR points appVersion at the image tag, so it must
+    # not open until both images are pushed.
+    needs: [release, publish]
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The cross-repo dispatch uses RELEASE_TOKEN, so GITHUB_TOKEN needs nothing.
+    permissions: {}
+    steps:
+      # Wakes helm-charts' edge-proxy-sync workflow, which opens the chart bump
+      # PR. It only runs if that workflow is on helm-charts' default branch, and
+      # the POST returns 204 even when nothing listens.
+      - env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag_name }}
+        run: |
+          gh api -X POST repos/chrisleekr/helm-charts/dispatches \
+            -f event_type=edge-proxy-released \
+            -f "client_payload[version]=${TAG#v}"
