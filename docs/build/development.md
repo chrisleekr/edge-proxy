@@ -89,7 +89,7 @@ Releases are cut by [release-please](https://github.com/googleapis/release-pleas
 
 CI rejects a PR whose title or commits aren't Conventional Commits (`scripts/ci/commits.sh`), since release-please skips subjects it can't parse.
 
-GitHub needs the secrets `RELEASE_TOKEN`, `DOCKER_USERNAME` and `DOCKER_PASSWORD`. `RELEASE_TOKEN` opens the Release PR, so CI runs on it, and sends the chart dispatch, so it also needs Contents write on `chrisleekr/helm-charts` (or the classic `repo` scope). Without it the dispatch fails after the images are pushed, and no chart PR opens.
+GitHub needs the secrets `RELEASE_TOKEN`, `DOCKER_USERNAME` and `DOCKER_PASSWORD`. `RELEASE_TOKEN` opens the Release PR, so CI runs on it, and sends the chart dispatch, so it also needs Contents write on `chrisleekr/helm-charts` (or the classic `repo` scope). If it lacks that access, the dispatch fails after the images are pushed, and no chart PR opens.
 
 Run `make load-full PROFILE=release` before merging a Release PR.
 
