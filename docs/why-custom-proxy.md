@@ -31,7 +31,7 @@ Envoy, APISIX, Kong, Tyk and Traefik can all share a rate limit across replicas.
 - The default limiter counts on each server separately (Tyk).
 - Each limit makes its own Redis call (APISIX, Kong).
 - A Redis outage blocks traffic and there is no setting to change that (Traefik).
-- The free edition can't use a JWT claim as the limit key (APISIX, Kong, Traefik).
+- The free edition can limit by a JWT claim only when the claim names a consumer registered in the gateway ahead of time, so a user or tenant ID can't be the key ([APISIX][apx-jwt], [Kong][kong-jwt]). [Traefik's JWT middleware][tr-jwt] is in Traefik Hub only.
 
 Replacing a gateway's limiter and failure handling is most of what this project is. For APISIX, Kong, Tyk and Traefik it would be a plugin in the gateway's own plugin system. Envoy instead calls a separate rate-limit service over gRPC, which you could write in Go, but then every rate-limited request makes an extra network call to that service before it reaches Valkey, you run and scale Envoy and the service side by side, and Envoy's failure setting covers the whole filter rather than one rule ([global rate limiting][env-rl], [failure mode][env-fail]). Forwarding requests is the easy part, and Go's standard library already does it.
 
@@ -47,7 +47,7 @@ Replacing a gateway's limiter and failure handling is most of what this project 
 | Exact limit across replicas | ✓ | [✓][env-rl] | [✓][apx-count] | [✓][kong-policies] | [◐ not the default limiter][tyk-rl] | [✓][tr-rl] | [✗ synced copies][hap-st] | [✗ per server][ngx-req] |
 | Algorithms | fixed, sliding, token bucket, leaky bucket | [fixed window][env-window] | [leaky][apx-req], [fixed, sliding][apx-count] | [fixed window][kong-schema] | [token bucket per server (default)][tyk-rl], [sliding log][tyk-session], [fixed][tyk-limiter] | [token bucket][tr-rl] | [sliding, fixed][hap-rl] | [leaky bucket][ngx-req] |
 | One Redis call for all limits | ✓ | [✓][env-pipe] | [✗][apx-util] | [✗][kong-handler] | [◐ one per check][tyk-session] | ? | no Redis | no Redis |
-| Limit by JWT claim, free edition | ✓ | [✓][env-jwt] | [✗][apx-count] | [✗][kong-schema] | [✓][tyk-jwt] | [✗ Hub only][tr-jwt] | [◐ local keys only][hap-jwt] | [✗ Plus only][ngx-jwt] |
+| Limit by JWT claim, free edition | ✓ | [✓][env-jwt] | [◐ registered consumers only][apx-count] | [◐ registered consumers only][kong-schema] | [✓][tyk-jwt] | [✗ Hub only][tr-jwt] | [◐ local keys only][hap-jwt] | [✗ Plus only][ngx-jwt] |
 | Choice of behaviour when Redis is down | ✓ per rule | [◐ per filter][env-fail] | [✓ per plugin][apx-count] | [✓ per plugin][kong-schema] | [◐ depends on the limiter][tyk-session] | [✗ returns 500][tr-fail] | no Redis | no Redis |
 | Log-only mode | ✓ | [✓][env-shadow] | [✗][apx-count] | [✗][kong-schema] | [✗][tyk-rl] | [✗][tr-rl] | ? | [✓][ngx-req] |
 
@@ -111,9 +111,11 @@ If fixed windows are enough and you already run Envoy, use its rate-limit servic
 [apx-req]: https://github.com/apache/apisix/blob/master/docs/en/latest/plugins/limit-req.md
 [apx-count]: https://github.com/apache/apisix/blob/master/docs/en/latest/plugins/limit-count.md
 [apx-util]: https://github.com/apache/apisix/blob/master/apisix/plugins/limit-count/util.lua
+[apx-jwt]: https://github.com/apache/apisix/blob/master/docs/en/latest/plugins/jwt-auth.md
 [kong-schema]: https://github.com/Kong/kong/blob/master/kong/plugins/rate-limiting/schema.lua
 [kong-handler]: https://github.com/Kong/kong/blob/master/kong/plugins/rate-limiting/handler.lua
 [kong-policies]: https://github.com/Kong/kong/blob/master/kong/plugins/rate-limiting/policies/init.lua
+[kong-jwt]: https://github.com/Kong/kong/blob/master/kong/plugins/jwt/schema.lua
 [tyk-rl]: https://tyk.io/docs/api-management/rate-limit
 [tyk-limiter]: https://github.com/TykTechnologies/tyk/blob/master/internal/rate/limiter.go
 [tyk-session]: https://github.com/TykTechnologies/tyk/blob/master/gateway/session_manager.go
