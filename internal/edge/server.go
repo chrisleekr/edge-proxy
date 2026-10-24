@@ -155,11 +155,14 @@ func (s *Server) Run(ctx context.Context, public, internal net.Listener) error {
 
 // flushTraces exports buffered spans once the handlers that cancelBase
 // ended have recorded theirs: http.Server waits for neither hijacked nor,
-// after its timeout, active handlers. Waiting and flushing share one bound.
+// after its timeout, active handlers. Waiting and flushing share one bound;
+// the wait takes at most half, so a handler that never returns still leaves
+// time to export the spans that ended.
 func (s *Server) flushTraces() {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Tracing.ShutdownTimeout)
 	defer cancel()
-	for s.edge.active.Load() > 0 && ctx.Err() == nil {
+	waitUntil := time.Now().Add(s.cfg.Tracing.ShutdownTimeout / 2)
+	for s.edge.active.Load() > 0 && time.Now().Before(waitUntil) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if err := s.m.tracing.Shutdown(ctx); err != nil {

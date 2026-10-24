@@ -20,17 +20,14 @@ var stdMethods = map[string]bool{
 	"CONNECT": true, "OPTIONS": true, "TRACE": true, "PATCH": true,
 }
 
-// startSpan starts the request's server span once the peer's trust is
-// known. Only a trusted, identified peer's trace context is joined (join);
-// anyone else's is ignored and the trace restarts here.
-func (e *Edge) startSpan(st *reqState, r *http.Request, join bool) {
+// startSpan starts the request's server span in the caller's trace, from
+// any peer, so a trace ID the client sends survives the edge. The sampler's
+// cap on joined traces bounds what forged sampled flags can force.
+func (e *Edge) startSpan(st *reqState, r *http.Request) {
 	if e.tracer == nil {
 		return
 	}
-	ctx := context.Background()
-	if join {
-		ctx = traceProp.Extract(ctx, propagation.HeaderCarrier(r.Header))
-	}
+	ctx := traceProp.Extract(context.Background(), propagation.HeaderCarrier(r.Header))
 	name := r.Method
 	if !stdMethods[name] {
 		name = "HTTP"

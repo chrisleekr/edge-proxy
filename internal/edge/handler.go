@@ -212,9 +212,8 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	cl, err := e.id.identify(r)
 	st.client = cl
 	st.requestID = requestID(r, cl.trusted)
-	// A peer that failed identification (a wrong ingress secret) is
-	// still traced, but never joins the trace it claims.
-	e.startSpan(st, r, cl.trusted && err == nil)
+	// Traced even when identification fails, so a rejected request is too.
+	e.startSpan(st, r)
 	if err != nil {
 		e.reject(st, kBadRequest, identifyReason(err))
 		return

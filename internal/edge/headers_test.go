@@ -31,6 +31,26 @@ func headersConfig() *snapshot.Config {
 	return c
 }
 
+// Trace context passes every forward filter, even one naming it, so a
+// caller's trace survives the edge with tracing off.
+func TestForwardFilterKeepsTraceContext(t *testing.T) {
+	c := headersConfig()
+	c.Global.RequestHeaders.Forward.Names = append(c.Global.RequestHeaders.Forward.Names, "Traceparent")
+	h := newHarness(t, nil)
+	h.load(envelope(c))
+	tp, _, _ := newTraceparent(t, "01")
+	// "/" goes through the global denylist, "/orders" also through an allowlist.
+	for _, path := range []string{"/", "/orders"} {
+		h.do("GET", path, nil, "Traceparent", tp, "Tracestate", "vendor=abc").Body.Close()
+		h.mu.Lock()
+		got := h.lastApp.Header
+		h.mu.Unlock()
+		if got.Get("Traceparent") != tp || got.Get("Tracestate") != "vendor=abc" {
+			t.Errorf("%s: upstream trace context %q %q", path, got.Get("Traceparent"), got.Get("Tracestate"))
+		}
+	}
+}
+
 // Step 9 applies the forward filter, then rule operations in order, then
 // edge-managed headers, which no rule can override.
 func TestHeaderRules(t *testing.T) {

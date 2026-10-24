@@ -306,10 +306,6 @@ func TestCompileRejects(t *testing.T) {
 		{"expression reading a forgeable edge header", func(c *Config) {
 			c.RequestHeaderRules[0].Expression = mustParse(`http.request.headers["x-edge-auth-sub"] eq "admin"`)
 		}, nil, "request_header_rules[0].expression", "X-Edge-Auth-Sub is managed by the edge"},
-		{"set the trace context the edge propagates", func(c *Config) { c.RequestHeaderRules[1].Ops[0].Name = "traceparent" }, nil, "request_header_rules[1].ops[0].name", "Traceparent is managed by the edge"},
-		{"expression reading the client's trace state", func(c *Config) {
-			c.RequestHeaderRules[0].Expression = mustParse(`http.request.headers["tracestate"] eq "a=b"`)
-		}, nil, "request_header_rules[0].expression", "Tracestate is managed by the edge"},
 		{"set op with a from field", func(c *Config) { c.RequestHeaderRules[1].Ops[0].From = "X-A" }, nil, "request_header_rules[1].ops[0].from", "doesn't apply to set"},
 		{"forward op with a name", func(c *Config) { c.RequestHeaderRules[2].Ops[0].Name = "X-A" }, nil, "request_header_rules[2].ops[0].name", "doesn't apply to forward"},
 		{"forward op with no mode", func(c *Config) { c.RequestHeaderRules[2].Ops[0].Mode = "" }, nil, "request_header_rules[2].ops[0].mode", "all, allowlist or denylist"},

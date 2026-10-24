@@ -50,7 +50,7 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - The one exception is JWKS URLs, and every JWKS fetch goes through the SSRF guard in `internal/jwks`.
 - **Forwarding headers are set explicitly from trusted values.** Never call `ProxyRequest.SetXForwarded()`: it uses the LB's address and the edge's own TLS state.
 - **Every edge-generated response sends `Cache-Control: no-store`.** CORS responses whose allowed origin varies send `Vary: Origin`.
-- **Client-supplied copies of edge-managed headers are always stripped.** This covers `X-Edge-*`, the client-IP and geo source headers, and `X-Request-Id` from untrusted peers. With tracing on, `traceparent` and `tracestate` are replaced with the edge span's, joined only from trusted peers.
+- **Client-supplied copies of edge-managed headers are always stripped.** This covers `X-Edge-*`, the client-IP and geo source headers, and `X-Request-Id` from untrusted peers. With tracing on, `traceparent` and `tracestate` are replaced with the edge span's, in the caller's trace from any peer; trace context only correlates and is never trusted, and no forward filter drops it.
 - **Tracing never touches traffic.** Spans are exported off the request path from a bounded queue that drops when full, a replica samples at most `TRACE_MAX_PER_SECOND` traces it starts and as many joined from callers, and readiness ignores the collector.
 - **Postgres is the durable source of truth** for policy, versions, audit and stats. Valkey holds only rate-limit state, and every Valkey key has a TTL.
 - **Authorization checks permissions, never role names.**

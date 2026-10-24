@@ -32,6 +32,12 @@ func TestCompileWarns(t *testing.T) {
 		{"rename from a header the global denylist drops", func(c *Config) {
 			c.Global.RequestHeaders.Forward = Forward{Mode: "denylist", Names: []string{"x-old"}}
 		}, "request_header_rules[1].ops[3].from", "X-Old can be dropped"},
+		{"set the trace context the edge replaces", func(c *Config) {
+			c.RequestHeaderRules[1].Ops[0].Name = "traceparent"
+		}, "request_header_rules[1].ops[0].name", "Traceparent is trace context: with tracing on, the edge replaces it"},
+		{"denylist naming trace context", func(c *Config) {
+			c.Global.RequestHeaders.Forward = Forward{Mode: "denylist", Names: []string{"tracestate"}}
+		}, "global.request_headers.forward.names[0]", "Tracestate is always forwarded"},
 		{"rule overwritten by a later catch-all", func(c *Config) {
 			c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "catch-all", Expression: expr.True(), Settings: Settings{
 				Auth: &AuthSetting{Mode: "none"}, CORSPolicy: new(""), UpstreamTimeout: new(dur("5s")),

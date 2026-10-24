@@ -148,17 +148,17 @@ func TestTraceJoinsTrustedCaller(t *testing.T) {
 	}
 }
 
-// Without a trusted proxy in front, any trace context is the client's own
-// claim: the edge starts a new trace and drops the client's tracestate.
-func TestTraceRestartsForUntrustedPeer(t *testing.T) {
+// With no proxy in front, the client's trace ID still survives the edge:
+// it joins the trace and keeps the caller's tracestate.
+func TestTraceJoinsUntrustedCaller(t *testing.T) {
 	h, _ := tracedHarness(t, map[string]string{"CLIENT_IP_SOURCE": "remote_addr", "TRUSTED_PROXIES": ""})
-	tp, traceID, _ := newTraceparent(t, "01")
+	tp, traceID, callerSpan := newTraceparent(t, "01")
 	readBody(t, h.do("GET", "/", nil, "Traceparent", tp, "Tracestate", "vendor=abc"))
-	if upTrace, _, _ := h.upstreamTrace(); upTrace == traceID {
-		t.Fatal("untrusted peer joined its own trace")
+	if upTrace, upParent, _ := h.upstreamTrace(); upTrace != traceID || upParent == callerSpan {
+		t.Fatalf("upstream trace %s parent %s, caller %s %s", upTrace, upParent, traceID, callerSpan)
 	}
-	if got := h.lastApp.Header.Get("Tracestate"); got != "" {
-		t.Fatalf("untrusted tracestate forwarded: %q", got)
+	if got := h.lastApp.Header.Get("Tracestate"); got != "vendor=abc" {
+		t.Fatalf("upstream tracestate %q", got)
 	}
 }
 
@@ -503,24 +503,18 @@ func TestValkeyDownSpanIsError(t *testing.T) {
 }
 
 // A request from the CDN's network that lacks the ingress secret is
-// rejected, and its span does not join the trace it claims.
-func TestMissingIngressSecretDoesNotJoinTrace(t *testing.T) {
+// rejected, and its span is recorded in the caller's trace.
+func TestRejectedRequestSpanJoinsCallerTrace(t *testing.T) {
 	h, col := tracedHarness(t, map[string]string{"INGRESS_SECRET_HEADER": "X-Origin-Secret", "INGRESS_SECRET_VALUES": "s3cret"})
-	tp, traceID, _ := newTraceparent(t, "01")
+	tp, traceID, callerSpan := newTraceparent(t, "01")
 	resp := h.do("GET", "/", nil, "Traceparent", tp)
 	readBody(t, resp)
 	if resp.StatusCode != 400 {
 		t.Fatalf("status %d, want 400", resp.StatusCode)
 	}
 	h.flush()
-	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
-	own := h.logs.lines("access")[0]["trace_id"].(string)
-	// Once the request's own span has arrived, a joined one would have too.
-	if span := col.Spans(t, own, 1)[0]; own == traceID || span.ParentSpanID != "" {
-		t.Fatalf("rejected request joined the claimed trace: %+v", span)
-	}
-	if spans := col.Spans(t, traceID, 0); len(spans) != 0 {
-		t.Fatalf("spans in the claimed trace: %+v", spans)
+	if span := col.Spans(t, traceID, 1)[0]; span.ParentSpanID != callerSpan || span.Attrs["http.response.status_code"] != "400" {
+		t.Fatalf("rejected request span %+v", span)
 	}
 }
 
@@ -543,5 +537,39 @@ func TestStreamSpanExportedAtShutdown(t *testing.T) {
 	}
 	if span := col.Spans(t, traceID, 1)[0]; span.Attrs["http.response.status_code"] != "101" {
 		t.Fatalf("stream span %+v", span)
+	}
+}
+
+// A handler still running when TRACE_SHUTDOWN_TIMEOUT runs out must not
+// cost the spans that already ended: the flush keeps time to export them.
+func TestHandlerOutlivingShutdownStillFlushesEndedSpans(t *testing.T) {
+	h, col := tracedHarness(t, map[string]string{"DRAIN_DELAY": "1ms", "SHUTDOWN_TIMEOUT": "100ms", "TRACE_SHUTDOWN_TIMEOUT": "2s"})
+	pub, in := listen(t), listen(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error)
+	go func() { done <- h.srv.Run(ctx, pub, in) }()
+	waitFor(t, func() bool { return h.srv.ready() })
+	req, _ := http.NewRequest("GET", "http://"+pub.Addr().String()+"/", nil)
+	req.Header.Set("CloudFront-Viewer-Address", "198.51.100.7:1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	traceID, _, _ := h.upstreamTrace()
+	// Stands in for a handler blocked past the trace shutdown budget.
+	h.srv.edge.active.Add(1)
+	defer h.srv.edge.active.Add(-1)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// The binary exits when Run returns, so a cut-short flush loses spans.
+	if lines := h.logs.lines("trace flush incomplete"); len(lines) != 0 {
+		t.Fatalf("flush cut short: %v", lines)
+	}
+	if len(col.Spans(t, traceID, 1)) != 1 {
+		t.Fatal("ended span lost")
 	}
 }
