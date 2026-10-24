@@ -24,7 +24,7 @@ One Go module with two binaries, plus a React admin UI embedded into admin. The 
 
 ## Prerequisites
 
-Go (version in `go.mod`), Docker, Node 24 for the UI, and [uv](https://docs.astral.sh/uv/) for the docs.
+Go (version in `go.mod`), Docker, Node 26 for the UI, and [uv](https://docs.astral.sh/uv/) for the docs.
 
 ## Commands
 
