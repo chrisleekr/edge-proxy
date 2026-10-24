@@ -44,18 +44,22 @@ type forwardFilter struct {
 func compileForward(f snapshot.Forward) *forwardFilter {
 	ff := &forwardFilter{mode: forwardModes[f.Mode], names: map[string]bool{}}
 	for _, n := range f.Names {
-		ff.names[textproto.CanonicalMIMEHeaderKey(n)] = true
+		// Trace context always passes through; validation warns.
+		if !snapshot.TraceHeader(n) {
+			ff.names[textproto.CanonicalMIMEHeaderKey(n)] = true
+		}
 	}
 	return ff
 }
 
 // apply keeps or drops headers. Headers validation reserves (Connection,
-// Upgrade and Te, which ReverseProxy sets before Rewrite) are always kept.
+// Upgrade and Te, which ReverseProxy sets before Rewrite) and trace context
+// are always kept.
 func (f *forwardFilter) apply(h http.Header) {
 	switch f.mode {
 	case forwardAllowlist:
 		for k := range h {
-			if !f.names[k] && !snapshot.Reserved(k) {
+			if !f.names[k] && !snapshot.Reserved(k) && !snapshot.TraceHeader(k) {
 				delete(h, k)
 			}
 		}

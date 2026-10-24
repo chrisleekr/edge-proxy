@@ -18,6 +18,7 @@ import (
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 func dur(d time.Duration) snapshot.Duration { return snapshot.Duration(d) }
@@ -126,7 +127,13 @@ func newHarness(t *testing.T, set map[string]string) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.srv = New(cfg, slog.New(slog.NewJSONHandler(h.logs, nil)))
+	log := slog.New(slog.NewJSONHandler(h.logs, nil))
+	tp, err := tracing.New(cfg.Tracing, cfg.Instance, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) }) //nolint:usetesting // t.Context is cancelled before cleanups run
+	h.srv = New(cfg, log, tp)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { h.srv.alog.run(ctx); close(done) }()

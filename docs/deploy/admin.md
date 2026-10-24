@@ -28,6 +28,8 @@ Environment variables only. The image's commands:
 | `EDGE_SERVICE_TOKEN_FILE` | none | File holding an edge token defined by the deployment, at least 32 characters: give the edges the same file and they need no token created in the UI. It is accepted alongside tokens created in admin, cannot be revoked there, and rotates by changing the file and restarting admin and the edges |
 | `BOOTSTRAP_ADMIN_USERNAME`, `BOOTSTRAP_ADMIN_PASSWORD_FILE` | none | Set both to create this user with the `admin` role at start when no user exists yet. The password is the file's first line and must pass the password rules. Once any user exists, nothing changes |
 | `BOOTSTRAP_PUBLISH_DEFAULT` | `false` | `true` publishes the starter policy at start when no version has ever been published, so edges on a fresh install load a policy and become ready. It has no rules, so every request goes to `UPSTREAM_URL`, with a per-IP backstop of 100 requests a second (burst 200) |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `TRACE_SAMPLE_RATE`, `TRACE_MAX_PER_SECOND`, `TRACE_SHUTDOWN_TIMEOUT` | as the edge | [Tracing](edge.md#tracing), off unless an endpoint is set. Admin traces `/api/` requests, with a span per Postgres query. On admin, `TRACE_SHUTDOWN_TIMEOUT` bounds only the final flush, and a caller's sampled flag is followed only from `ADMIN_TRUSTED_PROXIES`; see [Monitoring](../operate/monitoring.md#admin-traces) |
+| `OTEL_SERVICE_NAME` | `edge-proxy-admin` | `service.name` on admin's spans |
 | `MIGRATION_DATABASE_URL` | `migrate` only | Postgres URL for the owner role |
 | `DB_RUNTIME_ROLE` | `migrate` only | The role `DATABASE_URL` connects as |
 

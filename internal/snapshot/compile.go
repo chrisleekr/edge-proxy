@@ -165,6 +165,16 @@ var reserved = map[string]bool{
 // rule may target. The edge's forward filter always keeps these.
 func Reserved(name string) bool { return reserved[strings.ToLower(name)] }
 
+// traceHeaders carry W3C trace context, which the edge always forwards and,
+// with tracing on, replaces with its own span's. Rules naming them only get
+// a warning: rejecting them would stop an edge loading a snapshot that
+// already does.
+var traceHeaders = map[string]bool{"traceparent": true, "tracestate": true}
+
+// TraceHeader reports a W3C trace context header. The edge's forward filter
+// always keeps these.
+func TraceHeader(name string) bool { return traceHeaders[strings.ToLower(name)] }
+
 // clientControlled fields can be set to anything by the client, so a rate
 // limit must not use them to exclude traffic.
 var clientControlled = map[string]bool{
@@ -461,6 +471,11 @@ func (v *validator) forward(path string, f Forward) {
 		v.err(path+".names", "needs at least one header name")
 	}
 	v.list(path+".names", f.Names, foldCase, v.targetProblem)
+	for i, n := range f.Names {
+		if TraceHeader(n) {
+			v.warn(fmt.Sprintf("%s.names[%d]", path, i), "%s is always forwarded, so listing it has no effect; with tracing off, a remove op drops it", http.CanonicalHeaderKey(n))
+		}
+	}
 	if f.Mode == "allowlist" {
 		for _, h := range []string{"Authorization", "Cookie", "Content-Type"} {
 			if !slices.ContainsFunc(f.Names, func(n string) bool { return strings.EqualFold(n, h) }) {
@@ -823,6 +838,8 @@ func (v *validator) op(p string, op HeaderOp) Template {
 func (v *validator) target(p, name string) {
 	if msg := v.targetProblem(name); msg != "" {
 		v.err(p, "%s", msg)
+	} else if TraceHeader(name) {
+		v.warn(p, "%s is trace context: with tracing on, the edge replaces it with its own span's", http.CanonicalHeaderKey(name))
 	}
 }
 

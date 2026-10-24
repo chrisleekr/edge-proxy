@@ -47,7 +47,7 @@ mem() { docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "${project}-
 
 up() {
   compose --profile k6 build
-  compose up -d --wait upstream lb edge-1 edge-2 edge-3
+  compose up -d --wait collector upstream lb edge-1 edge-2 edge-3
 }
 
 outage() {
@@ -155,6 +155,8 @@ step "Valkey outage" outage valkey stop start
 step "Admin outage" outage admin stop start
 step "Postgres outage" outage postgres stop start
 step "IdP hangs" outage idp pause unpause
+step "Trace collector outage" outage collector stop start
+step "Trace collector hangs" outage collector pause unpause
 step "JWT cached and uncached, locale" k6 k6 run --quiet /scripts/full/jwt-locale.js
 step "Accuracy over ${IPS} IPs" accuracy "${IPS}"
 step "200 rules per phase" k6 k6 run --quiet /scripts/full/rules200.js
@@ -176,7 +178,7 @@ export COMPOSE_PROFILES=cluster
 export VALKEY_URL='redis://10.77.0.21:6379?addr=10.77.0.22:6379&addr=10.77.0.23:6379'
 compose --profile k6 build >/dev/null
 compose run --rm valkey-cluster-init >/dev/null
-compose up -d --wait upstream edge-1 edge-2 edge-3
+compose up -d --wait collector upstream edge-1 edge-2 edge-3
 step "Cluster: smoke" k6 k6 run --quiet /scripts/smoke.js
 step "Cluster: accuracy over 5000 IPs" accuracy 5000
 fi

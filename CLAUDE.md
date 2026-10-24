@@ -50,7 +50,8 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - The one exception is JWKS URLs, and every JWKS fetch goes through the SSRF guard in `internal/jwks`.
 - **Forwarding headers are set explicitly from trusted values.** Never call `ProxyRequest.SetXForwarded()`: it uses the LB's address and the edge's own TLS state.
 - **Every edge-generated response sends `Cache-Control: no-store`.** CORS responses whose allowed origin varies send `Vary: Origin`.
-- **Client-supplied copies of edge-managed headers are always stripped.** This covers `X-Edge-*`, the client-IP and geo source headers, and `X-Request-Id` from untrusted peers.
+- **Client-supplied copies of edge-managed headers are always stripped.** This covers `X-Edge-*`, the client-IP and geo source headers, and `X-Request-Id` from untrusted peers. With tracing on, `traceparent` and `tracestate` are replaced with the edge span's, in the caller's trace from any peer; trace context only correlates and is never trusted, and no forward filter drops it.
+- **Tracing never touches traffic.** Spans are exported off the request path from a bounded queue that drops when full, a replica samples at most `TRACE_MAX_PER_SECOND` traces it starts and as many joined from callers, and readiness ignores the collector.
 - **Postgres is the durable source of truth** for policy, versions, audit and stats. Valkey holds only rate-limit state, and every Valkey key has a TTL.
 - **Authorization checks permissions, never role names.**
 - **Audit is complete, append-only and tamper-evident.**
@@ -67,7 +68,8 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - `valkey-io/valkey-go`
   - `golang-jwt/jwt/v5`
   - `golang.org/x/text`
-  - Admin only: `jackc/pgx/v5`, `golang.org/x/crypto`, and later `coreos/go-oidc/v3` and `golang.org/x/oauth2`.
+  - `go.opentelemetry.io/otel` (API, SDK, `otlptracehttp`) and `go-logr/logr`, in `internal/tracing`: OTLP export, W3C propagation and batching are protocol code upstream maintains. Every binary is built with `-tags grpcnotrace`, or gRPC's `x/net/trace` adds about 13 MB; `make container` checks it.
+  - Admin only: `jackc/pgx/v5`, `golang.org/x/crypto`, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`, and later `coreos/go-oidc/v3` and `golang.org/x/oauth2`.
 - **Admin UI:** React + Vite + TypeScript (strict) + Tailwind CSS, with `react-querybuilder` for the rule builder and CodeMirror 6 for expression text.
   - It's built to `web/admin/dist/app`, embedded by `web/admin/ui.go` (`go:embed`) and served by admin. Node is needed at build time only.
   - The UI never parses, renders or validates expressions; it calls the admin `/api/expr/*` API.
@@ -85,9 +87,10 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
 | `internal/jwks` | JWKS fetch, parse, SSRF guard. Shared |
 | `internal/edge` | Wiring, `http.Server`, shutdown, and the request pipeline: client IP, JWT, CORS, header rules, locale, responses, proxy, stats |
 | `internal/envparse` | Deployment config from env vars. Shared |
+| `internal/tracing` | OpenTelemetry tracer provider: OTLP/HTTP export, capped sampler, export counters. Shared |
 | `internal/admin` | Admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, rollback guard, observed routes (access-log ingest, route patterns, route flow), first-start bootstrap |
 | `internal/admindb` | Postgres queries, migrations, audit log |
-| `internal/testenv` | Testcontainers helpers and the Playwright browser server. Test tooling, outside edge scope |
+| `internal/testenv` | Testcontainers helpers (Valkey, Postgres, OpenTelemetry Collector) and the Playwright browser server. Test tooling, outside edge scope |
 | `web/admin` | Admin UI SPA and the Go package that embeds it |
 | `loadtest` | k6 scripts; mock upstream, IdP, LB, gateway and microservices; seed (`loadtest/tools`); compose environments |
 | `build` | Dockerfiles for the edge, admin and load-test images |
@@ -98,7 +101,7 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
 
 **Edge: 100% statement coverage, enforced in CI.**
 
-- **Scope:** every package except the admin-only list (`cmd/admin`, `internal/admin`, `internal/admindb`, `loadtest`, `web/admin`) and the test tooling in `internal/testenv` (testcontainers helpers), defined in `scripts/ci/test.sh`. This includes the shared `expr`, `snapshot`, `ratelimit` and `jwks` packages.
+- **Scope:** every package except the admin-only list (`cmd/admin`, `internal/admin`, `internal/admindb`, `loadtest`, `web/admin`) and the test tooling in `internal/testenv` (testcontainers helpers), defined in `scripts/ci/test.sh`. This includes the shared `expr`, `snapshot`, `ratelimit`, `jwks` and `tracing` packages.
 - **CI fails if `cmd/edge` imports an admin-only or test-tooling package.**
 - **Merged from:**
   - unit and integration tests (`-coverpkg=<edge package list>`)

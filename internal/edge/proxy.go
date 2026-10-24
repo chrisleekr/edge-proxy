@@ -154,6 +154,7 @@ func (e *Edge) rewrite(pr *httputil.ProxyRequest, st *reqState) {
 	v.set(h, "X-Forwarded-Host", pr.In.Host)
 	v.set(h, "X-Request-Id", st.requestID)
 	v.set(h, "X-Edge-Client-Ip", ip)
+	injectTrace(st, h)
 	if c := st.client.country; c != "" {
 		v.set(h, "X-Edge-Geo-Country", c)
 	}

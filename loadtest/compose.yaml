@@ -25,7 +25,7 @@ x-edge: &edge
     seed: { condition: service_completed_successfully }
     valkey: { condition: service_healthy }
   volumes: [shared:/shared:ro]
-  # Room for DRAIN_DELAY plus SHUTDOWN_TIMEOUT before Docker kills it.
+  # Room for DRAIN_DELAY, SHUTDOWN_TIMEOUT and TRACE_SHUTDOWN_TIMEOUT before Docker kills it.
   stop_grace_period: 45s
 
 x-edge-env: &edge-env
@@ -48,6 +48,9 @@ x-edge-env: &edge-env
   # Unsampled logs at load-test rates would measure the log pipe.
   LOG_SAMPLE_RATE: "0.01"
   STATS_INTERVAL: 5s
+  # Tracing on at the default rate, so load tests measure its cost. The
+  # edges don't depend on the collector: they must start and serve without it.
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://collector:4318/v1/traces
 
 networks:
   default:
@@ -90,7 +93,24 @@ configs:
           batch: { max_bytes: 1000000, timeout_secs: 5 }
           buffer: { type: memory, max_events: 10000, when_full: drop_newest }
 
+  collector:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            http: { endpoint: 0.0.0.0:4318 }
+      exporters:
+        debug: { verbosity: basic }
+      service:
+        pipelines:
+          traces: { receivers: [otlp], exporters: [debug] }
+
 services:
+  # Receives the edges' spans and counts them; nothing is stored.
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.163.1@sha256:1175b03003053962012f5a231f5567f66a3e8fdb960c7835c0e48f7aa1555806
+    configs: [{ source: collector, target: /etc/otelcol-contrib/config.yaml }]
+
   postgres:
     image: edge-proxy/postgres:dev
     build:

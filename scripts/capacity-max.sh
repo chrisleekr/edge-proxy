@@ -53,7 +53,7 @@ if [ "${mem}" -lt $((14 * 1024 * 1024 * 1024)) ]; then
 fi
 
 compose --profile k6 build --quiet
-compose up -d --wait edge-1 catalog orders account content delay-valkey delay-catalog delay-orders delay-account delay-content >/dev/null 2>&1 ||
+compose up -d --wait collector edge-1 catalog orders account content delay-valkey delay-catalog delay-orders delay-account delay-content >/dev/null 2>&1 ||
   { echo "compose up failed; see loadtest/results/capacity-compose.log" >&2; exit 1; }
 k6() { compose run --rm --no-deps k6 run --quiet -e IPS="${IPS}" "$@" /scripts/capacity-max.js; }
 vk() { compose exec -T valkey valkey-cli "$@" | tr -d '\r'; }

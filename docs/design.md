@@ -82,10 +82,11 @@ internal/snapshot/   config types, strict decode, Compile() (validates and compi
 internal/ratelimit/  algorithms (Lua + local), backstop, penalty cache. Shared
 internal/jwks/       JWKS fetch/parse, SSRF guard. Shared
 internal/envparse/   deployment config from env vars. Shared
+internal/tracing/    OpenTelemetry tracer provider: OTLP/HTTP export, capped sampler, export counters
 internal/edge/       wiring, http.Server, shutdown, and the request pipeline: clientip, viewer, cors, jwt, locale, headers, respond, proxy, stats
 internal/admin/      admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, guard, observed routes, first-start bootstrap
 internal/admindb/    Postgres queries, migrations, audit log
-internal/testenv/    testcontainers helpers and the Playwright browser server, for tests
+internal/testenv/    testcontainers helpers (Valkey, Postgres, OpenTelemetry Collector) and the Playwright browser server, for tests
 web/admin/           admin UI: React + Vite + TypeScript + Tailwind, embedded into the admin binary
 loadtest/            k6 scripts, mock upstream, IdP, LB, gateway, services and stream holder, compose environment
 build/               Dockerfiles for the edge, admin and load-test images
@@ -504,11 +505,11 @@ The operations, placeholders and reserved headers are listed in [Header rules](u
 - **Order:**
   1. Forward filter.
   2. Rule operations, in rule order.
-  3. **Edge-managed headers last**, which no rule can override: `X-Forwarded-*`, `X-Edge-Client-IP`, `X-Edge-Geo-*`, `X-Edge-Auth-*`, `X-Edge-Locale`, `X-Request-Id`.
+  3. **Edge-managed headers last**, which no rule can override: `X-Forwarded-*`, `X-Edge-Client-IP`, `X-Edge-Geo-*`, `X-Edge-Auth-*`, `X-Edge-Locale`, `X-Request-Id`, and `traceparent`/`tracestate` when tracing is on.
 - **Reserved headers are never targetable,** because the edge or the transport owns them.
   - **Nor readable,** on every path that names a header: ops, header placeholders, `header:<n>` rate-limit keys and `http.request.headers["<n>"]` in expressions. A client can forge `X-Edge-*` before the edge replaces it (forging `X-Edge-Auth-Sub` into an upstream header would bypass authorization), and source headers can carry the ingress secret. The edge also strips client `X-Edge-*` and source headers from the forwarded request at step 9, before the header rules run.
 - **Warnings:** an allowlist that drops `Authorization`, `Cookie` or `Content-Type`; a copy or rename whose source any forward filter can drop.
-- **Config tests** see `upstream_headers` from the same step 9 code as live traffic (`Simulate`), including the strip of client `X-Edge-*` and source headers, without the deployment-dependent forwarding headers (`X-Forwarded-*`, `X-Edge-Client-IP`, `X-Request-Id`).
+- **Config tests** see `upstream_headers` from the same step 9 code as live traffic (`Simulate`), including the strip of client `X-Edge-*` and source headers, without the deployment-dependent forwarding headers (`X-Forwarded-*`, `X-Edge-Client-IP`, `X-Request-Id`, and the trace context the edge sets when tracing is on).
 
 ## 8. Locale from `Accept-Language`
 
@@ -614,13 +615,14 @@ responses:
 
 **Request ID:**
 - `X-Request-Id` is accepted only from trusted peers and only if it matches `^[A-Za-z0-9._-]{1,128}$`; otherwise the edge generates one. Response templates embed it in JSON and HTML, so any other character could inject markup or break the JSON.
-- `traceparent` passes through untouched.
+- **Trace context:** with tracing off, `traceparent` and `tracestate` pass through untouched. With it on, the edge takes part in the trace ([§15.4](#154-traces)): it joins the caller's [W3C Trace Context](https://www.w3.org/TR/trace-context/) trace from any peer and replaces both headers with its own span's context. No forward filter drops them, so a trace ID the client sends survives the edge either way.
 
 **Shutdown on SIGTERM:**
 1. Fail `/readyz`.
 2. Wait `DRAIN_DELAY`.
 3. `Shutdown` with `SHUTDOWN_TIMEOUT`.
 4. Cancel the base context, which closes hijacked connections and streams.
+5. With tracing on, wait for the handlers that step 4 ended to record their spans, then flush, all within `TRACE_SHUTDOWN_TIMEOUT`.
 
 Clients must reconnect streams.
 
@@ -1097,6 +1099,7 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 | IdP | Current keys | Keys from snapshot; never obtained → pass |
 | Stats ingest | Report dropped | n/a |
 | Upstream | 502/504 template | n/a |
+| Trace collector | Spans dropped when the queue is full; requests unaffected | n/a |
 
 ### 14.2 Rules
 
@@ -1168,6 +1171,21 @@ Routes are built from the access lines the edges already write, so the edge does
 - **Coverage:** lines served under a policy version, divided by the requests the edges reported in `edge_stats_minute`. It falls below 100% when lines are dropped, or when edges sample without saying their rate.
 - **What applies to a route:** admin runs the edge's `Simulate` on a sample of the route, with placeholders filled and the most common query shape. Each rule is then classed as always, never or depends. Conditions on host, method and path are compiled by `internal/expr` and run against several sample paths, including ones built from the condition's own values; a regex on a path with placeholders is unknown. Agreement across samples is evidence, not proof. Conditions on any other field are unknown and named by their label. `and`, `or` and `not` combine these with three-valued logic.
 - **Retention:** route hours are kept 30 days, and routes with no hours left are dropped, by the leader's daily job. Deleting a route, or all routes, is audited; new traffic collects them again.
+
+### 15.4 Traces
+
+Off unless `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (or the base `OTEL_EXPORTER_OTLP_ENDPOINT`) is set. Edge and admin share `internal/tracing`: the OpenTelemetry Go SDK, OTLP/HTTP export and the sampler below.
+
+- **Why the SDK:** OTLP export, W3C propagation and batching are protocol code the OpenTelemetry project maintains; written here they would be several hundred lines to own. The exporter pulls in gRPC even over HTTP, and gRPC's `golang.org/x/net/trace` imports `html/template`, whose `reflect` method lookups stop the linker from dropping unused methods anywhere in the binary. Every build therefore uses `-tags grpcnotrace` (gRPC's own build tag), which keeps the edge about 3 MB larger instead of 16 MB; `make container` fails an image built without it.
+- **Spans:** one server span per request that is not shed at step 1, including requests rejected at step 2, named by the method (`HTTP` for a non-standard one, since clients choose methods), with the access log's fields; and a `valkey ratelimit` client span around the one Valkey round trip. Shed requests (step 1) get none, so shedding stays the cheapest path. A span starts at the request's start time, so its duration matches `duration_ms`.
+- **Trust:** the trace context is extracted from every peer, including one that fails identification, whose rejected request is recorded in the caller's trace. Trace context only correlates; nothing in the edge trusts it. A client therefore chooses its trace ID and sampled flag, and only the cap below bounds what that can force.
+- **Sampling:** `ParentBased(TraceIDRatioBased(TRACE_SAMPLE_RATE))`, wrapped in a per-replica cap of `TRACE_MAX_PER_SECOND` trace starts per second, counted separately for traces the edge starts and traces joined from callers, so forged flags can't starve the edge's own sampling. The ratio sampler decides from the trace ID's bits and parent-based sampling follows the caller's flag, and a client controls both, so only the cap bounds what it can force. A client can also keep its own requests out of traces with the flag off; the access log still has them. Child spans follow their parent and are not counted, so a sampled request keeps all its spans. A capped trace is forwarded with the sampled flag off.
+- **Headers:** `traceparent` and `tracestate` are not reserved. A rule that writes them or a forward filter that names them gets a warning rather than an error, so a snapshot that already did still loads. Forward filters always keep them, and when tracing is on the edge replaces them, so a rule's value never arrives. The edge propagates context even for unsampled requests, and logs `trace_id` and `span_id` on every access line, so logs on both sides of the edge join up.
+- **Bounded:** the batch processor's queue (2048 spans) drops when full and never blocks; attribute values are cut at 512 characters (the SDK default is unlimited, and a path can be as long as `MAX_HEADER_BYTES`).
+- **Failure:** OTel reports errors through process-wide hooks that print plain text to stderr; both are routed to the JSON log. Errors are logged at most once a minute (`opentelemetry error`), and the edge counts failed exports in `edge_trace_export_errors_total`; admin has no metrics, so it has only the log line. OTel warnings are below the log's Info level and are dropped, so the SDK's own `OTEL_*` variables (TLS, compression, queue sizes) silently fall back to their defaults when malformed. The header variables are checked at startup instead, because the exporter would log a malformed one with its value, usually the collector credential.
+- **Shutdown:** `http.Server` waits for neither hijacked connections nor, after its timeout, active handlers, so after cancelling the base context the edge waits for in-flight handlers (an atomic count, decremented after the access log and span are written) and then flushes. Both share `TRACE_SHUTDOWN_TIMEOUT`, apart from `SHUTDOWN_TIMEOUT`, which `http.Server.Shutdown` can use up.
+- **Admin:** `otelhttp` wraps the handler and traces `/api/` only: `/v1/` is edge and log-shipper traffic every few seconds, and `/` serves files. A `pgx` query tracer in `internal/admindb` adds a span per query, only under a request span, so background jobs start no traces; it records the statement with its placeholders and never arguments or error messages, and a failed query's span has error status only. Edge traffic uses its own, untraced pool. Unlike the edge, only a trusted proxy (`ADMIN_TRUSTED_PROXIES`) joins a caller's trace; otherwise the caller's context is kept as a link. The span's `client.address` is the trusted client IP audit uses, set over otelhttp's, which takes the leftmost `X-Forwarded-For` entry from any peer, and `http.route` is set after the mux matches, since otelhttp reads the pattern before routing.
+- **Cost:** 9 more allocations per unsampled request and 16 per sampled one, held by `TestTracedRequestAllocations`. Sampled requests are capped per second, so their cost doesn't grow with traffic.
 
 ## 16. Capacity inputs
 

@@ -10,6 +10,20 @@ docker build -q -f build/edge.Dockerfile -t edge-proxy/edge:dev .
 docker build -q -f build/admin.Dockerfile -t edge-proxy/admin:dev .
 docker build -q -f build/tools.Dockerfile -t edge-proxy/tools:dev .
 
+# Without -tags grpcnotrace each binary silently grows by about 13 MB. The
+# build info is plain text in the binary, so grep finds the tag without Go.
+bins="$(mktemp -d)"
+for name in edge admin tools; do
+  c="$(docker create "edge-proxy/${name}:dev")"
+  docker cp -q "${c}:/${name}" "${bins}/${name}"
+  docker rm "${c}" >/dev/null
+  if ! grep -aq 'tags=grpcnotrace' "${bins}/${name}"; then
+    echo "${name} image was built without -tags grpcnotrace" >&2
+    exit 1
+  fi
+done
+rm -rf "${bins}"
+
 id="edge-smoke-$$"
 cleanup() { docker rm -f "${id}" >/dev/null 2>&1 || true; docker volume rm "${id}" >/dev/null 2>&1 || true; docker network rm "${id}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT

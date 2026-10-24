@@ -81,7 +81,7 @@ infra-down:
 # address, so the demo trusts any peer; the port is bound to 127.0.0.1.
 # Never do this in a deployment.
 demo:
-	cd loadtest && export TRUSTED_PROXIES=0.0.0.0/0,::/0 SEED_POLICY=demo VALKEY_TIMEOUT=$${VALKEY_TIMEOUT:-150ms} && docker compose -p edge-demo build && docker compose -p edge-demo up -d --wait edge-1 upstream log-shipper
+	cd loadtest && export TRUSTED_PROXIES=0.0.0.0/0,::/0 SEED_POLICY=demo VALKEY_TIMEOUT=$${VALKEY_TIMEOUT:-150ms} && docker compose -p edge-demo build && docker compose -p edge-demo up -d --wait collector edge-1 upstream log-shipper
 
 # Send traffic to the running demo until Ctrl+C; watch it on the dashboard.
 # It exercises every rule, template, CORS policy and issuer in the demo

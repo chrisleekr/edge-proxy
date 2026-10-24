@@ -22,7 +22,7 @@ compose() { docker compose -p "${project}" "$@"; }
 trap 'compose --profile k6 down -v >/dev/null 2>&1' EXIT
 
 compose --profile k6 build --quiet
-compose up -d --wait edge-1 upstream >/dev/null 2>&1
+compose up -d --wait collector edge-1 upstream >/dev/null 2>&1
 k6() { compose run --rm --no-deps k6 run --quiet -e BUDGET_MS="${BUDGET_MS}" -e IPS="${IPS}" "$@" /scripts/scenario.js; }
 vk() { compose exec -T valkey valkey-cli "$@" | tr -d '\r'; }
 evalsha() { vk INFO commandstats | sed -n 's/^cmdstat_evalsha:calls=\([0-9]*\),.*/\1/p'; }

@@ -38,7 +38,7 @@ func TestEdgeRunsOnAdmin(t *testing.T) {
 	inL, _ := net.Listen("tcp", "127.0.0.1:0")
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- edge.New(cfg, slog.New(slog.DiscardHandler)).Run(ctx, pubL, inL) }()
+	go func() { done <- edge.New(cfg, slog.New(slog.DiscardHandler), nil).Run(ctx, pubL, inL) }()
 	t.Cleanup(func() { cancel(); <-done })
 	waitFor(t, func() bool {
 		resp, err := http.Get("http://" + inL.Addr().String() + "/readyz")
