@@ -59,6 +59,7 @@ The edge always removes client-sent copies of the headers it manages, then sets 
 | `X-Forwarded-Proto` | From the trusted viewer `ssl` header; `http` when none is configured |
 | `X-Forwarded-Host` | The request's `Host` |
 | `X-Request-Id` | Reused only from a trusted proxy, otherwise generated |
+| `traceparent`, `tracestate` | With [tracing](../operate/monitoring.md#traces) on: the edge's span, in a trusted proxy's trace or a new one. With tracing off, passed through as received |
 | `X-Edge-Client-IP`, `X-Edge-Geo-Country`, `X-Edge-Geo-Continent`, `X-Edge-Geo-Asn` | From the trusted client-IP and viewer headers |
 | `X-Edge-Auth-Issuer`, `X-Edge-Auth-Sub` | Only after a token verified |
 | Locale header (named in settings, `X-Edge-...`) | When locale is on for the route |
@@ -97,7 +98,7 @@ A `value` is at most 4096 bytes with no control characters, and can hold placeho
 
 Control characters are removed from header and claim values.
 
-**Reserved headers** can be neither written nor read by any rule: not by an op, a `{{header:<name>}}` placeholder, a `header:<name>` rate-limit key or `http.request.headers["<name>"]` in an expression. Validation rejects them. They are `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `Te`, `Trailer`, `Upgrade`, `Forwarded`, `X-Request-Id`, every `X-Edge-*` and `X-Forwarded-*` header, and the deployment's client-IP, viewer and ingress-secret source headers. A client can forge an `X-Edge-*` header before the edge replaces it, and a source header can carry the ingress secret. An allowlist never drops the named ones, from `Host` to `X-Request-Id`, so it can't break WebSockets or trailers.
+**Reserved headers** can be neither written nor read by any rule: not by an op, a `{{header:<name>}}` placeholder, a `header:<name>` rate-limit key or `http.request.headers["<name>"]` in an expression. Validation rejects them. They are `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `Te`, `Trailer`, `Upgrade`, `Forwarded`, `X-Request-Id`, `traceparent`, `tracestate`, every `X-Edge-*` and `X-Forwarded-*` header, and the deployment's client-IP, viewer and ingress-secret source headers. A client can forge an `X-Edge-*` header before the edge replaces it, and a source header can carry the ingress secret. An allowlist never drops the named ones, from `Host` to `tracestate`, so it can't break WebSockets or trailers.
 
 ## CORS
 

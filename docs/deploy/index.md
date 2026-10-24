@@ -131,9 +131,9 @@ Ports: `:8080` for traffic, `:9090` for `/livez`, `/readyz` and `/metrics`. Neve
 | Readiness / target health check | `GET :9090/readyz`. It is 200 once a policy is loaded and the edge isn't draining. It never reflects Valkey, admin or IdP health, so an outage of those can't take edges out of rotation |
 | Liveness | `GET :9090/livez` |
 | Idle timeout | Below the edge's `IDLE_TIMEOUT` (75s) |
-| Termination grace period | More than `DRAIN_DELAY` + `SHUTDOWN_TIMEOUT` (10s + 30s by default) |
+| Termination grace period | More than `DRAIN_DELAY` + `SHUTDOWN_TIMEOUT` (10s + 30s by default), plus `TRACE_SHUTDOWN_TIMEOUT` (5s) with tracing on |
 
-On SIGTERM the edge fails `/readyz`, waits `DRAIN_DELAY` for the load balancer to notice, then finishes in-flight requests for up to `SHUTDOWN_TIMEOUT`.
+On SIGTERM the edge fails `/readyz`, waits `DRAIN_DELAY` for the load balancer to notice, then finishes in-flight requests for up to `SHUTDOWN_TIMEOUT`. With tracing on, it then flushes buffered spans for up to `TRACE_SHUTDOWN_TIMEOUT`.
 
 ### 8. Ship edge access logs to admin (optional)
 
@@ -165,7 +165,7 @@ CloudFront → internal ALB → edge tasks → `UPSTREAM_URL`, with AWS WAF on C
 - `CLIENT_IP_SOURCE=cloudfront` and `TRUSTED_PROXIES` set to the ALB's subnets: the ALB, not CloudFront, is the edge's TCP peer.
 - CloudFront sends `CloudFront-Viewer-Address` and the other viewer headers only when an [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html) includes them. `CloudFront-Viewer-Address` and `CloudFront-Viewer-ASN` can't go in a cache policy. Without `CloudFront-Viewer-Address`, the edge answers every request with 400.
 - The ALB's [idle timeout defaults to 60 seconds](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html#connection-idle-timeout), below the edge's `IDLE_TIMEOUT` of 75 seconds. Keep it below.
-- On Fargate, a container's [`stopTimeout`](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html) defaults to 30 seconds, at most 120. The edge's defaults need 40 (`DRAIN_DELAY` 10s + `SHUTDOWN_TIMEOUT` 30s), so set `stopTimeout` above that, such as 45, or lower the two settings to fit.
+- On Fargate, a container's [`stopTimeout`](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html) defaults to 30 seconds, at most 120. The edge's defaults need 40 (`DRAIN_DELAY` 10s + `SHUTDOWN_TIMEOUT` 30s), or 45 with tracing on (`TRACE_SHUTDOWN_TIMEOUT` 5s), so set `stopTimeout` above that, such as 50, or lower the settings to fit.
 - ElastiCache for Valkey in cluster mode already defaults [`cluster-require-full-coverage` to `no`](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/ParameterGroups.Engine.html).
 
 ### Cloudflare

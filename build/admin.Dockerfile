@@ -18,7 +18,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 COPY web/admin/ui.go ./web/admin/
 COPY --from=ui /ui/dist ./web/admin/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/admin ./cmd/admin
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags grpcnotrace -trimpath -ldflags="-s -w" -o /out/admin ./cmd/admin
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:516757106de35205efb70b91ba03f6f1298424a0678c603255cf2852a7000087
 COPY --from=build /out/admin /admin

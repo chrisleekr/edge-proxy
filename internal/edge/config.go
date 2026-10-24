@@ -20,6 +20,7 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/envparse"
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 // Config is the deployment config, read once from the environment. Admin
@@ -75,6 +76,8 @@ type Config struct {
 	AllowRegex    bool
 	LogSampleRate float64
 	Instance      string
+
+	Tracing tracing.Config
 }
 
 // ClientIPSource says where the client IP comes from.
@@ -145,6 +148,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		Instance:         p.Str("INSTANCE", host),
 		JWKSAllowedHosts: p.List("JWKS_ALLOWED_HOSTS"),
 		TokenCacheSize:   p.Integer("TOKEN_CACHE_SIZE", 10_000),
+		Tracing:          tracing.Load(&p.Parser, "edge-proxy"),
 	}
 	p.clientIP(c)
 	p.trustedProxies(c)

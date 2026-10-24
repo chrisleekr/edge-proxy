@@ -24,10 +24,17 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/chrisleekr/edge-proxy/internal/admindb"
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/jwks"
 	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 // sessionCookie uses the __Host- prefix: Secure, Path=/ and no Domain, so
@@ -62,6 +69,8 @@ type Server struct {
 	log    *slog.Logger
 	now    func() time.Time
 	mux    *http.ServeMux
+	// tracing is nil when tracing is off.
+	tracing *tracing.Provider
 
 	// Login throttles.
 	pairLimit, userLimit, ipLimit, overflow *ratelimit.Local[string]
@@ -105,7 +114,36 @@ func NewServer(cfg *Config, db *pgxpool.Pool, log *slog.Logger) *Server {
 
 // Handler rejects cross-origin browser writes (CSRF) with the stdlib check,
 // which reads Sec-Fetch-Site and Origin.
-func (s *Server) Handler() http.Handler { return http.NewCrossOriginProtection().Handler(s.mux) }
+func (s *Server) Handler() http.Handler {
+	h := http.NewCrossOriginProtection().Handler(s.mux)
+	if s.tracing == nil {
+		return h
+	}
+	// otelhttp takes client.address from the client-written leftmost
+	// X-Forwarded-For entry, and reads the route before the mux sets it:
+	// both are set here, from the values audit and throttling use.
+	traced := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		span := trace.SpanFromContext(r.Context())
+		span.SetAttributes(attribute.String("client.address", s.peer(r)))
+		h.ServeHTTP(w, r)
+		if _, route, ok := strings.Cut(r.Pattern, " "); ok {
+			span.SetAttributes(attribute.String("http.route", route))
+		}
+	})
+	// Only the API people use is traced: /v1/ is edge and log-shipper
+	// traffic every few seconds, and / serves the UI's files.
+	return otelhttp.NewHandler(traced, "admin",
+		otelhttp.WithTracerProvider(s.tracing.TracerProvider()),
+		otelhttp.WithPropagators(propagation.TraceContext{}),
+		otelhttp.WithFilter(func(r *http.Request) bool { return strings.HasPrefix(r.URL.Path, "/api/") }),
+		// As on the edge, only a trusted proxy's trace is joined; anyone
+		// else's becomes a link on a new trace.
+		otelhttp.WithPublicEndpointFn(func(r *http.Request) bool {
+			ap, err := netip.ParseAddrPort(r.RemoteAddr)
+			return err != nil || !s.trusted(ap.Addr().Unmap())
+		}),
+	)
+}
 
 // principal is who a request acts as.
 type principal struct {

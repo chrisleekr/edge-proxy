@@ -12,7 +12,7 @@ trap 'compose logs --no-color > results/compose.log 2>&1 || true; compose down -
 mkdir -p results
 
 compose --profile k6 build
-compose up -d --wait upstream edge-1 edge-2 edge-3
+compose up -d --wait collector upstream edge-1 edge-2 edge-3
 compose run --rm --no-deps -e RATE="${RATE:-300}" k6 run --quiet /scripts/smoke.js
 
 # Valkey goes away 15s into the run and returns 20s later; rules fail open

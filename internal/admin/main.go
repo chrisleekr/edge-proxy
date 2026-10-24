@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/chrisleekr/edge-proxy/internal/admindb"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 // Main runs one admin command and returns the process exit code.
@@ -74,7 +75,18 @@ func serve(ctx context.Context, ui fs.FS, getenv func(string) string, log *slog.
 		return err
 	}
 	cfg.UI = ui
-	db, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	tp, err := tracing.New(cfg.Tracing, cfg.Replica, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Tracing.ShutdownTimeout)
+		defer cancel()
+		if err := tp.Shutdown(fctx); err != nil {
+			log.Warn("trace flush incomplete", "error", err.Error())
+		}
+	}()
+	db, err := openPool(ctx, cfg.DatabaseURL, tp)
 	if err != nil {
 		return fmt.Errorf("database: %w", noURL(err))
 	}
@@ -98,11 +110,25 @@ func serve(ctx context.Context, ui fs.FS, getenv func(string) string, log *slog.
 	log.Info("admin listening", "addr", l.Addr().String())
 	s := NewServer(cfg, db, log)
 	s.edgeDB = edgeDB
+	s.tracing = tp
 	if err := bootstrap(ctx, db, s, log); err != nil {
 		_ = l.Close()
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	return s.Serve(ctx, l)
+}
+
+// openPool opens the pool admin requests use. With tracing on, each query
+// of a traced request gets a span; edge traffic has its own, untraced pool.
+func openPool(ctx context.Context, url string, tp *tracing.Provider) (*pgxpool.Pool, error) {
+	c, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	if tp != nil {
+		c.ConnConfig.Tracer = admindb.QueryTracer{Tracer: tp.Tracer("github.com/chrisleekr/edge-proxy/internal/admindb")}
+	}
+	return pgxpool.NewWithConfig(ctx, c)
 }
 
 // edgePoolConns sizes the pool kept for edge traffic.

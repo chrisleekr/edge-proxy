@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -15,11 +16,13 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // kind is an edge-generated response kind.
@@ -131,7 +134,11 @@ type Edge struct {
 	tokens    *tokenCache
 	pool      *bufferPool
 	rp        *httputil.ReverseProxy
-	now       func() time.Time
+	tracer    trace.Tracer // nil when tracing is off
+	// active counts handlers that have not finished, so shutdown can wait
+	// for stream spans to end before the last flush.
+	active atomic.Int64
+	now    func() time.Time
 	// strip are the canonical source headers removed before forwarding.
 	strip []string
 }
@@ -169,9 +176,16 @@ type reqState struct {
 	// Set by proxy for the shared ReverseProxy's hooks.
 	ctx     stateCtx
 	upTimer *time.Timer
+
+	// The server span, nil when tracing is off, and the context that
+	// carries it to child spans and the upstream.
+	span trace.Span
+	tctx context.Context
 }
 
 func (e *Edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	e.active.Add(1)
+	defer e.active.Add(-1) // deferred first, so it runs after finish
 	st := &reqState{start: e.now()}
 	st.sw.ResponseWriter = w
 	defer e.finish(st, r)
@@ -198,6 +212,9 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	cl, err := e.id.identify(r)
 	st.client = cl
 	st.requestID = requestID(r, cl.trusted)
+	// A peer that failed identification (a wrong ingress secret) is
+	// still traced, but never joins the trace it claims.
+	e.startSpan(st, r, cl.trusted && err == nil)
 	if err != nil {
 		e.reject(st, kBadRequest, identifyReason(err))
 		return
@@ -440,7 +457,9 @@ func (e *Edge) finish(st *reqState, r *http.Request) {
 		}
 		st.ver.stats.observe(status, st.upstream, lat)
 	}
-	e.alog.write(st, r, elapsed)
+	decision := decisionOf(st)
+	endSpan(st, r, decision)
+	e.alog.write(st, r, elapsed, decision)
 }
 
 // statusWriter records the status for logs and stats. Every writer in this

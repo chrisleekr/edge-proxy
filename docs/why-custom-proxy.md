@@ -94,7 +94,7 @@ The UI also shows what is happening. **Stats** shows how many requests each rule
 ## What Edge Proxy gives up
 
 - You patch it yourself, including Go security releases.
-- There is no distributed tracing, only access logs and Prometheus metrics ([monitoring](operate/monitoring.md)).
+- Observability is access logs, Prometheus metrics and OpenTelemetry traces of the edge's own work ([monitoring](operate/monitoring.md)); there are no dashboards or APM integrations built in.
 - HTTP/3, HTTPS to clients, retries and routing are left to the CDN and the load balancer.
 - There are no third-party plugins.
 

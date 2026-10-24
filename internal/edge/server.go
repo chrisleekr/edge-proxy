@@ -15,6 +15,7 @@ import (
 
 	"github.com/chrisleekr/edge-proxy/internal/jwks"
 	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 // sweepEvery is how often expired rate-limit state is dropped. Tests shorten it.
@@ -39,8 +40,9 @@ type Server struct {
 }
 
 // New wires a replica from deployment config. Nothing starts until Run.
-func New(cfg *Config, log *slog.Logger) *Server {
-	m := &metrics{}
+// tp is nil when tracing is off.
+func New(cfg *Config, log *slog.Logger, tp *tracing.Provider) *Server {
+	m := &metrics{tracing: tp}
 	st := &store{}
 	reg := newStatsRegistry()
 	alog := newAccessLog(log, m, cfg.LogSampleRate, 4096)
@@ -51,6 +53,7 @@ func New(cfg *Config, log *slog.Logger) *Server {
 			cfg: cfg, id: newIdentity(cfg), store: st, m: m, alog: alog, log: log,
 			pool: newBufferPool(), now: time.Now, strip: sourceHeaders(cfg.Deployment()),
 			penalties: ratelimit.NewPenalties(maxPenalties), tokens: newTokenCache(cfg.TokenCacheSize),
+			tracer: tp.Tracer("github.com/chrisleekr/edge-proxy/internal/edge"),
 		},
 	}
 	s.edge.rp = s.edge.newReverseProxy()
@@ -143,8 +146,25 @@ func (s *Server) Run(ctx context.Context, public, internal net.Listener) error {
 	cancelBase()
 	_ = pub.Close()
 	_ = in.Close()
+	if s.m.tracing != nil {
+		s.flushTraces()
+	}
 	s.log.Info("stopped")
 	return runErr
+}
+
+// flushTraces exports buffered spans once the handlers that cancelBase
+// ended have recorded theirs: http.Server waits for neither hijacked nor,
+// after its timeout, active handlers. Waiting and flushing share one bound.
+func (s *Server) flushTraces() {
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Tracing.ShutdownTimeout)
+	defer cancel()
+	for s.edge.active.Load() > 0 && ctx.Err() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := s.m.tracing.Shutdown(ctx); err != nil {
+		s.log.Warn("trace flush incomplete", "error", err.Error())
+	}
 }
 
 // sweep drops expired rate-limit state off the request path.
@@ -204,6 +224,11 @@ func Main(ctx context.Context, getenv func(string) string, out io.Writer) int {
 		log.Error("invalid deployment config", "error", err.Error())
 		return 2
 	}
+	tp, err := tracing.New(cfg.Tracing, cfg.Instance, log)
+	if err != nil {
+		log.Error("invalid deployment config", "error", err.Error())
+		return 2
+	}
 	pub, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		log.Error("listen failed", "addr", cfg.ListenAddr, "error", err.Error())
@@ -217,7 +242,7 @@ func Main(ctx context.Context, getenv func(string) string, out io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	return exitCode(New(cfg, log).Run(ctx, pub, in))
+	return exitCode(New(cfg, log, tp).Run(ctx, pub, in))
 }
 
 // exitCode is non-zero when Run stopped because a listener failed, so the

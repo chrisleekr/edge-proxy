@@ -82,3 +82,19 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 | `LOG_SAMPLE_RATE` | `1` | Share of allowed, non-5xx requests to log (0 to 1). Rejections and 5xx are always logged |
 
 Per-route body limits and upstream timeouts are policy, not deployment settings; see [Policy](../use/policy.md#settings).
+
+## Tracing
+
+Off unless an endpoint is set. When on, the edge joins the trace of a trusted proxy's request, records one span per request that isn't shed for overload, and passes its own span to the upstream in `traceparent`. See [Monitoring](../operate/monitoring.md#traces).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset (off) | Full OTLP/HTTP traces URL, such as `http://collector:4318/v1/traces` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base OTLP/HTTP URL; `/v1/traces` is appended. Used when the traces endpoint is unset |
+| `OTEL_SERVICE_NAME` | `edge-proxy` | `service.name` on every span. `service.instance.id` is `INSTANCE` |
+| `TRACE_SAMPLE_RATE` | `0.01` | Share of new traces to sample (0 to 1). A trusted caller's sampling decision is followed |
+| `TRACE_MAX_PER_SECOND` | `100` | Most traces one replica starts and samples per second, and separately the most it samples per second from callers' traces. Callers choose their trace IDs and sampled flag, so only this cap bounds the export volume a client can force, and a flood of forged flags can't use up the edge's own budget |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | none | Headers for the collector, such as credentials: `key=value` pairs separated by commas, values percent-encoded. A malformed value fails startup without being logged, because the exporter would log it |
+| `TRACE_SHUTDOWN_TIMEOUT` | `5s` | At shutdown, after `SHUTDOWN_TIMEOUT`: how long to wait for open streams to record their spans and then flush, together |
+
+The exporter also reads the other standard variables it supports, such as `OTEL_EXPORTER_OTLP_CERTIFICATE` for a private CA and `OTEL_EXPORTER_OTLP_COMPRESSION`, and the batch processor reads `OTEL_BSP_*` ([OpenTelemetry environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/), [OTLP exporter settings](https://opentelemetry.io/docs/specs/otel/protocol/exporter/)). The SDK checks those itself: a malformed value is ignored without a log line and the default is used. A plain `http` endpoint with a certificate set does fail startup.

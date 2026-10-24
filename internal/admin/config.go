@@ -17,11 +17,13 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/edge"
 	"github.com/chrisleekr/edge-proxy/internal/envparse"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 // Config is admin's deployment config.
 type Config struct {
 	ListenAddr  string
+	Tracing     tracing.Config
 	DatabaseURL string // the runtime role
 	Audit       admindb.AuditKeys
 	// Deployment is the edges' deployment, read from the same variables.
@@ -74,6 +76,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		TrustedProxies:   p.Prefixes("ADMIN_TRUSTED_PROXIES"),
 		BootstrapUser:    strings.ToLower(getenv("BOOTSTRAP_ADMIN_USERNAME")),
 		BootstrapPublish: p.Bool("BOOTSTRAP_PUBLISH_DEFAULT"),
+		Tracing:          tracing.Load(p, "edge-proxy-admin"),
 	}
 	if c.Replica == "" {
 		c.Replica, _ = os.Hostname()

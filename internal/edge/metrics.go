@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"sync/atomic"
+
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 // reason is why the edge answered a request itself instead of proxying it.
@@ -43,6 +45,9 @@ var reasonNames = [numReasons]string{
 // metrics are process-wide counters, exposed on /metrics in Prometheus text
 // format. All updates are atomic adds.
 type metrics struct {
+	// tracing is nil when tracing is off; its counters then read 0.
+	tracing *tracing.Provider
+
 	requests [6]atomic.Uint64 // by status class; index 0 is "client left before a response"
 	rejected [numReasons]atomic.Uint64
 
@@ -95,6 +100,8 @@ func (m *metrics) writeTo(w io.Writer) {
 	p("# TYPE edge_ratelimit_local_untracked_total counter\nedge_ratelimit_local_untracked_total %d\n", m.localUntracked.Load())
 	p("# TYPE edge_ratelimit_penalty_cache_hits_total counter\nedge_ratelimit_penalty_cache_hits_total %d\n", m.penaltyHits.Load())
 	p("# TYPE edge_ratelimit_penalty_cache_dropped_total counter\nedge_ratelimit_penalty_cache_dropped_total %d\n", m.penaltyDropped.Load())
+	p("# TYPE edge_trace_export_errors_total counter\nedge_trace_export_errors_total %d\n", m.tracing.ExportErrors())
+	p("# TYPE edge_trace_capped_total counter\nedge_trace_capped_total %d\n", m.tracing.Capped())
 	p("# TYPE edge_valkey_errors_total counter\nedge_valkey_errors_total %d\n", m.valkeyErrors.Load())
 	p("# TYPE edge_valkey_breaker_open_total counter\nedge_valkey_breaker_open_total %d\n", m.valkeyBreakerOpen.Load())
 	p("# TYPE edge_cors_preflight_total counter\nedge_cors_preflight_total{result=\"allowed\"} %d\nedge_cors_preflight_total{result=\"denied\"} %d\n", m.corsPreflight.Load(), m.corsPreflightDenied.Load())

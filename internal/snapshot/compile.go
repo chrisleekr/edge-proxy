@@ -159,6 +159,8 @@ var reserved = map[string]bool{
 	"connection": true, "keep-alive": true, "proxy-connection": true,
 	"proxy-authenticate": true, "proxy-authorization": true, "te": true,
 	"trailer": true, "upgrade": true, "forwarded": true, "x-request-id": true,
+	// The edge sets these when tracing is on; a rule's value would be replaced.
+	"traceparent": true, "tracestate": true,
 }
 
 // Reserved reports a header the edge or the HTTP framing manages, which no

@@ -43,7 +43,7 @@ if [[ -d cmd/edge ]]; then
   e2e="$(mktemp -d)"
   trap 'rm -rf "${e2e}"' EXIT
   mkdir -p "${e2e}/data"
-  go build -cover -covermode=atomic -coverpkg="${coverpkg}" -o "${e2e}/edge" ./cmd/edge
+  go build -tags grpcnotrace -cover -covermode=atomic -coverpkg="${coverpkg}" -o "${e2e}/edge" ./cmd/edge
   EDGE_BIN="${e2e}/edge" GOCOVERDIR="${e2e}/data" go test -count=1 -run '^TestE2E' ./cmd/edge
   go tool covdata textfmt -i="${e2e}/data" -o "${e2e}/e2e.out"
   tail -n +2 "${e2e}/e2e.out" >> cover.out

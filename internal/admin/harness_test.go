@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/jwks"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 	"github.com/chrisleekr/edge-proxy/internal/testenv"
+	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -55,7 +57,12 @@ type harness struct {
 	statsSeq int
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { t.Helper(); return newHarnessWith(t, nil) }
+
+// newHarnessWith adds deployment variables to the base environment, such
+// as the tracing ones, and wires tracing into the server and its pool as
+// serve does. Edge routes share that pool here; serve gives them their own.
+func newHarnessWith(t *testing.T, set map[string]string) *harness {
 	t.Helper()
 	db := testenv.Postgres(t)
 	ctx := t.Context()
@@ -67,17 +74,27 @@ func newHarness(t *testing.T) *harness {
 	if err := admindb.Migrate(ctx, owner, testenv.AppRole); err != nil {
 		t.Fatal(err)
 	}
-	pool, err := pgxpool.New(ctx, db.App)
+	e := baseEnv(db.App)
+	maps.Copy(e, set)
+	cfg, err := LoadConfig(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{t: t, owner: owner, clock: time.Now()}
+	log := slog.New(slog.NewJSONHandler(&h.logs, nil))
+	tp, err := tracing.New(cfg.Tracing, cfg.Replica, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) }) //nolint:usetesting // t.Context is already cancelled when Cleanup runs
+	pool, err := openPool(ctx, db.App, tp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	cfg, err := LoadConfig(env(baseEnv(db.App)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &harness{t: t, db: pool, owner: owner, clock: time.Now()}
-	h.s = NewServer(cfg, pool, slog.New(slog.NewJSONHandler(&h.logs, nil)))
+	h.db = pool
+	h.s = NewServer(cfg, pool, log)
+	h.s.tracing = tp
 	h.s.now = h.now
 	h.srv = httptest.NewTLSServer(h.s.Handler())
 	t.Cleanup(h.srv.Close)

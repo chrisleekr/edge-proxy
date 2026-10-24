@@ -11,6 +11,9 @@ import (
 
 	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // maxRateLimitCalls is the most step 8 checks: every site-wide rule plus the
@@ -86,7 +89,7 @@ func (e *Edge) rateLimit(st *reqState) bool {
 	}
 	if np > 0 {
 		var outs [maxRateLimitCalls]ratelimit.Outcome
-		e.valkeyDo(calls[:np], outs[:np])
+		e.valkeyDo(st, calls[:np], outs[:np])
 		for k := range np {
 			checks[pending[k]].o = outs[k]
 		}
@@ -155,14 +158,30 @@ func (st *reqState) check(v *version, i int) (c rlCheck, ok, rej bool) {
 	return rlCheck{rule: r, idx: i, key: r.Key(sub), fallback: !ok}, true, false
 }
 
-func (e *Edge) valkeyDo(calls []ratelimit.Call, outs []ratelimit.Outcome) {
+func (e *Edge) valkeyDo(st *reqState, calls []ratelimit.Call, outs []ratelimit.Outcome) {
 	if e.valkey == nil {
 		for i := range outs {
 			outs[i].Err = ratelimit.ErrNotConnected
 		}
 		return
 	}
+	if st.span == nil || !st.span.IsRecording() {
+		e.valkey.Do(calls, outs)
+		return
+	}
+	_, sp := e.tracer.Start(st.tctx, "valkey ratelimit", trace.WithSpanKind(trace.SpanKindClient))
 	e.valkey.Do(calls, outs)
+	failed := 0
+	for _, o := range outs {
+		if o.Err != nil {
+			failed++
+		}
+	}
+	sp.SetAttributes(attribute.String("db.system.name", "valkey"), attribute.Int("edge.ratelimit_calls", len(calls)), attribute.Int("edge.ratelimit_failed", failed))
+	if failed > 0 {
+		sp.SetStatus(codes.Error, "")
+	}
+	sp.End()
 }
 
 // decide applies fail modes, shadow mode and penalties, and answers 429 if

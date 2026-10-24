@@ -42,7 +42,8 @@ type SimResult struct {
 	// UpstreamHeaders are the request's headers after the header phase
 	// (step 9): forward filter, header rules and the locale header. The
 	// forwarding headers the edge always sets (X-Forwarded-*,
-	// X-Edge-Client-IP, X-Request-Id) depend on deployment and are left out.
+	// X-Edge-Client-IP, X-Request-Id, and the trace context when tracing
+	// is on) depend on deployment and are left out.
 	UpstreamHeaders http.Header
 }
 

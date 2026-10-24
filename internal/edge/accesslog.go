@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // accessRecord is copied out of the request, so the writer goroutine never
@@ -23,6 +25,8 @@ type accessRecord struct {
 	version                                                                     int64
 	configRules                                                                 []string
 	duration                                                                    time.Duration
+	traceID                                                                     trace.TraceID
+	spanID                                                                      trace.SpanID
 }
 
 // accessLog writes JSON access lines from one goroutine. When
@@ -43,11 +47,15 @@ func newAccessLog(log *slog.Logger, m *metrics, sample float64, size int) *acces
 	return &accessLog{ch: make(chan accessRecord, size), log: log, m: m, sample: sample}
 }
 
-func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration) {
-	decision := "allow"
+// decisionOf names how the edge answered: allow, or the rejection reason.
+func decisionOf(st *reqState) string {
 	if st.rejected {
-		decision = reasonNames[st.reason]
+		return reasonNames[st.reason]
 	}
+	return "allow"
+}
+
+func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, decision string) {
 	// Allowed requests are sampled; rejections and 5xx are always logged.
 	if decision == "allow" && st.sw.status < 500 && logDraw() >= a.sample {
 		return
@@ -59,6 +67,11 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration) 
 		// Parsed for key names by the writer, off the request path. Values
 		// can carry tokens and are never logged.
 		query: r.URL.RawQuery,
+	}
+	if st.span != nil {
+		// Logged sampled or not: the upstream logs the same trace ID.
+		sc := st.span.SpanContext()
+		rec.traceID, rec.spanID = sc.TraceID(), sc.SpanID()
 	}
 	if st.ver != nil {
 		rec.version = st.ver.c.Config.Version
@@ -148,6 +161,9 @@ func (a *accessLog) emit(rec accessRecord) {
 	}
 	if rec.client.IsValid() {
 		attrs = append(attrs, slog.String("client.address", rec.client.String()))
+	}
+	if rec.traceID.IsValid() {
+		attrs = append(attrs, slog.String("trace_id", rec.traceID.String()), slog.String("span_id", rec.spanID.String()))
 	}
 	if rec.version != 0 {
 		attrs = append(attrs, slog.Int64("edge.config_version", rec.version), slog.String("edge.cohort", rec.cohort), slog.Any("edge.config_rules", rec.configRules))

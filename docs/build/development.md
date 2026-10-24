@@ -13,8 +13,9 @@ One Go module with two binaries, plus a React admin UI embedded into admin. The 
 | `internal/jwks` | JWKS fetch with SSRF guard |
 | `internal/edge` | Request pipeline |
 | `internal/envparse` | Deployment settings from environment variables, shared by edge and admin |
+| `internal/tracing` | OpenTelemetry tracer provider, shared by edge and admin: OTLP/HTTP export, capped sampler |
 | `internal/admin`, `internal/admindb` | Admin API, identity, canary, guard, audit, Routes from access logs, first-start bootstrap; Postgres and migrations |
-| `internal/testenv` | Test tooling: Valkey, Postgres and the Playwright browser server in Docker |
+| `internal/testenv` | Test tooling: Valkey, Postgres, an OpenTelemetry Collector and the Playwright browser server in Docker |
 | `web/admin` | Admin UI (React, Vite, TypeScript), built into `web/admin/dist/app` |
 | `loadtest` | k6 scenarios; mock upstream, IdP, LB, gateway and microservices; the demo seed; compose environments |
 | `build` | Dockerfiles |

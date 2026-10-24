@@ -48,7 +48,7 @@ func inMemoryEdge(tb testing.TB, c *snapshot.Config, target string) (*Server, *h
 	if err != nil {
 		tb.Fatal(err)
 	}
-	s := New(cfg, newTestLogger(io.Discard))
+	s := New(cfg, newTestLogger(io.Discard), nil)
 	if err := s.poller.apply(envelope(c), "admin", 0); err != nil {
 		tb.Fatal(err)
 	}
