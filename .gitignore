@@ -9,3 +9,5 @@ web/admin/dist/app/
 .venv/
 /.claude/
 /tools
+
+.DS_Store

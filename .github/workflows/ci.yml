@@ -90,7 +90,7 @@ jobs:
       # Keep in step with node_version in scripts/ci/ui.sh.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.0
+          node-version: 26.12.1
           cache: npm
           cache-dependency-path: web/admin/package-lock.json
       # The lockfile pins the Playwright version, which pins its browsers.

@@ -6,15 +6,15 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # Keep in step with node-version in .github/workflows/ci.yml.
-node_version="24.22.0"
+node_version="26.12.1"
 
 if ! command -v node >/dev/null; then
   # GitLab's Go image has no Node: install the pinned release, checked
   # against hashes recorded here rather than ones fetched alongside it.
   # .tar.gz because that image has no xz.
   case "$(uname -m)" in
-    x86_64) arch=x64 sha=28ea0a438de9a13bd7891fd758eee6c7819ee8af5442dfd8d45bd65e56d4228c ;;
-    aarch64) arch=arm64 sha=b7e7991d5407815adfa74a2a9cd4db683552c8ce32ff4a295c22e972849c3f5d ;;
+    x86_64) arch=x64 sha=0fd1eb7770598f52a21995edf6ed35fc690400fa437c2386af329519e9143132 ;;
+    aarch64) arch=arm64 sha=a6c01af459dd8972ab3fb08ee5da81244d26ba8c4944a62d5bbba8c597ae154f ;;
     *) echo "no pinned Node for $(uname -m)" >&2; exit 1 ;;
   esac
   tarball="node-v${node_version}-linux-${arch}.tar.gz"

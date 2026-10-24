@@ -1,6 +1,6 @@
 # Admin image: the UI is built with Node, embedded with go:embed, and the
 # static binary runs on distroless as nonroot. Node is never in the image.
-FROM --platform=$BUILDPLATFORM node:24.22.0-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315 AS ui
+FROM --platform=$BUILDPLATFORM node:26.12.1-trixie-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec AS ui
 WORKDIR /ui
 COPY web/admin/package.json web/admin/package-lock.json ./
 RUN npm ci
