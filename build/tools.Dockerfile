@@ -9,7 +9,7 @@ COPY internal ./internal
 COPY web/admin/ui.go ./web/admin/
 COPY web/admin/dist/.gitkeep ./web/admin/dist/
 COPY loadtest ./loadtest
-RUN CGO_ENABLED=0 go build -trimpath -o /out/tools ./loadtest/tools
+RUN CGO_ENABLED=0 go build -tags grpcnotrace -trimpath -o /out/tools ./loadtest/tools
 
 FROM gcr.io/distroless/static-debian13@sha256:9e0130bec991f471279b70f1630ada11e46dad439ef2949544f96001225329fb
 COPY --from=build /out/tools /tools

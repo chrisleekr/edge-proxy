@@ -473,7 +473,7 @@ func (v *validator) forward(path string, f Forward) {
 	v.list(path+".names", f.Names, foldCase, v.targetProblem)
 	for i, n := range f.Names {
 		if TraceHeader(n) {
-			v.warn(fmt.Sprintf("%s.names[%d]", path, i), "%s is always forwarded, so listing it has no effect", http.CanonicalHeaderKey(n))
+			v.warn(fmt.Sprintf("%s.names[%d]", path, i), "%s is always forwarded, so listing it has no effect; with tracing off, a remove op drops it", http.CanonicalHeaderKey(n))
 		}
 	}
 	if f.Mode == "allowlist" {
