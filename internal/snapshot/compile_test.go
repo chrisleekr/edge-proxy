@@ -116,6 +116,7 @@ func TestVersionLiteralsTheEdgeMapsDoNotWarn(t *testing.T) {
 		`http.request.version eq "HTTP/2"`,
 		`http.request.version in {"HTTP/1.1" "2" "3.0"}`,
 		`http.request.version ne ""`,
+		`starts_with(http.request.version, "HTTP/2")`,
 	} {
 		t.Run(src, func(t *testing.T) {
 			c := validConfig()

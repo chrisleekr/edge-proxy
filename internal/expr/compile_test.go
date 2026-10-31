@@ -106,6 +106,8 @@ func TestCompiledRulesMatchRequests(t *testing.T) {
 		{`not http.request.version in {"HTTP/1.1" "HTTP/3"}`, true},
 		{`http.request.version eq "h2"`, false},
 		{`starts_with(http.request.version, "2")`, true},
+		{`not starts_with(http.request.version, "HTTP/2")`, false},
+		{`http.request.version contains "HTTP/1.1"`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.src, func(t *testing.T) {
