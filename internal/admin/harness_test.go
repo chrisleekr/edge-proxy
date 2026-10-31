@@ -90,7 +90,10 @@ func newHarnessWith(t *testing.T, set map[string]string) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) }) //nolint:usetesting // t.Context is already cancelled when Cleanup runs
-	pool, err := openPool(ctx, db.App, tp)
+	// pgxpool's default is max(4, CPUs). A fixed size keeps tests that hold
+	// connections, such as four MCP calls waiting on a lock, independent of
+	// the host's CPU count.
+	pool, err := openPool(ctx, db.App+"&pool_max_conns=16", tp)
 	if err != nil {
 		t.Fatal(err)
 	}
