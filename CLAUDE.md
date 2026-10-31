@@ -47,7 +47,7 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - Per-IP limiters lock only themselves.
 - **Trust comes only from deployment config.**
   - Trusted proxies, the client-IP source, the upstream URL, OIDC providers and secrets come from environment variables, never from admin-editable config.
-  - The one exception is JWKS URLs, and every JWKS fetch goes through the SSRF guard in `internal/jwks`.
+  - The one exception is JWKS URLs, and every JWKS fetch goes through the SSRF guard in `internal/jwks`. Admin fetches the deployment's `VERIFIED_BOT_SOURCES` crawler range lists through the same guard.
 - **Forwarding headers are set explicitly from trusted values.** Never call `ProxyRequest.SetXForwarded()`: it uses the LB's address and the edge's own TLS state.
 - **Every edge-generated response sends `Cache-Control: no-store`.** CORS responses whose allowed origin varies send `Vary: Origin`.
 - **Client-supplied copies of edge-managed headers are always stripped.** This covers `X-Edge-*`, the client-IP and geo source headers, and `X-Request-Id` from untrusted peers. With tracing on, `traceparent` and `tracestate` are replaced with the edge span's, in the caller's trace from any peer; trace context only correlates and is never trusted, and no forward filter drops it.
@@ -55,11 +55,12 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
 - **Postgres is the durable source of truth** for policy, versions, audit and stats. Valkey holds only rate-limit state, and every Valkey key has a TTL.
 - **Authorization checks permissions, never role names.**
 - **Audit is complete, append-only and tamper-evident.**
-  - Every config, identity, access-control, settings and automated (guard, JWKS) event writes an `audit_events` row in the same transaction as the change.
+  - Every config, identity, access-control, settings and automated (guard, JWKS, verified crawler ranges) event writes an `audit_events` row in the same transaction as the change.
   - Rows are HMAC-chained, with the key held outside Postgres.
   - The runtime DB role has no `UPDATE`, `DELETE` or `TRUNCATE` on the table, and triggers block them.
   - There is no code path that edits or deletes audit rows, ever.
 - **Edge and admin are separate deployables.** The edge scales horizontally and is stateless. Admin is fixed-size, internal-only, and never on the user request path.
+- **The autopilot runner is a third, optional deployable** and the only holder of model credentials. It talks only to admin and the model provider, never to edges, and admin works without it. A model run gets admin's MCP tools and nothing else: no built-in tools, no settings or MCP servers from disk. It never logs its token or a credential.
 
 ## Stack
 
@@ -69,10 +70,11 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - `golang-jwt/jwt/v5`
   - `golang.org/x/text`
   - `go.opentelemetry.io/otel` (API, SDK, `otlptracehttp`) and `go-logr/logr`, in `internal/tracing`: OTLP export, W3C propagation and batching are protocol code upstream maintains. Every binary is built with `-tags grpcnotrace`, or gRPC's `x/net/trace` adds about 13 MB; `make container` checks it.
-  - Admin only: `jackc/pgx/v5`, `golang.org/x/crypto`, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`, and later `coreos/go-oidc/v3` and `golang.org/x/oauth2`.
+  - Admin only: `jackc/pgx/v5`, `golang.org/x/crypto`, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`, `modelcontextprotocol/go-sdk` (the MCP protocol and its Streamable HTTP transport, for the autopilot runner), and later `coreos/go-oidc/v3` and `golang.org/x/oauth2`.
 - **Admin UI:** React + Vite + TypeScript (strict) + Tailwind CSS, with `react-querybuilder` for the rule builder and CodeMirror 6 for expression text.
   - It's built to `web/admin/dist/app`, embedded by `web/admin/ui.go` (`go:embed`) and served by admin. Node is needed at build time only.
   - The UI never parses, renders or validates expressions; it calls the admin `/api/expr/*` API.
+- **Autopilot runner** (`autopilot/`): TypeScript (strict) run by Node 26's type stripping, no build step. `@anthropic-ai/claude-agent-sdk` (drives the bundled Claude Code binary), `@openai/agents`, `zod` for the verdict check, and the Claude SDK's peers `@anthropic-ai/sdk` and `@modelcontextprotocol/sdk`, all pinned exactly. Tests are `node:test` with SDK-typed fixtures, no mocks. Node is pinned in `scripts/ci/node.sh`, `ci.yml` and the Dockerfiles, kept in step.
 - **Data:** Postgres (admin) and Valkey (rate-limit state).
 - **Tests:** stdlib `testing`, fuzz tests, and `testcontainers-go` for real Valkey and Postgres. Load tests use k6.
 
@@ -84,16 +86,17 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
 | `internal/expr` | Rule expression parser, renderer, type checker, compiler. Shared |
 | `internal/snapshot` | Config types, strict decode, `Compile`. Shared by edge and admin |
 | `internal/ratelimit` | Algorithms (Lua + local store), backstop |
-| `internal/jwks` | JWKS fetch, parse, SSRF guard. Shared |
-| `internal/edge` | Wiring, `http.Server`, shutdown, and the request pipeline: client IP, JWT, CORS, header rules, locale, responses, proxy, stats |
+| `internal/jwks` | JWKS fetch, parse, SSRF guard (also for crawler range lists). Shared |
+| `internal/edge` | Wiring, `http.Server`, shutdown, and the request pipeline: client IP, client signals, JWT, CORS, header rules, locale, responses, proxy, stats |
 | `internal/envparse` | Deployment config from env vars. Shared |
 | `internal/tracing` | OpenTelemetry tracer provider: OTLP/HTTP export, capped sampler, export counters. Shared |
-| `internal/admin` | Admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, rollback guard, observed routes (access-log ingest, route patterns, route flow), first-start bootstrap |
+| `internal/admin` | Admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS and verified crawler range refresh, canary, rollback guard, observed routes (access-log ingest, route patterns, route flow), autopilot (cases, overlay rules, runner API, MCP tools, memory notes, read-only Prometheus, Grafana and Datadog connectors, the replay contract), first-start bootstrap |
 | `internal/admindb` | Postgres queries, migrations, audit log |
-| `internal/testenv` | Testcontainers helpers (Valkey, Postgres, OpenTelemetry Collector) and the Playwright browser server. Test tooling, outside edge scope |
+| `internal/testenv` | Testcontainers helpers (Valkey, Postgres, OpenTelemetry Collector, Prometheus, Grafana) and the Playwright browser server. Test tooling, outside edge scope |
 | `web/admin` | Admin UI SPA and the Go package that embeds it |
-| `loadtest` | k6 scripts; mock upstream, IdP, LB, gateway and microservices; seed (`loadtest/tools`); compose environments |
-| `build` | Dockerfiles for the edge, admin and load-test images |
+| `autopilot` | Autopilot runner: `src` (the image, and `replay.ts`, which replays a recorded case against a model), `test` (unit tests, the scripted adapter for `TestAutopilotRunner`, and the golden cases in `test/golden`). Outside the Go module |
+| `loadtest` | k6 scripts; mock upstream, IdP, LB, gateway and microservices; seed and the scripted autopilot agent (`loadtest/tools`); compose environments |
+| `build` | Dockerfiles for the edge, admin, autopilot runner and load-test images |
 | `scripts` | CI steps (`scripts/ci`) and capacity scripts |
 | `docs` | MkDocs site (`mkdocs.yml`): user, operator and developer docs, plus the full design |
 
@@ -114,7 +117,7 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
 - publish, revert, canary and guard
 - the snapshot endpoint
 
-The admin UI gets browser smoke tests for the rule builder, publish and revert.
+The admin UI gets browser smoke tests for the rule builder, publish and revert. The autopilot runner gets `TestAutopilotRunner`: the real process against a real admin, for the happy path, a refused claim, timeout, an answer without a verdict, two cases running at once, a lapsed lease and SIGTERM.
 
 How tests must be written:
 
@@ -146,18 +149,21 @@ How tests must be written:
 - `make fuzz` (`scripts/ci/fuzz.sh`): every fuzz target for `FUZZTIME` (default 20s). Use `FUZZTIME=5m` before merging parser or matcher changes.
 - `make bench` (`scripts/ci/bench.sh`): every benchmark, briefly, so they keep compiling and passing.
 - `make ui` (`scripts/ci/ui.sh`): admin UI `npm ci`, ESLint, typecheck and build, then the Playwright smoke tests against a real admin and Postgres (`TestUISmoke`, run only with `UI_SMOKE=1`) and the edge's SSE, streamed fetch and WebSocket tests in Chromium, Firefox and WebKit (`TestBrowserStreams`, run only with `BROWSER_SMOKE=1`).
+- `make autopilot` (`scripts/ci/autopilot.sh`): runner `npm ci`, ESLint, typecheck and unit tests, then `TestAutopilotRunner` (run only with `AUTOPILOT_RUNNER=1`): the real runner with a scripted adapter against a real admin and Postgres.
 - `make screenshots` (`scripts/ci/screenshots.sh`): renders the admin pages shown in the docs from fixed data in a pinned Playwright browser in Docker and fails when any differs from `docs/assets/screenshots`; `scripts/ci/screenshots.sh update` rewrites them. It runs inside `make ui`.
 - `make docs` (`scripts/ci/docs.sh`): strict MkDocs build; broken links, anchors and pages missing from the nav fail it. Docs state only what the code does; check a claim against the code before writing it.
 - `make demo` / `make demo-down`: the local demo used by the Get started guide (load-test compose, one edge).
-- `make ci`: lint, test, fuzz, bench, vuln, ui, docs, container, load, in CI order.
+- `make demo-autopilot`: adds the autopilot runner to the running demo, with the model credential (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) exported in the shell.
+- `npm run replay -- <case> ...` (in `autopilot`) replays a recorded case against a model, and `AUTOPILOT_LIVE=1 node --test test/golden.test.ts` replays the golden cases against the real provider. Both spend tokens: manual, never CI.
+- `make ci`: lint, test, fuzz, bench, vuln, ui, autopilot, docs, container, load, in CI order.
 - `make infra-up` / `infra-down`: local Valkey + Postgres via `compose.yaml`, for manual runs only.
 - **CI wiring:** GitHub Actions (`.github/workflows/ci.yml`) and GitLab CI (`.gitlab-ci.yml`) only call `scripts/ci/*.sh`. Change behavior in the scripts, never in provider YAML.
-- `make container` (`scripts/ci/image.sh`): build the images; the edge must become ready from a bootstrap snapshot.
+- `make container` (`scripts/ci/image.sh`): build the images; the edge must become ready from a bootstrap snapshot, and the runner image must refuse to start without its settings on a read-only root.
 - `make load` (`scripts/ci/load.sh`): Tier 1 k6 smoke and a Valkey outage against `loadtest/compose.yaml`.
-- `make load-full` (`scripts/ci/load-full.sh`): the full load profile (outages, accuracy, 200 rules, hot key, penalty, JWT and locale, publish and canary under load, over-blocking canary, streams and drain, rolling restart, losing an edge, Valkey cluster). Nightly in CI; `PROFILE=release` before a release.
-- `make capacity` (`scripts/capacity-scenario.sh`): one edge at fixed rates with scenario-shaped traffic; reports p99 against `BUDGET_MS`, edge CPU, Valkey calls per request, bytes per key and CPU per call, and with `STREAMS=N` edge memory per open stream (reported, not gated).
+- `make load-full` (`scripts/ci/load-full.sh`): the full load profile (outages, accuracy, 200 rules, hot key, penalty, JWT and locale, publish and canary under load, over-blocking canary, five attacks the autopilot must block with the scripted agent, streams and drain, rolling restart, losing an edge, Valkey cluster). Nightly in CI; `PROFILE=release` before a release.
+- `make capacity` (`scripts/capacity-scenario.sh`): one edge at fixed rates with scenario-shaped traffic; reports p99 against `BUDGET_MS`, edge CPU, Valkey calls per request, bytes per key and CPU per call, with `STREAMS=N` edge memory per open stream, and with `SENSORS=N` the same figures with N log-only sensor-shaped rules (reported, not gated).
 - `make capacity-max` (`scripts/capacity-max.sh`): the maximum rate of one 2 vCPU / 2 GiB edge within `BUDGET_MS` added at p99, in front of a mock gateway routing to four mock microservices with network delay (`loadtest/compose.capacity.yaml`). Not a CI gate; run it on a quiet host.
-- **Releases:** GitHub only; GitLab CI never cuts a version, it only pushes a rolling amd64-only `latest` from `main` to its own registry. release-please (`release-please-config.json`) from Conventional Commits; `scripts/ci/publish.sh` pushes multi-arch images on a release tag. Dependency updates come from Renovate (`renovate.json`) as `chore` commits, so they never cut a release.
+- **Releases:** GitHub only; GitLab CI never cuts a version, it only pushes a rolling amd64-only `latest` from `main` to its own registry. release-please (`release-please-config.json`) from Conventional Commits; `scripts/ci/publish.sh` pushes the three multi-arch images on a release tag, and release-please writes the version into `autopilot/package.json` and its lock file. Dependency updates come from Renovate (`renovate.json`) as `chore` commits, so they never cut a release.
 
 ## Quality gates (CI must enforce)
 
@@ -170,9 +176,10 @@ How tests must be written:
 | `govulncheck ./...` | Known vulnerabilities in dependencies |
 | Zero-allocation tests + benchmarks run (`scripts/ci/bench.sh`) | Request-path allocations (gated by tests). ns/op is reported, not gated: shared runners are too noisy |
 | k6 smoke (Tier 1) | End-to-end behavior under load, including a Valkey outage. Admin, Postgres and IdP outages run in `make load-full` |
-| Container build + smoke | Image starts and becomes ready from a bootstrap snapshot |
+| Container build + smoke | Edge image becomes ready from a bootstrap snapshot; runner image starts on a read-only root and refuses to run without its settings |
+| Runner contract (`scripts/ci/autopilot.sh`) | The real autopilot runner claims, runs, reports, times out, refuses an answer without a verdict, drops a lapsed lease and shuts down as admin expects |
 | Docs screenshots match the UI (`scripts/ci/screenshots.sh`) | A UI change can't leave the docs showing the old UI |
-| Docs reference tables match the code (`TestDocsListEvery*` in `internal/admin/docs_test.go`) | Every env var, admin API route with its permission, and expression field is documented, and nothing documented is gone |
+| Docs reference tables match the code (`TestDocsListEvery*` in `internal/admin/docs_test.go`) | Every env var (edge, admin and runner), admin API route with its permission, and expression field is documented, and nothing documented is gone |
 
 ## Writing rules
 

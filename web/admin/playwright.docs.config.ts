@@ -7,7 +7,7 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: 'docs-shots',
   forbidOnly: !!process.env.CI,
-  timeout: 180_000,
+  timeout: 300_000,
   snapshotPathTemplate: '../../docs/assets/screenshots/{arg}{ext}',
   // The browser image is pinned, so pages render the same bytes every run;
   // any pixel that differs fails.
@@ -20,6 +20,9 @@ export default defineConfig({
     timezoneId: 'UTC',
     locale: 'en-US',
     colorScheme: 'light',
+    // Partial raster repaints only a tile's changed part, which shades
+    // antialiased edges a little differently from a full repaint.
+    launchOptions: { args: ['--disable-partial-raster'] },
     // The browser runs in Docker; this sends its requests for admin's
     // address back through the runner, and no other local service.
     connectOptions: {

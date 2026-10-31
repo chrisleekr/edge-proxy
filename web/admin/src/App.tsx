@@ -1,15 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, Fragment, lazy, type ReactNode, Suspense, useEffect, useRef, useState } from 'react';
-import { api, type Me, Problem, type Saved } from './api';
+import { api, type Me, meQuery, Problem, type Saved } from './api';
 import { DraftProvider, useDraft, useOptionalDraft } from './draft';
 import { phases, rulesOf } from './phases';
 import { Audit } from './pages/Audit';
+import { Autopilot, AutopilotCase } from './pages/Autopilot';
 import { Dashboard } from './pages/Dashboard';
 import { Fleet, Stats } from './pages/Fleet';
+import { Memory, NoteDetail } from './pages/Memory';
+import { Notifications } from './pages/Notifications';
 import { RouteDetail, Routes } from './pages/Routes';
 import { describe, isEmpty } from './pages/DiffView';
 import { Publish, useDraftDiff, useVersions } from './pages/Publish';
 import { Rules } from './pages/Rules';
+import { Subject } from './pages/Subject';
+import { Palette } from './Palette';
 import { CORS, Issuers, Settings, Templates } from './pages/Sections';
 import { Tests } from './pages/Tests';
 import { Account, Users } from './pages/Users';
@@ -18,7 +23,7 @@ import { Link, navigate, usePath } from './router';
 import { ago, Button, CanWrite, Confirm, Crash, ErrorBox, Info, Input, Issues, Modal, NotFound, Pending, when, who, words } from './ui';
 
 export function App() {
-  const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me'), retry: false });
+  const me = useQuery(meQuery);
   const expired = me.error instanceof Problem && me.error.status === 401;
   if (!me.data) {
     if (expired) return <Login />;
@@ -119,6 +124,8 @@ const nav: { group: string; links: { to: string; label: string; perm: string }[]
       { to: '/routes', label: 'Routes', perm: 'stats.read' },
       { to: '/fleet', label: 'Fleet', perm: 'stats.read' },
       { to: '/stats', label: 'Stats', perm: 'stats.read' },
+      { to: '/notifications', label: 'Notifications', perm: 'stats.read' },
+      { to: '/autopilot', label: 'Autopilot', perm: 'autopilot.read' },
       { to: '/audit', label: 'Audit', perm: 'audit.read' },
     ],
   },
@@ -148,6 +155,19 @@ function Shell({ me }: { me: Me }) {
     if (open && !d.open) d.showModal();
     if (!open && d.open) d.close();
   }, [open]);
+  // Cmd+K on a Mac, Ctrl+K elsewhere, opens Find from any screen. Ctrl+K
+  // on a Mac stays the text fields' delete to end of line.
+  const [finding, setFinding] = useState(false);
+  useEffect(() => {
+    const mac = /Mac|iP(hone|ad)/.test(navigator.platform);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'k' || !(mac ? e.metaKey : e.ctrlKey)) return;
+      e.preventDefault();
+      setFinding(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   // The draft needs config.read; without it the app still serves the
   // screens the role can read, such as the dashboard and stats.
   const Draft = can('config.read') ? DraftProvider : Fragment;
@@ -206,6 +226,7 @@ function Shell({ me }: { me: Me }) {
           </Crash>
         </main>
       </div>
+      {finding && <Palette onClose={() => setFinding(false)} />}
     </Draft>
   );
 }
@@ -261,12 +282,22 @@ function UserBar({ me, path }: { me: Me; path: string }) {
   );
 }
 
+// A hand-typed address like /subjects/% is not valid percent-encoding, and
+// decodeURIComponent would throw; the raw segment then finds nothing.
+function decodePart(part = '') {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
+}
+
 function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
   const parts = path.split('/').filter(Boolean);
   const routes: Record<string, () => ReactNode> = {
     '': () => <Dashboard can={can} />,
     // Keyed by path so moving between rules (back, forward) resets the form.
-    rules: () => (parts[1] ? <RuleEditor key={path} phase={parts[1]} id={decodeURIComponent(parts[2] ?? '')} /> : <Rules />),
+    rules: () => (parts[1] ? <RuleEditor key={path} phase={parts[1]} id={decodePart(parts[2])} /> : <Rules />),
     templates: () => <Templates />,
     cors: () => <CORS />,
     issuers: () => <Issuers />,
@@ -277,13 +308,30 @@ function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
     routes: () => (parts[1] ? <RouteDetail key={path} id={Number(parts[1])} can={can} /> : <Routes can={can} />),
     fleet: () => <Fleet />,
     stats: () => <Stats />,
+    notifications: () => <Notifications canManage={can('settings.manage')} />,
+    autopilot: () =>
+      parts[1] === 'cases' && parts[2] ? (
+        <AutopilotCase key={path} id={Number(parts[2])} />
+      ) : parts[1] === 'notes' ? (
+        parts[2] ? (
+          <NoteDetail key={path} id={Number(parts[2])} />
+        ) : (
+          <Memory />
+        )
+      ) : parts[1] ? (
+        <NotFound />
+      ) : (
+        <Autopilot />
+      ),
     audit: () => <Audit />,
     users: () => <Users can={can} />,
     account: () => <Account />,
+    subjects: () => <Subject key={path} display={decodePart(parts[1])} />,
   };
   const r = routes[parts[0] ?? ''];
-  // A typed or bookmarked address can reach a section the nav hides.
-  const section = nav.flatMap((g) => g.links).find((n) => n.to === sectionOf(path));
+  // A typed or bookmarked address can reach a section the nav hides. A
+  // client's page is reached from Stats, so it needs what Stats needs.
+  const section = parts[0] === 'subjects' ? { to: '/subjects', perm: 'stats.read' } : nav.flatMap((g) => g.links).find((n) => n.to === sectionOf(path));
   if (r && section && !allowed(section, can)) return <NotFound title="No access">Your role cannot open this page.</NotFound>;
   return r ? r() : <NotFound />;
 }
@@ -474,8 +522,10 @@ function SaveBar({ path, canWrite }: { path: string; canWrite: boolean }) {
     return words(p);
   };
   if (!d.dirty && !unsaved && !save.data && !save.error) return null;
+  // Below lg the top bar (about 61px) is sticky too and sits above this one,
+  // so the bar sticks under it or the top bar would cover Save draft.
   return (
-    <div className="sticky top-2 z-10 flex flex-col gap-2 rounded-card bg-panel p-3 shadow-float">
+    <div className="sticky top-18 z-10 flex flex-col gap-2 rounded-card bg-panel p-3 shadow-float lg:top-2">
       {(d.dirty || unsaved) && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-brand px-2.5 py-0.5 text-xs font-medium text-on-brand">Draft</span>
