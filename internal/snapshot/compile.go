@@ -1120,9 +1120,10 @@ func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Mat
 	return m
 }
 
-// httpVersion warns on an exact HTTP version the edge never produces. It
-// is not an error: versions published before the edge normalised the
-// version must still load.
+// httpVersion warns on an exact HTTP version the edge never produces. A
+// literal the edge maps, such as "HTTP/2", is compiled as its mapped form,
+// and "" is the value when the version is absent. It is not an error:
+// versions published before the edge normalised the version must still load.
 func (v *validator) httpVersion(p string, r expr.Node) {
 	if r.Operator != "eq" && r.Operator != "ne" && r.Operator != "in" && r.Operator != "not_in" {
 		return
@@ -1132,7 +1133,7 @@ func (v *validator) httpVersion(p string, r expr.Node) {
 		vals = []string{r.Value.One}
 	}
 	for _, val := range vals {
-		if !slices.Contains(httpVersions, val) {
+		if val != "" && expr.HTTPVersion(val) == "" {
 			v.warn(p+".expression", "http.request.version is never %q; the edge writes it as %s", val, strings.Join(httpVersions, ", "))
 		}
 	}

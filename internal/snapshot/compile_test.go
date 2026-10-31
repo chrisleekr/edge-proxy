@@ -109,6 +109,24 @@ func TestStarterCompiles(t *testing.T) {
 	}
 }
 
+// A version rule saved before the edge normalised the version, or one that
+// checks the version is present, gets no warning: each matches as written.
+func TestVersionLiteralsTheEdgeMapsDoNotWarn(t *testing.T) {
+	for _, src := range []string{
+		`http.request.version eq "HTTP/2"`,
+		`http.request.version in {"HTTP/1.1" "2" "3.0"}`,
+		`http.request.version ne ""`,
+	} {
+		t.Run(src, func(t *testing.T) {
+			c := validConfig()
+			c.ConfigRules[0].Expression = mustParse(src)
+			if _, warns, errs := Compile(c, testDeployment); errs != nil || warns != nil {
+				t.Fatalf("errors %v, warnings %v", expr.Issues(errs), expr.Issues(warns))
+			}
+		})
+	}
+}
+
 // Edges and admin build their deployment from env in map order and header
 // case; only a real difference may block publishing.
 func TestDeploymentFingerprint(t *testing.T) {

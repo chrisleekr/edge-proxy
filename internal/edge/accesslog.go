@@ -169,16 +169,24 @@ func upstreamErrorText(err error) string {
 	if !dns && !cert && !op {
 		msg = goQuoted.ReplaceAllLiteralString(msg, `"…"`)
 	}
-	if len(msg) > maxUpstreamError {
-		// Cut at a rune start: a certificate's names can be UTF-8.
-		n := maxUpstreamError
-		for n > 0 && !utf8.RuneStart(msg[n]) {
-			n--
-		}
-		msg = msg[:n]
-	}
-	return msg
+	return cut(msg, maxUpstreamError)
 }
+
+// cut returns at most n bytes of s, ending at a rune start: a certificate's
+// names and a User-Agent can be UTF-8.
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// maxUserAgent bounds the logged User-Agent. The client picks it, up to
+// MAX_HEADER_BYTES, and rejections are always logged.
+const maxUserAgent = 512
 
 // emit uses OTel HTTP semantic-convention names where they exist.
 func (a *accessLog) emit(rec accessRecord) {
@@ -213,7 +221,7 @@ func (a *accessLog) emit(rec accessRecord) {
 		attrs = append(attrs, slog.String("client.address", rec.client.String()))
 	}
 	if rec.userAgent != "" {
-		attrs = append(attrs, slog.String("user_agent.original", rec.userAgent))
+		attrs = append(attrs, slog.String("user_agent.original", cut(rec.userAgent, maxUserAgent)))
 	}
 	if rec.hasASN {
 		attrs = append(attrs, slog.Int64("client.as.number", rec.asn))

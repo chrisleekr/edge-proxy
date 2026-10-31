@@ -109,7 +109,7 @@ Valkey used **124 bytes per key** and **21 µs of CPU per call**. With `STREAMS=
 | Valkey memory | The site-wide sliding-window key lives up to 2 minutes: 1M IPs/min × 2 min, plus 5% for login ≈ 2.1M keys × 124 B ≈ 260 MB, × 1.5 for overhead | **≈ 400 MB in total**, 512 MB per shard leaves room |
 | `VALKEY_TIMEOUT` | Well inside the 10 ms budget, above in-region Valkey p99 (1–2 ms) | **5ms** |
 | `MAX_STREAMS` | 10k streams ÷ 8 pods left after losing a zone = 1,250 per pod; default is 1,000. At the cap, 2,500 × 72 KiB ≈ 180 MiB of the 1 GiB pod | **2500** |
-| `MAX_INFLIGHT` | Little's law after a zone loss: 5k RPS × 0.2 s = 1,000 concurrent, × 2 for bursts = 2,000. Memory: about 100 KiB per in-flight request. The default from `GOMEMLIMIT` (about 920 MiB in a 1 GiB pod) is 3,680: 3,680 × 100 KiB ≈ 360 MiB, plus 180 MiB of streams, fits | default |
+| `MAX_INFLIGHT` | Little's law after a zone loss: 5k RPS × 0.2 s = 1,000 concurrent, × 2 for bursts = 2,000. Memory: about 100 KiB per in-flight request. The default from `GOMEMLIMIT` (about 920 MiB in a 1 GiB pod) is 3,680: 3,680 × 100 KiB ≈ 360 MiB, plus 180 MiB of streams, fits. Without `GOMEMLIMIT` the default is 10,000, which memory can't hold | default, with **`GOMEMLIMIT=920MiB`** (about 90% of the pod limit; the Helm chart sets it) |
 | Backstop (**Settings → Backstop**) | Per pod. Connections pin a client to a pod, so the NAT's 300 RPS can land on one. Default is 100/s, burst 200, which would block it | **limit 1000/s, burst 2000** |
 | `LOG_SAMPLE_RATE` | 40k RPS × ~400 B ≈ 16 MB/s of access logs unsampled | **0.05** (rejections and 5xx are always logged) |
 

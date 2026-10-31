@@ -96,7 +96,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	if err != nil {
 		return SimResult{Rejected: reasonNames[reasonPath]}, nil
 	}
-	cl := client{ip: clean(ip), country: isoCode(req.Country), ssl: req.SSL, asn: req.ASN, hasASN: req.ASN > 0, version: httpVersion(req.HTTPVersion)}
+	cl := client{ip: clean(ip), country: isoCode(req.Country), ssl: req.SSL, asn: req.ASN, hasASN: req.ASN > 0, version: expr.HTTPVersion(req.HTTPVersion)}
 	// As in identify: with an ssl source, a fingerprint on a plain request is
 	// absent, since only TLS has one.
 	if req.SSL || !slices.Contains(c.Deployment.ViewerFields, "ssl") {

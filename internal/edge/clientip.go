@@ -209,7 +209,7 @@ func (id *identity) viewer(h http.Header, c *client) {
 		c.ssl = strings.EqualFold(v, "https") || strings.EqualFold(v, "true")
 	}
 	if id.version != "" {
-		c.version = httpVersion(h.Get(id.version))
+		c.version = expr.HTTPVersion(h.Get(id.version))
 	}
 	if id.cert != "" {
 		c.certVerified = strings.EqualFold(h.Get(id.cert), "true")
@@ -226,23 +226,6 @@ func (id *identity) viewer(h http.Header, c *client) {
 	if v := h.Get(id.ja3); id.ja3 != "" && expr.ValidJA3(v) {
 		c.ja3 = v
 	}
-}
-
-// httpVersion writes a viewer HTTP version as CloudFront does: 1.0, 1.1,
-// 2.0 or 3.0. GCP and Cloudflare send HTTP/1.1, HTTP/2 and the like. Any
-// other value is absent.
-func httpVersion(v string) string {
-	switch strings.TrimPrefix(v, "HTTP/") {
-	case "1.0":
-		return "1.0"
-	case "1.1":
-		return "1.1"
-	case "2", "2.0":
-		return "2.0"
-	case "3", "3.0":
-		return "3.0"
-	}
-	return ""
 }
 
 // isoCode returns a two-character code in uppercase, or "".

@@ -58,12 +58,12 @@ func TestCompileWarns(t *testing.T) {
 		{"limit skipped by sending a header", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and http.request.headers["x-internal"] ne "1"`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.request.headers"},
-		{"HTTP version in a spelling the edge never writes", func(c *Config) {
-			c.ConfigRules[0].Expression = mustParse(`http.request.version eq "HTTP/2"`)
-		}, "config_rules[0].expression", `http.request.version is never "HTTP/2"`},
-		{"HTTP version list with a short spelling", func(c *Config) {
-			c.RateLimitRules[1].Expression = mustParse(`http.request.version in {"1.1" "2"}`)
-		}, "rate_limit_rules[1].expression", `http.request.version is never "2"`},
+		{"HTTP version the edge never writes", func(c *Config) {
+			c.ConfigRules[0].Expression = mustParse(`http.request.version eq "h2"`)
+		}, "config_rules[0].expression", `http.request.version is never "h2"`},
+		{"HTTP version list with a version that doesn't exist", func(c *Config) {
+			c.RateLimitRules[1].Expression = mustParse(`http.request.version in {"1.1" "HTTP/2.1"}`)
+		}, "rate_limit_rules[1].expression", `http.request.version is never "HTTP/2.1"`},
 		{"limit skipped through a negated group", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and not (http.user_agent contains "monitor" or ssl)`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.user_agent"},
@@ -264,7 +264,7 @@ func TestMaxInflightNeedsSchema3Edges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := olderConfig(tc.schema)
 			c.Global.MaxInflight = tc.maxInflight
-			got, errs, _ := Compile(c, testDeployment)
+			got, _, errs := Compile(c, testDeployment)
 			if errs != nil {
 				t.Fatal(expr.Issues(errs))
 			}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"sort"
+	"strings"
 )
 
 // wildcard matches a whole value against a pattern where "*" means zero or
@@ -147,6 +148,23 @@ func (s ipSet) contains(a netip.Addr) bool {
 // clientAddr is the form every IP comparison uses: IPv4-mapped addresses as
 // IPv4, and no zone, since a zone is interface scope, not client identity.
 func clientAddr(a netip.Addr) netip.Addr { return a.WithZone("").Unmap() }
+
+// HTTPVersion writes a viewer HTTP version as CloudFront does: 1.0, 1.1,
+// 2.0 or 3.0. GCP and Cloudflare send HTTP/1.1, HTTP/2 and the like. Any
+// other value is "", absent.
+func HTTPVersion(v string) string {
+	switch strings.TrimPrefix(v, "HTTP/") {
+	case "1.0":
+		return "1.0"
+	case "1.1":
+		return "1.1"
+	case "2", "2.0":
+		return "2.0"
+	case "3", "3.0":
+		return "3.0"
+	}
+	return ""
+}
 
 // lastAddr returns the highest address in p (all host bits set).
 func lastAddr(p netip.Prefix) netip.Addr {

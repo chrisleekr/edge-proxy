@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
@@ -149,6 +150,20 @@ func TestAccessLogCarriesBotFields(t *testing.T) {
 	}
 	if strings.Contains(h.logs.String(), "secret") {
 		t.Fatal("a token, cookie or query value was logged")
+	}
+}
+
+// A client padding its User-Agent can't make each logged rejection as big
+// as the header limit: the line keeps the first 512 bytes, whole characters.
+func TestAccessLogCutsALongUserAgent(t *testing.T) {
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	ua := "x" + strings.Repeat("é", 2000) // byte 512 falls inside an é
+	h.do("GET", "/a%5Cb", nil, "User-Agent", ua).Body.Close()
+	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
+	got, _ := h.logs.lines("access")[0]["user_agent.original"].(string)
+	if len(got) != 511 || !utf8.ValidString(got) || !strings.HasPrefix(ua, got) {
+		t.Fatalf("user_agent.original is %d bytes, want the first 511 of the User-Agent: %q", len(got), got)
 	}
 }
 

@@ -40,7 +40,7 @@ true
 | `ip.src.country`, `ip.src.continent` | string | Uppercase. Needs a trusted viewer header |
 | `ip.src.asnum` | int | Needs a trusted viewer header |
 | `ssl`, `client_cert.verified` | bool | Need a trusted viewer header |
-| `http.request.version` | string | `1.0`, `1.1`, `2.0` or `3.0` for every source, whatever form the CDN sends (`HTTP/2` becomes `2.0`); any other value is absent. A literal outside these four gets a validation warning. Needs a trusted viewer header |
+| `http.request.version` | string | `1.0`, `1.1`, `2.0` or `3.0` for every source, whatever form the CDN sends (`HTTP/2` becomes `2.0`); any other value is absent. A literal the edge maps the same way, such as `HTTP/2`, matches as that version; any other literal gets a validation warning. Needs a trusted viewer header |
 | `tls.client.ja4` | string | The client's [JA4](https://github.com/FoxIO-LLC/ja4) TLS fingerprint, such as `t13d1516h2_8daaf6152771_02713d6af862`. A header value of another shape is absent, and `eq` or `in` with a value of another shape is refused. Matched exactly, letter case included. Needs a trusted viewer header. With an `ssl` source, absent on a request that wasn't HTTPS, since TLS fingerprints exist only for TLS |
 | `tls.client.ja3` | string | The client's [JA3](https://github.com/salesforce/ja3) TLS fingerprint, 32 lowercase hex characters, with the same rules as JA4, including absent on a request that wasn't HTTPS. Needs a trusted viewer header |
 | `client.signals` | list | Names of the [client signals](#client-signals) the request shows. Only `eq`, `ne`, `in` and `not_in` apply, with signal names as values |

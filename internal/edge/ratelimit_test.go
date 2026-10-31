@@ -1029,6 +1029,26 @@ func TestNotFoundSweepIsLimitedAfterUpstream404s(t *testing.T) {
 	}
 }
 
+// A publish that changes what a rule counts starts it fresh: 404s counted
+// before don't push the first 401 over the limit.
+func TestChangedCountStatusesStartFresh(t *testing.T) {
+	h := newHarness(t, nil)
+	c := testConfig(1)
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule("failures", `http.request.method eq "GET"`, "sliding_window", 3, "ip")}
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	h.loadJSON(envelope(c), countStatuses(0, "404"))
+	if got := h.statuses(3, "GET", "/missing"); !eqInts(got, 404, 404, 404) {
+		t.Fatalf("404s up to the limit: %v", got)
+	}
+	c2 := testConfig(2)
+	c2.RateLimitRules = c.RateLimitRules
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }
+	h.loadJSON(envelope(c2), countStatuses(0, "401"))
+	if got := h.statuses(4, "GET", "/login"); !eqInts(got, 401, 401, 401, 401) {
+		t.Fatalf("401s after the publish: %v", got)
+	}
+}
+
 // Only upstream responses count. The edge's own 401s come before the rule
 // is checked; counting them would let a refused client keep its own block
 // alive. The upstream's 401s are failed logins and do count.

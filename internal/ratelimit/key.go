@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/netip"
 	"net/textproto"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -118,8 +119,10 @@ func Compile(rs []snapshot.RateLimitRule) []Rule {
 		}
 		if rule.Count {
 			// Its own prefix: a rule that gains or loses count_statuses keeps
-			// its local store, and must not read the other kind's counts.
-			rule.prefix = "rl:count:" + rule.prefix[len("rl:"):]
+			// its local store, and must not read the other kind's counts. The
+			// set's hash starts fresh counts and blocks when the set changes.
+			statuses := slices.Sorted(slices.Values(r.CountStatuses))
+			rule.prefix = "rl:count:" + base[len("rl:"):] + strconv.FormatUint(fnv1a(strings.Join(statuses, ",")), 16) + ":{"
 		}
 		if r.DistinctOf != "" {
 			kind, name, _ := strings.Cut(r.DistinctOf, ":")

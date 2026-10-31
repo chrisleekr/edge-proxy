@@ -46,6 +46,7 @@ func TestCompiledRulesMatchRequests(t *testing.T) {
 			"http.request.uri.path": "/v1/Users/42",
 			"http.user_agent":       "curl/8.9",
 			"http.request.method":   "POST",
+			"http.request.version":  "2.0",
 		},
 		lists: map[string][]string{
 			"http.request.headers|X-Api-Key": {"k1", "k2"},
@@ -98,6 +99,12 @@ func TestCompiledRulesMatchRequests(t *testing.T) {
 		{`http.request.method eq "GET" or not ssl`, false},
 		{`not (http.request.method eq "GET" or not ssl)`, true},
 		{`ssl and (http.request.method eq "GET" or ip.src.asnum eq 64500)`, true},
+		// Version literals saved in the CDN's spelling match the edge's form.
+		{`http.request.version eq "HTTP/2"`, true},
+		{`http.request.version ne "HTTP/2"`, false},
+		{`http.request.version in {"HTTP/1.1" "2"}`, true},
+		{`not http.request.version in {"HTTP/1.1" "HTTP/3"}`, true},
+		{`http.request.version eq "h2"`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.src, func(t *testing.T) {

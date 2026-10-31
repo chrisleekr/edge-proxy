@@ -136,7 +136,7 @@ func FuzzClientSignalsMatchReference(f *testing.F) {
 	f.Add("Mozilla/5.0 HeadlessChrome/ Chrome/x Chrome/89.1", "", "", `"Chromium";v=""Google Chrome";v="88"`, "h2c", "", "", true, "1.0", "")
 	f.Add("", "en", "cors", "", "", "", "", true, "2.0", chromeJA4)
 	f.Fuzz(func(t *testing.T, ua, acceptLanguage, secFetch, hintsValue, upgrade, connection, wsKey string, ssl bool, version, ja4 string) {
-		c := &client{ssl: ssl, version: httpVersion(version)}
+		c := &client{ssl: ssl, version: expr.HTTPVersion(version)}
 		if expr.ValidJA4(ja4) {
 			c.ja4 = ja4
 		}
