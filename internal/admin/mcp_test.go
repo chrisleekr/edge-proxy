@@ -208,11 +208,8 @@ func TestMCPLimits(t *testing.T) {
 				errs[i] = err
 			})
 		}
-		waitFor(t, func() bool {
-			var waiting int
-			_ = h.owner.QueryRow(t.Context(), "SELECT count(*) FROM pg_locks WHERE NOT granted").Scan(&waiting)
-			return waiting == 4
-		})
+		// Admin's own loops read anomalies too, so count admin's calls, not lock waiters.
+		waitFor(t, func() bool { return h.mcpInFlight() == 4 })
 		_, refused := callTool(t, cs, "describe_fields", nil)
 		if err := tx.Rollback(t.Context()); err != nil {
 			t.Fatal(err)

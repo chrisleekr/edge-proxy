@@ -1089,11 +1089,8 @@ func TestNoteCredentialRefusedInFlightIsRedacted(t *testing.T) {
 	for range 4 {
 		wg.Go(func() { _, _ = cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_anomalies"}) })
 	}
-	waitFor(t, func() bool {
-		var waiting int
-		_ = h.owner.QueryRow(t.Context(), "SELECT count(*) FROM pg_locks WHERE NOT granted").Scan(&waiting)
-		return waiting == 4
-	})
+	// Admin's own loops read anomalies too, so count admin's calls, not lock waiters.
+	waitFor(t, func() bool { return h.mcpInFlight() == 4 })
 	secret := "Bearer abcdefgh12345678"
 	_, why := callTool(t, cs, "record_learning", hedged("Likely the partner's sync; its requests carry "+secret))
 	if err := tx.Rollback(t.Context()); err != nil {

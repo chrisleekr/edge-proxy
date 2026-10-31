@@ -104,6 +104,17 @@ func newHarnessWith(t *testing.T, set map[string]string) *harness {
 	return h
 }
 
+// mcpInFlight is how many MCP calls admin is serving now.
+func (h *harness) mcpInFlight() int {
+	h.s.mcpCalls.mu.Lock()
+	defer h.s.mcpCalls.mu.Unlock()
+	n := 0
+	for _, c := range h.s.mcpCalls.n {
+		n += c
+	}
+	return n
+}
+
 // metrics is what admin's internal /metrics serves now.
 func (h *harness) metrics() string {
 	var b strings.Builder
