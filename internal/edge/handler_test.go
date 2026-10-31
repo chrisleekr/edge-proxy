@@ -203,6 +203,45 @@ func TestOverloadIsShed(t *testing.T) {
 	<-done
 }
 
+// An operator can lower the in-flight cap from admin, for example to shed
+// sooner while an upstream struggles, but never raise it past MAX_INFLIGHT,
+// which is what the replica's memory holds.
+func TestPolicyLowersTheInflightCap(t *testing.T) {
+	cases := []struct {
+		name   string
+		deploy string
+		policy int
+		admits int
+	}{
+		{"policy lowers 3 to 1", "3", 1, 1},
+		{"policy can't raise 1 to 3", "1", 3, 1},
+		{"unset policy keeps the deployment's", "2", 0, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, map[string]string{"MAX_INFLIGHT": tc.deploy})
+			c := testConfig(1)
+			c.Global.MaxInflight = tc.policy
+			h.load(envelope(c))
+			entered, release := make(chan struct{}, 4), make(chan struct{})
+			h.appHandler = func(w http.ResponseWriter, r *http.Request) {
+				entered <- struct{}{}
+				<-release
+			}
+			done := make(chan struct{}, tc.admits)
+			for range tc.admits {
+				go func() { h.do("GET", "/slow", nil).Body.Close(); done <- struct{}{} }()
+				<-entered
+			}
+			edgeError(t, h.do("GET", "/", nil), 503, "overloaded")
+			close(release)
+			for range tc.admits {
+				<-done
+			}
+		})
+	}
+}
+
 // Bodies over the limit are refused: by Content-Length before contacting the
 // upstream, or mid-stream when the length isn't declared.
 func TestBodyLimit(t *testing.T) {
@@ -246,6 +285,46 @@ func TestSlowBody(t *testing.T) {
 	}
 }
 
+// A client body with broken chunk framing is the client's error, a 400,
+// not an upstream failure.
+func TestMalformedChunkedBody(t *testing.T) {
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { _, _ = io.Copy(io.Discard, r.Body) }
+	resp, _, _ := raw(t, h.front.Listener.Addr().String(), "POST / HTTP/1.1\r\n"+viewer+"Transfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n")
+	edgeError(t, resp, 400, "bad_request")
+	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
+	if got := h.logs.lines("access")[0]["edge.decision"]; got != "body_invalid" {
+		t.Errorf("edge.decision = %v, want body_invalid", got)
+	}
+	if got := upstreamErrors(t, h.srv.store.load().active.stats.counts()); len(got) != 0 {
+		t.Errorf("upstream_errors %v, want none", got)
+	}
+}
+
+// A client that disconnects partway through its upload left; its body is
+// cut short, not malformed, so it is client_gone and not body_invalid.
+func TestClientGoneMidUpload(t *testing.T) {
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { _, _ = io.Copy(io.Discard, r.Body) }
+	conn, err := net.Dial("tcp", h.front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\n"+viewer+"Content-Length: 100\r\n\r\npartial"); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
+	if got := h.logs.lines("access")[0]["edge.decision"]; got != "client_gone" {
+		t.Errorf("edge.decision = %v, want client_gone", got)
+	}
+	if got := h.srv.m.rejected[reasonBodyInvalid].Load(); got != 0 {
+		t.Errorf("body_invalid counted %d times, want 0", got)
+	}
+}
+
 // The upstream timeout bounds the wait for response headers only, so a
 // stream may run longer than it once headers arrive.
 func TestUpstreamTimeout(t *testing.T) {
@@ -284,6 +363,10 @@ func TestUpstreamDown(t *testing.T) {
 		return nil, timeoutErr{}
 	}}
 	edgeError(t, h.do("GET", "/admin/x", nil), 504, "gateway_timeout")
+	waitFor(t, func() bool { return len(h.logs.lines("access")) == 2 })
+	if got := h.logs.lines("access")[1]["edge.upstream_error_kind"]; got != "timeout" {
+		t.Errorf("dial timeout: edge.upstream_error_kind = %v, want timeout", got)
+	}
 }
 
 type timeoutErr struct{}
@@ -432,8 +515,8 @@ func TestCanaryCohort(t *testing.T) {
 	}
 	// Per-version stats feed the guard's comparison.
 	ld := h.srv.store.load()
-	if ld.active.stats.requests.Load() != 3 || ld.candidate.stats.requests.Load() != 3 {
-		t.Fatalf("stats active %d candidate %d", ld.active.stats.requests.Load(), ld.candidate.stats.requests.Load())
+	if a, c := ld.active.stats.counts().Requests, ld.candidate.stats.counts().Requests; a != 3 || c != 3 {
+		t.Fatalf("stats active %d candidate %d", a, c)
 	}
 
 	e.CanaryExpiresAt = time.Now().Add(-time.Second)

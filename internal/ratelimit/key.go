@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"math"
 	"net/netip"
 	"net/textproto"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -28,6 +30,9 @@ const (
 	PartASNum
 	PartLocale
 	PartConstant
+	PartJA4
+	// PartPath is not a key kind: only distinct counts paths.
+	PartPath
 )
 
 // partKinds maps a validated key kind. A kind missing here would key on the
@@ -35,8 +40,11 @@ const (
 var partKinds = map[string]PartKind{
 	"ip": PartIP, "header": PartHeader, "cookie": PartCookie, "query": PartQuery,
 	"jwt_claim": PartClaim, "host": PartHost, "method": PartMethod, "country": PartCountry,
-	"asnum": PartASNum, "locale": PartLocale, "constant": PartConstant,
+	"asnum": PartASNum, "locale": PartLocale, "constant": PartConstant, "ja4": PartJA4,
 }
+
+// distinctKinds maps a validated distinct_of kind; query takes a name.
+var distinctKinds = map[string]PartKind{"path": PartPath, "query": PartQuery, "ip": PartIP, "asnum": PartASNum, "ja4": PartJA4}
 
 // OnMissing is what a rule does when a key characteristic is absent.
 type OnMissing uint8
@@ -82,7 +90,15 @@ type Rule struct {
 	OnMissingKey OnMissing
 	Shadow       bool // action: log
 	FailMode     FailMode
-	prefix       string
+	// DistinctOf is what a Distinct rule counts distinct values of.
+	DistinctOf Part
+	// Count is set for a rule that counts upstream responses by status in
+	// this replica, never in Valkey.
+	Count bool
+	// ExpiresAt is when the rule stops running, in Unix milliseconds;
+	// math.MaxInt64 when it never does.
+	ExpiresAt int64
+	prefix    string
 }
 
 // Compile prepares the rules of one validated config.
@@ -91,10 +107,29 @@ func Compile(rs []snapshot.RateLimitRule) []Rule {
 	for i, r := range rs {
 		shadow := shadowOf[r.Action]
 		p := paramsOf(r, shadow)
+		base := "rl:" + r.Algorithm + ":" + strconv.FormatInt(p.Period, 10) + ":" + r.ID + ":"
 		rule := Rule{
 			ID: r.ID, Params: p, OnMissingKey: onMissingOf[r.OnMissingKey], Shadow: shadow, FailMode: failModeOf[r.FailMode],
+			Count: len(r.CountStatuses) > 0, ExpiresAt: math.MaxInt64,
 			// The hash tag spreads subjects of one rule across cluster slots.
-			prefix: "rl:" + r.Algorithm + ":" + strconv.FormatInt(p.Period, 10) + ":" + r.ID + ":{",
+			prefix: base + "{",
+		}
+		if !r.ExpiresAt.IsZero() {
+			rule.ExpiresAt = r.ExpiresAt.UnixMilli()
+		}
+		if rule.Count {
+			// Its own prefix: a rule that gains or loses count_statuses keeps
+			// its local store, and must not read the other kind's counts. The
+			// set's hash starts fresh counts and blocks when the set changes.
+			statuses := slices.Sorted(slices.Values(r.CountStatuses))
+			rule.prefix = "rl:count:" + base[len("rl:"):] + strconv.FormatUint(fnv1a(strings.Join(statuses, ",")), 16) + ":{"
+		}
+		if r.DistinctOf != "" {
+			kind, name, _ := strings.Cut(r.DistinctOf, ":")
+			rule.DistinctOf = Part{Kind: distinctKinds[kind], Name: name}
+			// A hash, not the name: a changed distinct_of starts fresh state,
+			// and a query name can't add a brace to the key.
+			rule.prefix = base + strconv.FormatUint(fnv1a(r.DistinctOf), 16) + ":{"
 		}
 		for _, k := range r.Key {
 			kind, name, _ := strings.Cut(k, ":")
@@ -148,4 +183,30 @@ func AppendIP(subject []byte, ip netip.Addr) []byte {
 	}
 	a := ip.As16()
 	return append(append(subject, 8), a[:8]...)
+}
+
+// DistinctBit is v's bit in a distinct rule's 1024-bit bitmap: the top 10
+// bits of FNV-1a after MurmurHash3's 64-bit finalizer. FNV-1a alone barely
+// mixes the last byte, so /item/1, /item/2 and so on would land in a
+// pattern of bits rather than at random, and the linear-counting estimate,
+// which assumes random bits, would be off.
+func DistinctBit[T string | []byte](v T) int64 {
+	h := fnv1a(v)
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return int64(h >> 54)
+}
+
+// fnv1a is 64-bit FNV-1a, inline: hash/fnv returns an interface and would
+// allocate on the request path.
+func fnv1a[T string | []byte](v T) uint64 {
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(v); i++ {
+		h ^= uint64(v[i])
+		h *= 1099511628211
+	}
+	return h
 }

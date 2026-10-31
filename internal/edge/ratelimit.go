@@ -16,9 +16,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// maxRateLimitCalls is the most step 8 checks: every site-wide rule plus the
-// capped others.
+// maxRateLimitCalls is the most Valkey calls step 8 makes: every site-wide
+// rule plus the capped others.
 const maxRateLimitCalls = snapshot.MaxSiteWide + maxMatchedRateLimit
+
+// maxCountRules caps rules with count_statuses per request. They take no
+// Valkey call, so they have their own cap.
+const maxCountRules = 5
 
 // Bounds on per-replica rate-limit state (CLAUDE.md, bounded memory).
 const maxPenalties = 100_000
@@ -50,6 +54,8 @@ type rlCheck struct {
 	o    ratelimit.Outcome
 	// fallback is set when the key is the client IP (on_missing_key: fallback_ip).
 	fallback bool
+	// bit is the request's value bit for a distinct rule.
+	bit int64
 }
 
 // rateLimit is step 8: the local penalty cache first, then one pipelined
@@ -57,7 +63,7 @@ type rlCheck struct {
 func (e *Edge) rateLimit(st *reqState) bool {
 	v := st.ver
 	var (
-		buf     [maxRateLimitCalls]rlCheck
+		buf     [maxRateLimitCalls + maxCountRules]rlCheck
 		calls   [maxRateLimitCalls]ratelimit.Call
 		pending [maxRateLimitCalls]int
 	)
@@ -80,11 +86,20 @@ func (e *Edge) rateLimit(st *reqState) bool {
 			c.o.Result = ratelimit.Result{Reset: until - now, Retry: until - now, Now: now, Blocked: until}
 			continue
 		}
+		if c.rule.Count {
+			// Counted after the response; only a cached block refuses now.
+			c.o.Allowed = true
+			if st.nCounts < maxCountRules {
+				st.counts[st.nCounts] = *c
+				st.nCounts++
+			}
+			continue
+		}
 		p := c.rule.Params
 		if kill {
 			p.Penalty = 0
 		}
-		calls[np], pending[np] = ratelimit.Call{Key: c.key, P: p}, k
+		calls[np], pending[np] = ratelimit.Call{Key: c.key, P: p, Bit: c.bit}, k
 		np++
 	}
 	if np > 0 {
@@ -102,13 +117,18 @@ const maxMatchedRateLimit = 5
 
 // planChecks picks the rules step 8 checks, with their keys: every
 // site-wide rule, then other matching rules in order, blocking rules before
-// shadow ones, up to the cap. Clients can choose which rules match, so a
-// rule that can't block never takes a slot from one that can: shadow rules
-// come last, and a rule skipped for a missing key takes no slot. reject is
+// shadow ones, up to the cap. Count rules have a cap of their own. Clients
+// can choose which rules match, so a rule that can't block never takes a
+// slot from one that can: shadow rules come last, and a rule skipped for a
+// missing key takes no slot. An expired rule takes none either. reject is
 // set when a rule with on_missing_key: reject lacks a key part.
 func (st *reqState) planChecks(v *version, out []rlCheck) (checks []rlCheck, capped, reject bool) {
 	checks = out
+	now := st.start.UnixMilli()
 	for _, i := range v.c.SiteWide {
+		if v.expired(i, now) {
+			continue
+		}
 		c, ok, rej := st.check(v, i)
 		if rej {
 			return checks, false, true
@@ -117,33 +137,62 @@ func (st *reqState) planChecks(v *version, out []rlCheck) (checks []rlCheck, cap
 			checks = append(checks, c)
 		}
 	}
-	n := 0
+	var n, nCount int
 	for _, shadow := range [2]bool{false, true} {
 		for i, m := range v.c.RateLimitRules {
 			// SiteWide comes from the normalized expression; the raw one may wrap true.
-			if v.rules[i].Shadow != shadow || slices.Contains(v.c.SiteWide, i) || !m(&st.fields) {
+			if v.rules[i].Shadow != shadow || slices.Contains(v.c.SiteWide, i) || !m(&st.fields) || v.expired(i, now) {
 				continue
 			}
-			if n == maxMatchedRateLimit {
-				return checks, true, false
+			slots, limit := &n, maxMatchedRateLimit
+			if v.rules[i].Count {
+				slots, limit = &nCount, maxCountRules
+			}
+			if *slots == limit {
+				capped = true
+				// Simulate builds versions without stats.
+				if v.stats != nil {
+					v.stats.rules[i].capped.Add(1)
+				}
+				continue
 			}
 			c, ok, rej := st.check(v, i)
 			if rej {
-				return checks, false, true
+				return checks, capped, true
 			}
 			if ok {
 				checks = append(checks, c)
-				n++
+				*slots++
 			}
 		}
 	}
-	return checks, false, false
+	return checks, capped, false
+}
+
+// expired reports whether rule i has expired at now, in Unix
+// milliseconds, and counts it when it has.
+func (v *version) expired(i int, now int64) bool {
+	if v.rules[i].ExpiresAt > now {
+		return false
+	}
+	// Simulate builds versions without stats.
+	if v.stats != nil {
+		v.stats.rules[i].expired.Add(1)
+	}
+	return true
 }
 
 // check builds rule i's key. ok is false when a key part is missing and the
 // rule skips; rej when it rejects. fallback_ip keys on the client IP alone.
 func (st *reqState) check(v *version, i int) (c rlCheck, ok, rej bool) {
 	r := &v.rules[i]
+	var bit int64
+	if r.Params.Algo == ratelimit.Distinct {
+		// A request without the counted value adds nothing to count.
+		if bit, ok = st.distinctBit(r.DistinctOf); !ok {
+			return c, false, false
+		}
+	}
 	var buf [256]byte
 	sub, ok := st.subject(r, buf[:0])
 	if !ok {
@@ -155,7 +204,69 @@ func (st *reqState) check(v *version, i int) (c rlCheck, ok, rej bool) {
 		}
 		sub = ratelimit.FallbackSubject(buf[:0], st.client.ip)
 	}
-	return rlCheck{rule: r, idx: i, key: r.Key(sub), fallback: !ok}, true, false
+	return rlCheck{rule: r, idx: i, key: r.Key(sub), fallback: !ok, bit: bit}, true, false
+}
+
+// distinctBit is the bit of the value a distinct rule counts. ok is false
+// when the request has no such value.
+func (st *reqState) distinctBit(d ratelimit.Part) (int64, bool) {
+	var b [24]byte
+	switch d.Kind {
+	case ratelimit.PartPath:
+		return ratelimit.DistinctBit(st.fields.path), true
+	case ratelimit.PartIP:
+		return ratelimit.DistinctBit(ratelimit.AppendIP(b[:0], st.client.ip)), true
+	case ratelimit.PartASNum:
+		return ratelimit.DistinctBit(ratelimit.AppendInt(b[:0], st.client.asn)), st.client.hasASN
+	}
+	v, ok := st.partValue(d) // query or ja4
+	return ratelimit.DistinctBit(v), ok
+}
+
+// countResponse counts an upstream response for each count rule the
+// request matched whose statuses include it. It takes from the rule's state
+// in this replica at the full limit, not a fleet share: a replica blocks
+// only once it has seen the limit itself, never stricter than configured.
+// The response that goes over has already been sent, so the block is
+// cached for the next request and lasts to the penalty end or the window's.
+func (e *Edge) countResponse(st *reqState, status int) {
+	v := st.ver
+	kill := v.c.Config.KillSwitch.RateLimit
+	now := e.now().UnixMilli()
+	for k := range st.nCounts {
+		c := &st.counts[k]
+		if !v.c.Counts[c.idx].Has(status) {
+			continue
+		}
+		shadow := c.rule.Shadow || kill
+		p := c.rule.Params
+		if shadow {
+			p.Penalty = 0
+		}
+		r, tracked := v.local[c.idx].Take(c.key, p, now)
+		if !tracked {
+			e.m.localUntracked.Add(1)
+		}
+		if r.Allowed {
+			continue
+		}
+		if shadow {
+			v.stats.rules[c.idx].wouldLimit.Add(1)
+			if sampleTop() {
+				v.stats.wouldTop.add(c.key, c.rule.ID, st.display(c))
+			}
+			continue
+		}
+		until := r.Blocked
+		if until == 0 {
+			until = now + r.Reset
+		}
+		// A full cache means this over-limit subject is not refused: count
+		// rules have no other enforcement. Availability first; the drop is counted.
+		if !e.penalties.Block(c.key, until) {
+			e.m.penaltyDropped.Add(1)
+		}
+	}
 }
 
 func (e *Edge) valkeyDo(st *reqState, calls []ratelimit.Call, outs []ratelimit.Outcome) {
@@ -219,7 +330,7 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 				e.m.localUntracked.Add(1)
 			}
 		}
-		if !shadow && st.set.rateLimitHeaders {
+		if !shadow && st.set.rateLimitHeaders && !c.rule.Count {
 			st.addRateLimitHeaders(c)
 		}
 		if c.o.Allowed {
@@ -313,6 +424,8 @@ func (st *reqState) partValue(part ratelimit.Part) (string, bool) {
 		return f.r.Method, true
 	case ratelimit.PartCountry:
 		return c.country, c.country != ""
+	case ratelimit.PartJA4:
+		return c.ja4, c.ja4 != ""
 	default: // PartLocale
 		v := f.localeValue()
 		return v, v != ""

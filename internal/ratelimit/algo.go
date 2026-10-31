@@ -18,10 +18,13 @@ const (
 	SlidingWindow
 	TokenBucket
 	LeakyBucket
+	// Distinct counts distinct values per subject in a Valkey bitmap. It
+	// has no Step model: fail_mode local is refused for it.
+	Distinct
 	numAlgos
 )
 
-var algoNames = [numAlgos]string{"fixed_window", "sliding_window", "token_bucket", "leaky_bucket"}
+var algoNames = [numAlgos]string{"fixed_window", "sliding_window", "token_bucket", "leaky_bucket", "distinct"}
 
 func (a Algo) String() string { return algoNames[a] }
 

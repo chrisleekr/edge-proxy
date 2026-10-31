@@ -16,7 +16,7 @@ if [[ -z "${all_pkgs}" ]]; then
   exit 0
 fi
 
-go test -race -count=1 ./...
+go test -race -count=1 -timeout 20m ./...
 
 if [[ -d cmd/edge ]]; then
   leaked="$(go list -deps ./cmd/edge | grep "^${mod}/" | grep -E "${admin_only}" || true)"

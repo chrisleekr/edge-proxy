@@ -113,7 +113,7 @@ func upstreamHeaders(c *snapshot.Compiled, plan *headerPlan, st *reqState, h htt
 			delete(h, k)
 		}
 	}
-	headerPhase(c, plan, &st.fields, h, st.placeholder)
+	st.hdrMatch = headerPhase(c, plan, &st.fields, h, st.placeholder, st.hdrBuf[:0])
 	if l := st.fields.loc; l != nil {
 		h.Set(l.header, st.fields.localeValue())
 	}
@@ -122,10 +122,9 @@ func upstreamHeaders(c *snapshot.Compiled, plan *headerPlan, st *reqState, h htt
 // headerPhase is step 9 on out, the upstream request's headers: the forward
 // filter (the last matching rule's forward op wins), then every matching
 // rule's other operations in order. Edge-managed headers are set after it,
-// so no rule can override them.
-func headerPhase(c *snapshot.Compiled, plan *headerPlan, req expr.Request, out http.Header, value func(snapshot.Placeholder) string) {
-	var buf [16]int
-	matched := buf[:0]
+// so no rule can override them. It returns matched with the indexes of the
+// matching rules appended.
+func headerPhase(c *snapshot.Compiled, plan *headerPlan, req expr.Request, out http.Header, value func(snapshot.Placeholder) string, matched []int) []int {
 	fw := plan.forward
 	for i, m := range c.HeaderRules {
 		if !m(req) {
@@ -164,6 +163,7 @@ func headerPhase(c *snapshot.Compiled, plan *headerPlan, req expr.Request, out h
 			}
 		}
 	}
+	return matched
 }
 
 // headerSafe drops control characters from a value taken from the request

@@ -37,6 +37,7 @@ const (
 	kUnavailable
 	kOverloaded
 	kGatewayTimeout
+	kForbidden
 	numKinds
 )
 
@@ -44,7 +45,7 @@ const (
 // would map to kBadRequest. A test checks they agree.
 var kindNames = [numKinds]string{
 	"bad_request", "unauthorized", "payload_too_large", "rate_limited",
-	"bad_gateway", "unavailable", "overloaded", "gateway_timeout",
+	"bad_gateway", "unavailable", "overloaded", "gateway_timeout", "forbidden",
 }
 
 var kindByName = func() map[string]kind {
@@ -65,6 +66,10 @@ type settings struct {
 	bodyLimit        int64
 	upstreamTimeout  time.Duration
 	rateLimitHeaders bool
+	// block is "", block or log; blockRule is the index of the rule that
+	// set it, the one whose outcome counts.
+	block     string
+	blockRule int
 }
 
 // defaults are the settings before any config rule matches. They depend
@@ -114,9 +119,16 @@ func resolve(c *snapshot.Compiled, s settings, req expr.Request, matched []int) 
 		if r.RateLimitHeaders != nil {
 			s.rateLimitHeaders = *r.RateLimitHeaders
 		}
+		if r.Block != nil {
+			s.block, s.blockRule = *r.Block, i
+		}
 	}
 	if cfg.KillSwitch.Auth {
 		s.authMode = "none"
+	}
+	// Availability first: the kill switch stops every block at once.
+	if cfg.KillSwitch.Block && s.block == "block" {
+		s.block = "log"
 	}
 	return s, matched
 }
@@ -159,15 +171,29 @@ type reqState struct {
 	resolved  bool
 	matchBuf  [8]int
 	matched   []int
+	hdrBuf    [16]int
+	hdrMatch  []int // matched request-header rules
 	reason    reason
 	rejected  bool
-	upstream  bool // response came from the upstream
+	// wouldBlock is set when a block rule in log mode matched.
+	wouldBlock bool
+	upstream   bool // response came from the upstream
+	// upErr is why the upstream exchange failed, and cause its class, for
+	// the access line. The writer goroutine formats it, so the request path
+	// keeps only the value.
+	upErr     error
+	cause     upstreamCause
 	bodyLarge bool // the body hit the limit
 	bodySlow  bool // the body read deadline passed
+	bodyBad   bool // the body could not be read, such as broken chunk framing
 	retry     int  // Retry-After seconds
 
 	auth                authResult
 	authIssuer, authSub string // set when a token verified
+
+	// counts are the count rules step 8 checked, counted after the response.
+	counts  [maxCountRules]rlCheck
+	nCounts int
 
 	cors              *corsPolicy // nil when no CORS policy applies
 	rlRule            string      // the rate-limit rule that answered 429
@@ -196,7 +222,11 @@ func (e *Edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (e *Edge) serve(st *reqState, r *http.Request) {
 	// Step 1: shed overload before any work. Streams have their own cap so
 	// they can't starve ordinary requests.
+	ld := e.store.load()
 	cnt, limit, rsn := &e.m.inflight, e.cfg.MaxInflight, reasonOverloaded
+	if ld != nil {
+		limit = ld.maxInflight
+	}
 	st.stream = isStream(r)
 	if st.stream {
 		cnt, limit, rsn = &e.m.streams, e.cfg.MaxStreams, reasonStreamsOverloaded
@@ -228,8 +258,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 		return
 	}
 
-	// Step 3: pin one snapshot for the whole request.
-	ld := e.store.load()
+	// Step 3: the snapshot loaded at step 1 serves the whole request.
 	if ld == nil {
 		e.reject(st, kUnavailable, reasonNoSnapshot)
 		return
@@ -238,11 +267,20 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 
 	// Step 4: config phase.
 	st.fields = newFields(r, &st.client, p)
+	st.fields.bots = &ld.snap.Bots
 	st.set, st.matched = resolve(st.ver.c, st.ver.defaults, &st.fields, st.matchBuf[:0])
 	st.resolved = true
 	st.cors = st.ver.cors[st.set.cors]
 	if st.set.locale {
 		st.fields.loc = st.ver.locale
+	}
+	// A blocked request costs no backstop token, token check or quota.
+	switch st.set.block {
+	case "block":
+		e.reject(st, kForbidden, reasonBlocked)
+		return
+	case "log":
+		st.wouldBlock = true
 	}
 	// Step 5: per-replica backstop, before any costly work.
 	if !e.backstop(st) {
@@ -446,7 +484,7 @@ func (e *Edge) recoverPanic(st *reqState) {
 func (e *Edge) finish(st *reqState, r *http.Request) {
 	elapsed := e.now().Sub(st.start)
 	status := st.sw.status
-	e.m.requests[status/100%6].Add(1)
+	e.m.codes[originOf(st.upstream)][codeSlot(status)].Add(1)
 	if st.ver != nil {
 		// A stream's latency is its time to headers: its lifetime would fill
 		// the top bucket, which the guard's p99 signal reads.
@@ -454,7 +492,10 @@ func (e *Edge) finish(st *reqState, r *http.Request) {
 		if st.stream && st.upstream {
 			lat = st.headersAt.Sub(st.start)
 		}
-		st.ver.stats.observe(status, st.upstream, lat)
+		st.ver.stats.observe(status, st.upstream, lat, st.matched, st.hdrMatch)
+		if st.resolved && st.set.block != "" {
+			st.ver.stats.block(st.set.blockRule, st.reason == reasonBlocked)
+		}
 	}
 	decision := decisionOf(st)
 	endSpan(st, r, decision)

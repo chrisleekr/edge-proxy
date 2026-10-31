@@ -181,8 +181,10 @@ func (p *Penalties) Until(key string, now int64) int64 {
 	return 0
 }
 
-// Block records a penalty. When the cache is full it is not recorded and
-// Valkey still enforces it.
+// Block records a penalty and reports whether it fit. When the cache is
+// full it is not recorded: for a Valkey rule, Valkey still enforces it; for
+// a count rule this cache is the only enforcement, so the subject is not
+// refused. That is fail-open by design, and callers count the drop.
 func (p *Penalties) Block(key string, end int64) bool { return p.t.put(key, until(end)) }
 
 // Sweep drops penalties that have ended.

@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,8 +136,8 @@ func TestWebSocket(t *testing.T) {
 			t.Errorf("WebSocket logged as %v", l["http.response.status_code"])
 		}
 	}
-	if h.srv.m.requests[1].Load() != 2 || h.srv.m.requests[0].Load() != 0 {
-		t.Errorf("requests by class: 1xx %d, none %d", h.srv.m.requests[1].Load(), h.srv.m.requests[0].Load())
+	if h.srv.m.codes[1][101].Load() != 2 || h.srv.m.codes[0][0].Load()+h.srv.m.codes[1][0].Load() != 0 {
+		t.Errorf("upstream 101s %d, no answer %d", h.srv.m.codes[1][101].Load(), h.srv.m.codes[0][0].Load()+h.srv.m.codes[1][0].Load())
 	}
 }
 
@@ -161,6 +164,82 @@ func TestUpgradeRefused(t *testing.T) {
 	resp, _, _ = raw(t, addr, wsHandshake)
 	edgeError(t, resp, 502, "bad_gateway")
 	waitFor(t, func() bool { return h.srv.m.streams.Load() == 0 })
+
+	// The error quotes both Upgrade values; the client's is its own to pick,
+	// so the access line keeps the cause and drops the values.
+	waitFor(t, func() bool { return len(h.logs.lines("access")) == 2 })
+	msg, _ := h.logs.lines("access")[1]["edge.upstream_error"].(string)
+	if !strings.Contains(msg, "backend tried to switch protocol") || strings.Contains(msg, "websocket") || strings.Contains(msg, "something-else") {
+		t.Fatalf("edge.upstream_error = %q, want the cause without the Upgrade values", msg)
+	}
+	// The 502 is the edge's own, though the upstream sent a 101 first.
+	if got := h.logs.lines("access")[1]["edge.upstream_answered"]; got != false {
+		t.Errorf("edge.upstream_answered = %v, want false", got)
+	}
+	if got := statusCodes(t, h.srv.store.load().active.stats.counts()); fmt.Sprint(got) != fmt.Sprint(map[string]map[string]uint64{"edge": {"502": 1}, "upstream": {"403": 1}}) {
+		t.Errorf("status codes %v, want the 403 under upstream and the 502 under edge", got)
+	}
+}
+
+// breaks101 is a client connection that fails as the edge writes the 101
+// on it, as one the client reset while the upstream answered does.
+type breaks101 struct{ net.Conn }
+
+func (c breaks101) Write(p []byte) (int, error) {
+	if strings.HasPrefix(string(p), "HTTP/1.1 101") {
+		return 0, syscall.EPIPE
+	}
+	return c.Conn.Write(p)
+}
+
+type breaks101Listener struct{ net.Listener }
+
+func (l breaks101Listener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return breaks101{c}, nil
+}
+
+// A client gone while the edge relays the upstream's 101 is the client's
+// failure: the upstream answered, so no upstream error is counted and the
+// 101 stays the upstream's.
+func TestUpgradeClientGoneDuring101(t *testing.T) {
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	h.appHandler = wsUpstream
+	front := httptest.NewUnstartedServer(h.srv.edge)
+	front.Listener = breaks101Listener{front.Listener}
+	front.Start()
+	t.Cleanup(front.Close)
+
+	conn, err := net.Dial("tcp", front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(conn, wsHandshake); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := io.ReadAll(conn); len(b) != 0 {
+		t.Fatalf("client got %q after its connection broke", b)
+	}
+	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
+	if got := h.logs.lines("access")[0]["edge.decision"]; got != "client_gone" {
+		t.Errorf("edge.decision = %v, want client_gone", got)
+	}
+	counts := h.srv.store.load().active.stats.counts()
+	if got := upstreamErrors(t, counts); len(got) != 0 {
+		t.Errorf("upstream_errors %v, want none", got)
+	}
+	if got := statusCodes(t, counts); fmt.Sprint(got) != fmt.Sprint(map[string]map[string]uint64{"upstream": {"101": 1}}) {
+		t.Errorf("status codes %v, want the upstream's 101 only", got)
+	}
+	if h.srv.m.rejected[reasonClientGone].Load() != 1 {
+		t.Errorf("client_gone %d, want 1", h.srv.m.rejected[reasonClientGone].Load())
+	}
 }
 
 // An upgrade is rate limited like any request, before it reaches the

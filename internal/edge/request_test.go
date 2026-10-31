@@ -152,8 +152,11 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 	r.Header.Set("Referer", "https://ref.example.com/")
 	r.Header.Set("User-Agent", "curl/8")
 	r.Header.Set("X-Forwarded-For", "1.1.1.1, 2.2.2.2")
-	c := client{ip: netip.MustParseAddr("198.51.100.1"), country: "AU", continent: "OC", version: "2.0", asn: 64500, hasASN: true, ssl: true, certVerified: true}
+	c := client{ip: netip.MustParseAddr("198.51.100.1"), country: "AU", continent: "OC", version: "2.0", asn: 64500, hasASN: true, ssl: true, certVerified: true,
+		ja4: chromeJA4, ja3: chromeJA3}
 	f := newFields(r, &c, "/v1/admin")
+	bots := expr.NewIPSet([]netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")})
+	f.bots = &bots
 	f.locale = "ko"
 	f.claims = map[string][]string{"sub": {"u1"}}
 
@@ -171,6 +174,8 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 		"ip.src.country":         "AU",
 		"ip.src.continent":       "OC",
 		"http.request.version":   "2.0",
+		"tls.client.ja4":         chromeJA4,
+		"tls.client.ja3":         chromeJA3,
 		"edge.locale":            "ko",
 	}
 	lists := map[string]struct {
@@ -181,6 +186,7 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 		"http.request.headers":    {"X-Api-Key", []string{"k1", "k2"}},
 		"http.request.cookies":    {"sid", []string{"s1", "s2"}},
 		"http.request.jwt.claims": {"sub", []string{"u1"}},
+		expr.SignalsField:         {"", []string{"ua_tool"}},
 	}
 	for _, fd := range expr.Fields {
 		switch fd.Type {
@@ -223,7 +229,7 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 	}
 	plain := client{}
 	g := newFields(httptest.NewRequest(http.MethodGet, "http://[2001:db8::1]/", nil), &plain, "/")
-	if g.host != "2001:db8::1" || g.String("http.request.full_uri") != "http://[2001:db8::1]/" || g.Bool("ssl") || g.Bool("client_cert.verified") {
+	if g.host != "2001:db8::1" || g.String("http.request.full_uri") != "http://[2001:db8::1]/" || g.Bool("ssl") || g.Bool("client_cert.verified") || g.Bool("client.verified_bot") {
 		t.Errorf("plain request fields wrong: host %q", g.host)
 	}
 }

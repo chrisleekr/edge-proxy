@@ -17,9 +17,12 @@ export function waitReady() {
 
 // viewer is the header CloudFront would add for a client: n maps to one of
 // 16.7M distinct addresses in 20.0.0.0/8, so a run can use a million IPs.
-export function viewer(n) {
+// asn adds the client's AS number, as CloudFront-Viewer-ASN.
+export function viewer(n, asn) {
   const i = n % 16777216;
-  return { Host: 'api.example.com', 'CloudFront-Viewer-Address': `20.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}:443` };
+  const h = { Host: 'api.example.com', 'CloudFront-Viewer-Address': `20.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}:443` };
+  if (asn !== undefined) h['CloudFront-Viewer-ASN'] = String(asn);
+  return h;
 }
 
 // path builds the stored AST for a single path condition.

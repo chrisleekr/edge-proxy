@@ -40,11 +40,33 @@ true
 | `ip.src.country`, `ip.src.continent` | string | Uppercase. Needs a trusted viewer header |
 | `ip.src.asnum` | int | Needs a trusted viewer header |
 | `ssl`, `client_cert.verified` | bool | Need a trusted viewer header |
-| `http.request.version` | string | Needs a trusted viewer header |
+| `http.request.version` | string | `1.0`, `1.1`, `2.0` or `3.0` for every source, whatever form the CDN sends (`HTTP/2` becomes `2.0`); any other value is absent. A literal the edge maps the same way, such as `HTTP/2`, matches as that version with any operator; any other literal, or a pattern such as `HTTP/1` that names `HTTP`, gets a validation warning. Needs a trusted viewer header |
+| `tls.client.ja4` | string | The client's [JA4](https://github.com/FoxIO-LLC/ja4) TLS fingerprint, such as `t13d1516h2_8daaf6152771_02713d6af862`. A header value of another shape is absent, and `eq` or `in` with a value of another shape is refused. Matched exactly, letter case included. Needs a trusted viewer header. With an `ssl` source, absent on a request that wasn't HTTPS, since TLS fingerprints exist only for TLS |
+| `tls.client.ja3` | string | The client's [JA3](https://github.com/salesforce/ja3) TLS fingerprint, 32 lowercase hex characters, with the same rules as JA4, including absent on a request that wasn't HTTPS. Needs a trusted viewer header |
+| `client.signals` | list | Names of the [client signals](#client-signals) the request shows. Only `eq`, `ne`, `in` and `not_in` apply, with signal names as values |
+| `client.verified_bot` | bool | True when `ip.src` is in a crawler range admin fetched from `VERIFIED_BOT_SOURCES`. Needs `VERIFIED_BOT_SOURCES` on admin, or validation refuses the rule; false until admin's first fetch succeeds |
 | `http.request.jwt.claims["name"]` | list | Verified claims only. Not in the `config` phase |
 | `edge.locale` | string | The detected locale. Not in the `config` phase; values must be in the supported list |
 
 A field marked "needs a trusted viewer header" is refused by validation unless the deployment's CDN preset or `VIEWER_HEADERS` provides it.
+
+## Client signals
+
+`client.signals` lists what a request shows of automation, computed by the edge from the request's headers and viewer fields. A signal is a hint, not proof: match it in a rule set to log only first, and combine it with other conditions. [Bot detection](../use/bots.md) has recipes.
+
+| Signal | When | Needs |
+|---|---|---|
+| `ua_missing` | No `User-Agent`, or an empty one. Then no other signal is set | |
+| `ua_tool` | The `User-Agent` names an HTTP library, a command-line tool or a scanner, such as `curl/`, `python-requests/`, `sqlmap` or `nuclei`. Scanners come from the OWASP Core Rule Set's [scanner list](https://github.com/coreruleset/coreruleset/blob/main/rules/scanners-user-agents.data). Only the first 512 bytes are read | |
+| `ua_headless` | The `User-Agent` says `HeadlessChrome` or `PhantomJS` | |
+| `browser_no_accept_language` | A modern browser without `Accept-Language` | |
+| `browser_no_sec_fetch` | A modern browser over HTTPS without `Sec-Fetch-Mode` | `ssl` |
+| `chromium_no_client_hints` | Chrome 89 or later over HTTPS without `Sec-CH-UA` | `ssl` |
+| `client_hints_mismatch` | A Chromium browser over HTTPS whose `Sec-CH-UA` "Chromium" or "Google Chrome" version differs from its `User-Agent` | `ssl` |
+| `browser_http1` | A modern browser over HTTPS with HTTP/1.0 or HTTP/1.1, since browsers negotiate HTTP/2 only over TLS. Never on a WebSocket handshake (`Upgrade: websocket`, `Connection: upgrade` and `Sec-WebSocket-Key`). The handshake headers come from the client, so a client that adds them skips these checks; the exemption exists because browsers open WebSockets over HTTP/1.1. | `ssl`, `http.request.version` |
+| `browser_tls_mismatch` | A modern browser whose JA4 is not TLS 1.3, or negotiated neither `h2` nor `h3`. On a WebSocket handshake only the TLS version is checked. The handshake headers come from the client, so a client that adds them skips these checks; the exemption exists because browsers open WebSockets over HTTP/1.1. | `tls.client.ja4` |
+
+A modern browser is one whose `User-Agent` claims a version that sends `Sec-Fetch-Mode`, from [MDN's compatibility data](https://github.com/mdn/browser-compat-data/blob/main/http/headers/Sec-Fetch-Mode.json): Chrome 76 (and Edge, Opera and other Chromium browsers, which report a `Chrome/` version), Firefox 90 and Safari 16.4. Chrome, Firefox and Edge on iOS are never counted, since they send what Safari sends. Browsers send `Sec-Fetch-*` and client hints only over HTTPS, so those signals need an `ssl` source. A signal whose source field isn't configured can never fire, and validation refuses a rule that names it.
 
 ## Operators
 

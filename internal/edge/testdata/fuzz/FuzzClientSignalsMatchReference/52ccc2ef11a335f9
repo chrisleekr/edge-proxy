@@ -1,0 +1,11 @@
+go test fuzz v1
+string("Mozilla/5.0Chrome/77")
+string("")
+string("")
+string("\"Chromium\";v=\"Google Chrome\";v=\"0\"")
+string("0")
+string("")
+string("")
+bool(true)
+string("0")
+string("")

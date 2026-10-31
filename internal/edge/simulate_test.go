@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -82,6 +83,36 @@ func TestSimulate(t *testing.T) {
 	}
 }
 
+// A config test judges a rule's expiry against the time it runs, as live
+// traffic would: an expired rule is not selected, one expiring later is.
+func TestSimulateSkipsExpiredRule(t *testing.T) {
+	cases := []struct {
+		name    string
+		expires time.Time
+		want    []string
+	}{
+		{"a rule past its expiry is not selected", time.Now().Add(-time.Minute), []string{"login"}},
+		{"a rule expiring later is selected", time.Now().Add(time.Hour), []string{"ap-scraper", "login"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testConfig(1)
+			c.RateLimitRules = []snapshot.RateLimitRule{
+				rlRule("ap-scraper", `http.request.uri.path eq "/login"`, "sliding_window", 10, "ip"),
+				rlRule("login", `http.request.uri.path eq "/login"`, "sliding_window", 10, "ip"),
+			}
+			expireRule(t, c, 0, tc.expires)
+			got, err := Simulate(compiled(t, c), SimRequest{Method: "POST", Host: "api.example.com", Target: "/login", IP: "198.51.100.1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.RateLimitRules, tc.want) {
+				t.Fatalf("rate-limit selection %v, want %v", got.RateLimitRules, tc.want)
+			}
+		})
+	}
+}
+
 // The kill switch turns auth off whatever the rules say.
 func TestKillSwitchAuth(t *testing.T) {
 	c := testConfig(1)
@@ -151,6 +182,24 @@ func TestSimulateFollowsTheLivePipeline(t *testing.T) {
 			t.Fatalf("%+v %v", got, err)
 		}
 	})
+}
+
+// A request that fills the cap and is then rejected for a missing key reports
+// the cap too, as live traffic counts it.
+func TestSimulateCappedThenRejected(t *testing.T) {
+	c := testConfig(1)
+	for i := range 6 {
+		c.RateLimitRules = append(c.RateLimitRules, rlRule(fmt.Sprint("cap-", i), `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip"))
+	}
+	// A count rule has its own cap, so it is checked after rule cap-5 is skipped.
+	tenant := rlRule("tenant", `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip", "header:x-tenant")
+	tenant.OnMissingKey = "reject"
+	tenant.CountStatuses = []string{"404"}
+	c.RateLimitRules = append(c.RateLimitRules, tenant)
+	got, err := Simulate(compiled(t, c), SimRequest{Method: "GET", Host: "h", Target: "/x", IP: "1.2.3.4"})
+	if err != nil || got.Rejected != "rate_limit_key" || !got.RateLimitCapped || got.UpstreamHeaders != nil {
+		t.Fatalf("%+v %v", got, err)
+	}
 }
 
 // Every name validation accepts must have its own behavior in the edge: a
@@ -230,4 +279,80 @@ func TestEdgeHandlesEveryValidatedName(t *testing.T) {
 			}
 		}
 	})
+}
+
+// simRequest builds a SimRequest from JSON naming its fields, so a field
+// the struct lacks fails the test instead of being left out.
+func simRequest(t *testing.T, js string) SimRequest {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(js))
+	dec.DisallowUnknownFields()
+	var r SimRequest
+	if err := dec.Decode(&r); err != nil {
+		t.Fatalf("SimRequest %s: %v", js, err)
+	}
+	return r
+}
+
+// A config test can state the JA4, JA3, HTTP version and verified-crawler
+// flag a CDN and admin would give the edge, and rules and signals see them
+// exactly as they see live traffic.
+func TestSimulateEvaluatesJA4AndHTTPVersion(t *testing.T) {
+	c := testConfig(1)
+	c.ConfigRules = append(c.ConfigRules,
+		snapshot.ConfigRule{ID: "old-tls", Expression: mustParse(`starts_with(tls.client.ja4, "t12")`), Settings: snapshot.Settings{CORSPolicy: new("")}},
+		snapshot.ConfigRule{ID: "http1", Expression: mustParse(`http.request.version in {"1.0" "1.1"}`), Settings: snapshot.Settings{Locale: new(false)}},
+		snapshot.ConfigRule{ID: "known-ja3", Expression: mustParse(`tls.client.ja3 eq "` + chromeJA3 + `"`), Settings: snapshot.Settings{RateLimitHeaders: new(true)}},
+		snapshot.ConfigRule{ID: "crawlers", Expression: mustParse(`client.verified_bot`), Settings: snapshot.Settings{BodyLimit: new(int64(2048))}},
+		snapshot.ConfigRule{ID: "tls-mismatch", Expression: mustParse(`client.signals eq "browser_tls_mismatch"`), Settings: snapshot.Settings{UpstreamTimeout: new(dur(time.Second))}},
+	)
+	cc, _, errs := snapshot.Compile(c, snapshot.Deployment{ViewerFields: []string{"http.request.version", "ssl", "tls.client.ja3", "tls.client.ja4"}, VerifiedBots: true})
+	if errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	const base = `"Method": "GET", "Host": "api.example.com", "Target": "/", "IP": "198.51.100.7"`
+	cases := []struct {
+		name, req string
+		want      []string
+	}{
+		{"TLS 1.2 client", `{` + base + `, "SSL": true, "JA4": "t12d1209h1_8daaf6152771_02713d6af862"}`, []string{"old-tls"}},
+		{"HTTP/1.1 client", `{` + base + `, "HTTPVersion": "1.1"}`, []string{"http1"}},
+		{"known JA3", `{` + base + `, "SSL": true, "JA3": "` + chromeJA3 + `"}`, []string{"known-ja3"}},
+		{"fingerprint on a plain request is absent", `{` + base + `, "JA4": "t12d1209h1_8daaf6152771_02713d6af862", "JA3": "` + chromeJA3 + `"}`, nil},
+		{"verified crawler", `{` + base + `, "VerifiedBot": true}`, []string{"crawlers"}},
+		{"modern client", `{` + base + `, "SSL": true, "JA4": "` + chromeJA4 + `", "HTTPVersion": "2.0"}`, nil},
+		{"Chrome on TLS 1.2", `{` + base + `, "SSL": true, "HTTPVersion": "2.0", "JA4": "t12d1516h2_8daaf6152771_02713d6af862",
+			"Headers": {"User-Agent": ["` + chromeUA + `"], "Accept-Language": ["en"], "Sec-Fetch-Mode": ["navigate"], "Sec-Ch-Ua": ["` + strings.ReplaceAll(hints("124"), `"`, `\"`) + `"]}}`, []string{"old-tls", "tls-mismatch"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Simulate(cc, simRequest(t, tc.req))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got.ConfigRules, tc.want) {
+				t.Fatalf("config rules %v, want %v", got.ConfigRules, tc.want)
+			}
+		})
+	}
+}
+
+// A config test sees a block rule refuse the request at the config phase,
+// and the block setting it resolved.
+func TestSimulateBlockRule(t *testing.T) {
+	c := testConfig(1)
+	c.ConfigRules = append(c.ConfigRules,
+		snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent contains "curl"`), Settings: snapshot.Settings{Block: new("block")}},
+		snapshot.ConfigRule{ID: "crawlers", Expression: mustParse(`http.user_agent contains "bot"`), Settings: snapshot.Settings{Block: new("log")}},
+	)
+	cc := compiled(t, c)
+	for _, tc := range []struct{ ua, rejected, block string }{
+		{"curl/8.5.0", "blocked", "block"},
+		{"examplebot/1.0", "", "log"},
+	} {
+		got, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: "/", IP: "198.51.100.7", Headers: map[string][]string{"User-Agent": {tc.ua}}})
+		if err != nil || got.Rejected != tc.rejected || got.Settings.Block != tc.block {
+			t.Fatalf("%s: %+v %v", tc.ua, got, err)
+		}
+	}
 }

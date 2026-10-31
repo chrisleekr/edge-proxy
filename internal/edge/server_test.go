@@ -59,6 +59,88 @@ func TestInternalEndpoints(t *testing.T) {
 	}
 }
 
+// /metrics counts responses by who answered and their code, so a
+// dashboard tells the edge's 502 from the upstream's, and the edge's
+// upstream failures by cause. Classes keep their meaning for existing
+// dashboards. A code nothing answered with has no series, except the edge's
+// 502, 503 and 504, which are always present.
+func TestMetricsCountResponsesByOriginAndCode(t *testing.T) {
+	h := newHarness(t, nil)
+	in := httptest.NewServer(h.srv.internalMux())
+	defer in.Close()
+	h.load(envelope(testConfig(1)))
+	h.do("GET", "/", nil).Body.Close()
+	h.do("GET", "/a%5Cb", nil).Body.Close()
+	h.app.Close()
+	h.do("GET", "/", nil).Body.Close()
+	resp, err := http.Get(in.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	for _, want := range []string{
+		`edge_responses_total{origin="upstream",code="200"} 1`,
+		`edge_responses_total{origin="edge",code="400"} 1`,
+		`edge_responses_total{origin="edge",code="502"} 1`,
+		// Present before the first one, so rate() sees it.
+		`edge_responses_total{origin="edge",code="503"} 0`, `edge_responses_total{origin="edge",code="504"} 0`,
+		`edge_requests_total{class="2xx"} 1`, `edge_requests_total{class="4xx"} 1`, `edge_requests_total{class="5xx"} 1`, `edge_requests_total{class="none"} 0`,
+		`edge_upstream_errors_total{cause="refused"} 1`, `edge_upstream_errors_total{cause="dns"} 0`,
+	} {
+		if !strings.Contains(body, want+"\n") {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	for _, absent := range []string{`edge_responses_total{origin="edge",code="200"}`, `edge_responses_total{origin="upstream",code="502"}`} {
+		if strings.Contains(body, absent) {
+			t.Errorf("metrics list %s, a code never answered with", absent)
+		}
+	}
+}
+
+// /metrics exports request latency as a histogram on the guard's buckets,
+// in seconds, so histogram_quantile gives a replica's p99. There is no
+// _sum: the buckets are all the edge keeps. A stream counts its time to
+// response headers, not how long it stayed open.
+func TestMetricsExportLatencyHistogram(t *testing.T) {
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			http.NewResponseController(w).Flush()
+			time.Sleep(1100 * time.Millisecond)
+		}
+	}
+	h.statuses(2, "GET", "/")
+	readBody(t, h.do("GET", "/events", nil, "Accept", "text/event-stream"))
+	waitFor(t, func() bool { return h.metrics()["edge_request_duration_seconds_count"] == 3 })
+
+	if !strings.Contains(h.metricsText(), "# TYPE edge_request_duration_seconds histogram\n") {
+		t.Fatal("no histogram TYPE line")
+	}
+	m := h.metrics()
+	prev := 0.0
+	for _, le := range []string{"0.001", "0.002", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"} {
+		n, ok := m[`edge_request_duration_seconds_bucket{le="`+le+`"}`]
+		if !ok || n < prev {
+			t.Fatalf("bucket le=%s is %v (present %v), below the one before (%v)", le, n, ok, prev)
+		}
+		prev = n
+	}
+	if prev != 3 {
+		t.Fatalf("+Inf bucket %v, want every request (3)", prev)
+	}
+	if n := m[`edge_request_duration_seconds_bucket{le="1"}`]; n != 3 {
+		t.Fatalf("%v requests within 1s, want 3: the stream's lifetime was counted", n)
+	}
+	for k := range m {
+		if strings.HasPrefix(k, "edge_request_duration_seconds_sum") {
+			t.Fatalf("histogram exports %s", k)
+		}
+	}
+}
+
 // Shutdown: readyz fails first, in-flight requests finish, and connections
 // that outlive the timeout (a WebSocket, an endless stream) are closed.
 func TestGracefulShutdown(t *testing.T) {

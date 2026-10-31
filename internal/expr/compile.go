@@ -85,6 +85,9 @@ func compileRule(r Node) Matcher {
 		return func(req Request) bool { return !inner(req) }
 	}
 	f, _ := LookupField(r.Field)
+	if f.Name == "http.request.version" {
+		r.Value = versionLiterals(r.Value)
+	}
 	switch f.Type {
 	case TypeIP:
 		return compileIP(f.Name, op.Name, r.Value)
@@ -108,6 +111,25 @@ func compileRule(r Node) Matcher {
 	}
 	name := f.Name
 	return func(req Request) bool { return pred(req.String(name)) }
+}
+
+// versionLiterals maps literals in a form the edge normalises, such as
+// "HTTP/2", to that form, so rules saved before the edge normalised the
+// version keep matching what they matched. Other literals are kept as is.
+func versionLiterals(v Value) Value {
+	if n := HTTPVersion(v.One); n != "" {
+		v.One = n
+	}
+	// A new slice: v.List is shared with the stored rule.
+	list := make([]string, len(v.List))
+	for i, s := range v.List {
+		if n := HTTPVersion(s); n != "" {
+			s = n
+		}
+		list[i] = s
+	}
+	v.List = list
+	return v
 }
 
 func stringPred(op string, v Value) func(string) bool {

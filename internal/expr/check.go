@@ -1,9 +1,11 @@
 package expr
 
 import (
+	"cmp"
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -13,7 +15,8 @@ import (
 type Env struct {
 	Phase Phase
 	// ViewerAvailable reports whether the deployment configured a trusted
-	// source for a viewer field. Nil means none are available.
+	// source for a viewer field, or VERIFIED_BOT_SOURCES for
+	// VerifiedBotField. Nil means none are available.
 	ViewerAvailable func(field string) bool
 	// AllowRegex enables the "matches" operator (off by default).
 	AllowRegex bool
@@ -101,8 +104,12 @@ func (c *checker) rule(r Node, path string) {
 		c.add(path, "unknown field %q", r.Field)
 		return
 	}
-	if f.Source == SourceViewer && (c.env.ViewerAvailable == nil || !c.env.ViewerAvailable(f.Name)) {
+	available := c.env.ViewerAvailable != nil && c.env.ViewerAvailable(f.Name)
+	switch {
+	case f.Source == SourceViewer && !available:
 		c.add(path, "field %q has no trusted source configured in this deployment", f.Name)
+	case f.Name == VerifiedBotField && !available:
+		c.add(path, "client.verified_bot needs VERIFIED_BOT_SOURCES")
 	}
 	if !f.InPhase(c.env.Phase) {
 		c.add(path, "field %q is not available in the %s phase", f.Name, c.env.Phase)
@@ -113,7 +120,7 @@ func (c *checker) rule(r Node, path string) {
 		c.add(path, "unknown operator %q", r.Operator)
 		return
 	}
-	if !op.accepts(f.Type) {
+	if !op.accepts(f.Type) || f.Exact && !exactOp(op) {
 		c.add(path, "operator %q can't be used with field %q", op.Name, f.Name)
 		return
 	}
@@ -155,7 +162,7 @@ func (c *checker) value(f FieldDef, op OpDef, v Value, path string) {
 			return
 		}
 		for _, item := range v.List {
-			if msg := literalProblem(f, op, item, true); msg != "" {
+			if msg := c.literal(f, op, item, true); msg != "" {
 				c.add(path, "%s", msg)
 				return
 			}
@@ -165,12 +172,40 @@ func (c *checker) value(f FieldDef, op OpDef, v Value, path string) {
 			c.add(path, "operator %q takes a single value", op.Name)
 			return
 		}
-		if msg := literalProblem(f, op, v.One, false); msg != "" {
+		if msg := c.literal(f, op, v.One, false); msg != "" {
 			c.add(path, "%s", msg)
 			return
 		}
 		c.pattern(op, v.One, path)
 	}
+}
+
+// exactOp reports eq, ne, in and not_in.
+func exactOp(op OpDef) bool {
+	name := cmp.Or(op.Negates, op.Name)
+	return name == "eq" || name == "in"
+}
+
+// literal is literalProblem plus what depends on the deployment: a signal
+// whose viewer field has no source can never fire.
+func (c *checker) literal(f FieldDef, op OpDef, s string, inList bool) string {
+	if msg := literalProblem(f, op, s, inList); msg != "" || f.Name != SignalsField {
+		return msg
+	}
+	i := slices.IndexFunc(Signals, func(d SignalDef) bool { return d.Name == s })
+	if i < 0 {
+		names := make([]string, len(Signals))
+		for k, d := range Signals {
+			names[k] = d.Name
+		}
+		return fmt.Sprintf("unknown signal %q; use %s", s, strings.Join(names, ", "))
+	}
+	for _, n := range Signals[i].Needs {
+		if c.env.ViewerAvailable == nil || !c.env.ViewerAvailable(n) {
+			return fmt.Sprintf("%q can never match: it needs %s, which has no trusted source configured in this deployment", s, n)
+		}
+	}
+	return ""
 }
 
 func (c *checker) pattern(op OpDef, v, path string) {
@@ -249,6 +284,14 @@ func neverMatches(f FieldDef, op OpDef, s string) string {
 	}
 	if name == "matches" || name == "wildcard" {
 		return ""
+	}
+	if name == "eq" || name == "in" {
+		switch {
+		case f.Name == "tls.client.ja4" && !ValidJA4(s):
+			return fmt.Sprintf("%q can never match: tls.client.ja4 values are JA4 fingerprints such as t13d1516h2_8daaf6152771_02713d6af862", s)
+		case f.Name == "tls.client.ja3" && !ValidJA3(s):
+			return fmt.Sprintf("%q can never match: tls.client.ja3 values are JA3 fingerprints, 32 lowercase hex characters", s)
+		}
 	}
 	switch {
 	case f.Case == CaseLower && strings.ToLower(s) != s:

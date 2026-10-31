@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,6 +153,38 @@ func (h *harness) load(e *snapshot.Envelope) {
 	}
 }
 
+// loadJSON activates e after patch edits its JSON form, decoded strictly as
+// the poller decodes what admin serves, so a test also checks the JSON
+// shape of what it sets.
+func (h *harness) loadJSON(e *snapshot.Envelope, patch func(env map[string]any)) {
+	h.t.Helper()
+	b, err := json.Marshal(e)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		h.t.Fatal(err)
+	}
+	patch(m)
+	if b, err = json.Marshal(m); err != nil {
+		h.t.Fatal(err)
+	}
+	d, err := snapshot.Decode(bytes.NewReader(b))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.load(d)
+}
+
+// activeJSON is the active config in an envelope's JSON form.
+func activeJSON(env map[string]any) map[string]any { return env["active"].(map[string]any) }
+
+// ruleJSON is rule i of a phase in a config's JSON form.
+func ruleJSON(cfg map[string]any, phase string, i int) map[string]any {
+	return cfg[phase].([]any)[i].(map[string]any)
+}
+
 // do sends a request as CloudFront would: from the trusted peer, with the
 // viewer's address. headers are pairs and override the defaults.
 func (h *harness) do(method, target string, body io.Reader, headers ...string) *http.Response {
@@ -274,4 +308,74 @@ func (h *harness) statuses(n int, method, target string, headers ...string) []in
 		out = append(out, resp.StatusCode)
 	}
 	return out
+}
+
+// metricsText is what /metrics serves now.
+func (h *harness) metricsText() string {
+	h.t.Helper()
+	rec := httptest.NewRecorder()
+	h.srv.internalMux().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	return rec.Body.String()
+}
+
+// metrics is each /metrics series' value, keyed by name and labels as
+// Prometheus reads them.
+func (h *harness) metrics() map[string]float64 {
+	h.t.Helper()
+	out := map[string]float64{}
+	for line := range strings.Lines(h.metricsText()) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		i := strings.LastIndexByte(line, ' ')
+		v, err := strconv.ParseFloat(line[i+1:], 64)
+		if err != nil {
+			h.t.Fatalf("metrics line %q: %v", line, err)
+		}
+		out[line[:i]] = v
+	}
+	return out
+}
+
+// expireRule sets rate-limit rule i of c to expire at at, through the
+// config's JSON form decoded strictly as the edge decodes a snapshot, so a
+// test also checks the JSON shape of expires_at.
+func expireRule(tb testing.TB, c *snapshot.Config, i int, at time.Time) {
+	tb.Helper()
+	b, err := json.Marshal(c)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		tb.Fatal(err)
+	}
+	ruleJSON(m, "rate_limit_rules", i)["expires_at"] = at.UTC().Format(time.RFC3339Nano)
+	if b, err = json.Marshal(m); err != nil {
+		tb.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var out snapshot.Config
+	if err := dec.Decode(&out); err != nil {
+		tb.Fatalf("decode config: %v", err)
+	}
+	*c = out
+}
+
+// fakeClock replaces the edge's clock with one the test moves, held in
+// Unix milliseconds. Set it before the first request.
+func (h *harness) fakeClock(at time.Time) *atomic.Int64 {
+	h.t.Helper()
+	var ms atomic.Int64
+	ms.Store(at.UnixMilli())
+	h.srv.edge.now = func() time.Time { return time.UnixMilli(ms.Load()) }
+	return &ms
+}
+
+// ruleOutcome is rate-limit rule id's count of outcome on /metrics.
+func (h *harness) ruleOutcome(id, outcome string) float64 {
+	h.t.Helper()
+	return h.metrics()[`edge_ratelimit_rule_total{rule="`+id+`",outcome="`+outcome+`"}`]
 }

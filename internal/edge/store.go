@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -28,8 +29,10 @@ type version struct {
 	cors     map[string]*corsPolicy
 	headers  headerPlan
 	locale   *localeResolver // nil when no locales are supported
-	// local holds fail_mode local state per rule.
-	local []*ratelimit.Local[string]
+	// local holds per-rule state in this replica, for fail_mode local and
+	// count rules; nil for rules that need none.
+	local  []*ratelimit.Local[string]
+	nLocal int
 	// issuers by token iss.
 	issuers map[string]*issuer
 }
@@ -38,7 +41,9 @@ type version struct {
 func (v *version) sweep(now time.Time) {
 	v.backstop.Sweep(now)
 	for _, l := range v.local {
-		l.Sweep(now.UnixMilli())
+		if l != nil {
+			l.Sweep(now.UnixMilli())
+		}
 	}
 }
 
@@ -62,27 +67,42 @@ func newVersion(c *snapshot.Compiled, st *versionStats, prev *loaded, ks *keySto
 	}
 	// Local state outlives a publish, so a publish during a Valkey outage
 	// can't reset the counts. Keys carry the rule's algorithm and period,
-	// so a changed rule can't misread old state. With a different rule
-	// count each share changes size, and state starts fresh.
+	// so a changed rule can't misread old state. With a different number of
+	// local rules each share changes size, and state starts fresh.
+	for _, r := range v.rules {
+		if needsLocal(r) {
+			v.nLocal++
+		}
+	}
 	prevLocal := map[string]*ratelimit.Local[string]{}
 	if prev != nil {
 		for _, pv := range []*version{prev.active, prev.candidate} {
-			if pv != nil && len(pv.rules) == len(v.rules) {
+			if pv != nil && pv.nLocal == v.nLocal {
 				for i, r := range pv.rules {
-					prevLocal[r.ID] = pv.local[i]
+					if pv.local[i] != nil {
+						prevLocal[r.ID] = pv.local[i]
+					}
 				}
 			}
 		}
 	}
-	for _, r := range v.rules {
+	v.local = make([]*ratelimit.Local[string], len(v.rules))
+	for i, r := range v.rules {
+		if !needsLocal(r) {
+			continue
+		}
 		l := prevLocal[r.ID]
 		if l == nil {
-			l = ratelimit.NewLocalStore(maxLocalState / len(v.rules))
+			l = ratelimit.NewLocalStore(maxLocalState / v.nLocal)
 		}
-		v.local = append(v.local, l)
+		v.local[i] = l
 	}
 	return v
 }
+
+// needsLocal reports a rule with state in this replica: a count rule, or
+// one that falls back to local counts while Valkey is unavailable.
+func needsLocal(r ratelimit.Rule) bool { return r.Count || r.FailMode == ratelimit.FailLocal }
 
 // loaded is what a request pins at step 3. It is replaced whole, never
 // mutated, so a request keeps one consistent view.
@@ -93,6 +113,10 @@ type loaded struct {
 	source    string   // admin, cache or bootstrap
 	// bootstrapAge is set only when serving a bootstrap file.
 	bootstrapAge time.Duration
+	// maxInflight is MAX_INFLIGHT, lowered by the active policy's
+	// max_inflight when that is smaller. Policy can't raise it: MAX_INFLIGHT
+	// is what this replica's memory holds.
+	maxInflight int
 }
 
 type store struct {
@@ -254,7 +278,8 @@ func (p *poller) apply(e *snapshot.Envelope, source string, bootstrapAge time.Du
 		p.m.snapshotRejected.Add(1)
 		return fmt.Errorf("snapshot rejected: %w", expr.Issues(errs))
 	}
-	ld := &loaded{snap: s, source: source, bootstrapAge: bootstrapAge}
+	ld := &loaded{snap: s, source: source, bootstrapAge: bootstrapAge,
+		maxInflight: min(p.cfg.MaxInflight, cmp.Or(s.Active.Config.Global.MaxInflight, p.cfg.MaxInflight))}
 	prev := p.store.load()
 	if s.Candidate != nil {
 		st := p.reg.use(s.Active, s.Candidate)

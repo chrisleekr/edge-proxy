@@ -17,7 +17,30 @@ It runs one edge with traffic shaped like a public API: 50% `/api/`, 45% pages a
 | Valkey calls/req | Valkey operations per request |
 | bytes per key, µs per call | Valkey memory per key and Valkey CPU per call |
 
+`SENSORS=N` adds N log-only rules shaped like the autopilot's sensors, alternating a per-IP 404 count and a per-IP distinct-paths count over `/api/items`, `/pages/home` and `/login`. Two runs, `SENSORS=0` and `SENSORS=10`, give the cost of a sensor.
+
 Run it on hardware like your production edges, with k6 on a separate machine if you can. On a shared machine the load generator competes with the edge: dropped iterations and p99 spikes at low edge CPU are the load generator, not the edge. k6's own garbage collector adds 10–40 ms to the p99 of even a direct request at its default; `make capacity-max` runs it with `GOGC=800` and `GOMEMLIMIT=8GiB`.
+
+### Cost of a sensor
+
+**Measured** with `SENSORS=0 make capacity` and `SENSORS=10 make capacity` on Docker Desktop (10-vCPU VM) on a 10-core laptop also running desktop apps, with a load average of 6 to 9. This is not a quiet benchmark host:
+
+| Rate | p99, 0 sensors | p99, 10 sensors | Edge CPU, 0 → 10 | Valkey calls/req, 0 → 10 |
+|---|---|---|---|---|
+| 500 RPS | 0.94 ms | 1.48 ms | 17% → 20% | 1.54 → 3.50 |
+| 1,000 RPS | 0.93 ms | 3.76 ms | 23% → 26% | 1.55 → 3.50 |
+| 2,000 RPS | 0.99 ms | 1.13 ms | 44% → 47% | 1.55 → 3.50 |
+| 3,000 RPS | 1.60 ms | 1.74 ms | 70% → 71% | 1.55 → 3.50 |
+| 4,000 RPS | 1.02 ms | 1.13 ms | 86% → 87% | 1.55 → 3.50 |
+| 5,000 RPS | 1.69 ms | 1.57 ms | 104% → 108% | 1.51 → 3.50 |
+
+Per sensor:
+
+- **A distinct sensor costs one Valkey call per request it matches.** The five distinct sensors matched 1.95 times per request in this mix, and Valkey calls rose by exactly 1.95. A request still makes one Valkey round trip: the calls are pipelined.
+- **A 404-count sensor costs no Valkey call.** It counts in each edge's memory.
+- **Edge CPU** rose 1 to 4 points for all ten, under half a point per sensor at every rate. At 5,000 RPS the edge served about 4,600 RPS per vCPU instead of 4,800.
+- **p99** stayed within 1 ms of the run without sensors at every rate but 1,000 RPS, where one 3.76 ms step is the host's load: the 2,000 to 5,000 RPS steps differ by 0.1 to 0.2 ms either way.
+- **Valkey memory** went from 133k keys and 16 MB to 450k keys and 100 MB, 122 to 221 bytes per key on average, because a distinct key holds a 128-byte bitmap of the values it has seen. That is about 63k keys and 17 MB per distinct sensor here, for 100k client IPs. Valkey CPU per call stayed at about 13 µs.
 
 ## Find one edge's maximum
 
@@ -86,7 +109,7 @@ Valkey used **124 bytes per key** and **21 µs of CPU per call**. With `STREAMS=
 | Valkey memory | The site-wide sliding-window key lives up to 2 minutes: 1M IPs/min × 2 min, plus 5% for login ≈ 2.1M keys × 124 B ≈ 260 MB, × 1.5 for overhead | **≈ 400 MB in total**, 512 MB per shard leaves room |
 | `VALKEY_TIMEOUT` | Well inside the 10 ms budget, above in-region Valkey p99 (1–2 ms) | **5ms** |
 | `MAX_STREAMS` | 10k streams ÷ 8 pods left after losing a zone = 1,250 per pod; default is 1,000. At the cap, 2,500 × 72 KiB ≈ 180 MiB of the 1 GiB pod | **2500** |
-| `MAX_INFLIGHT` | Little's law after a zone loss: 5k RPS × 0.2 s = 1,000 concurrent, × 2 for bursts | **10000** (default) |
+| `MAX_INFLIGHT` | Little's law after a zone loss: 5k RPS × 0.2 s = 1,000 concurrent, × 2 for bursts = 2,000. Memory: about 100 KiB per in-flight request. The default from `GOMEMLIMIT` (about 920 MiB in a 1 GiB pod) is 3,680: 3,680 × 100 KiB ≈ 360 MiB, plus 180 MiB of streams, fits. Without `GOMEMLIMIT` the default is 10,000, which memory can't hold | default, with **`GOMEMLIMIT=920MiB`** (about 90% of the pod limit; the Helm chart sets it) |
 | Backstop (**Settings → Backstop**) | Per pod. Connections pin a client to a pod, so the NAT's 300 RPS can land on one. Default is 100/s, burst 200, which would block it | **limit 1000/s, burst 2000** |
 | `LOG_SAMPLE_RATE` | 40k RPS × ~400 B ≈ 16 MB/s of access logs unsampled | **0.05** (rejections and 5xx are always logged) |
 

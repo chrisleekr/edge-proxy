@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/chrisleekr/edge-proxy/internal/expr"
 )
 
 // client is what step 2 learns about the client.
@@ -17,9 +19,11 @@ type client struct {
 	trusted bool
 
 	country, continent, version string
-	asn                         int64
-	hasASN                      bool
-	ssl, certVerified           bool
+	// ja4 and ja3 are "" unless the CDN sent a well-formed fingerprint.
+	ja4, ja3          string
+	asn               int64
+	hasASN            bool
+	ssl, certVerified bool
 }
 
 // Reasons step 2 rejects a request. Each is a 400 with the bad_request template.
@@ -39,7 +43,7 @@ type identity struct {
 	secretHeader string
 	secrets      [][]byte
 
-	country, continent, asn, ssl, version, cert string // viewer headers, canonical
+	country, continent, asn, ssl, version, cert, ja4, ja3 string // viewer headers, canonical
 }
 
 func newIdentity(c *Config) *identity {
@@ -54,6 +58,8 @@ func newIdentity(c *Config) *identity {
 		ssl:          h(c.Viewer["ssl"]),
 		version:      h(c.Viewer["http.request.version"]),
 		cert:         h(c.Viewer["client_cert.verified"]),
+		ja4:          h(c.Viewer["tls.client.ja4"]),
+		ja3:          h(c.Viewer["tls.client.ja3"]),
 	}
 	for _, s := range c.IngressSecrets {
 		id.secrets = append(id.secrets, []byte(s))
@@ -198,13 +204,27 @@ func (id *identity) viewer(h http.Header, c *client) {
 		}
 	}
 	if id.ssl != "" {
-		c.ssl = strings.EqualFold(h.Get(id.ssl), "https")
+		// A scheme from most CDNs, true or false from GCP's {client_encrypted}.
+		v := h.Get(id.ssl)
+		c.ssl = strings.EqualFold(v, "https") || strings.EqualFold(v, "true")
 	}
 	if id.version != "" {
-		c.version = h.Get(id.version)
+		c.version = expr.HTTPVersion(h.Get(id.version))
 	}
 	if id.cert != "" {
 		c.certVerified = strings.EqualFold(h.Get(id.cert), "true")
+	}
+	// A fingerprint exists only for TLS: on a request the CDN saw as plain
+	// HTTP, any value came from the client.
+	if id.ssl != "" && !c.ssl {
+		return
+	}
+	// A CDN sends "" when it can't tell; any other malformed value is absent too.
+	if v := h.Get(id.ja4); id.ja4 != "" && expr.ValidJA4(v) {
+		c.ja4 = v
+	}
+	if v := h.Get(id.ja3); id.ja3 != "" && expr.ValidJA3(v) {
+		c.ja3 = v
 	}
 }
 

@@ -23,7 +23,7 @@ type rejectCase struct {
 func TestCompileRejects(t *testing.T) {
 	cases := []rejectCase{
 		// Top level.
-		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 3 is not supported"},
+		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 6 is not supported"},
 		{"version zero", func(c *Config) { c.Version = 0 }, nil, "version", "at least 1"},
 		{"config over 8 MB", addHugeHeaderRules, nil, "", "bytes as JSON"},
 
@@ -32,6 +32,8 @@ func TestCompileRejects(t *testing.T) {
 		{"backstop period over an hour", func(c *Config) { c.Global.Backstop.Period = dur("2h") }, nil, "global.backstop.period", "whole seconds from 1s to 1h0m0s"},
 		{"backstop burst over the cap", func(c *Config) { c.Global.Backstop.Burst = MaxCount + 1 }, nil, "global.backstop.burst", "must be 1 to"},
 		{"backstop without a memory bound", func(c *Config) { c.Global.Backstop.MaxEntries = 0 }, nil, "global.backstop.max_entries", "must be 1 to 10,000,000"},
+		{"negative max in-flight", func(c *Config) { c.Global.MaxInflight = -1 }, nil, "global.max_inflight", "must be 1 to 1,000,000"},
+		{"max in-flight over the cap", func(c *Config) { c.Global.MaxInflight = MaxInflight + 1 }, nil, "global.max_inflight", "must be 1 to 1,000,000"},
 
 		// Response templates.
 		{"too many templates", func(c *Config) {
@@ -309,6 +311,13 @@ func TestCompileRejects(t *testing.T) {
 		{"set op with a from field", func(c *Config) { c.RequestHeaderRules[1].Ops[0].From = "X-A" }, nil, "request_header_rules[1].ops[0].from", "doesn't apply to set"},
 		{"forward op with a name", func(c *Config) { c.RequestHeaderRules[2].Ops[0].Name = "X-A" }, nil, "request_header_rules[2].ops[0].name", "doesn't apply to forward"},
 		{"forward op with no mode", func(c *Config) { c.RequestHeaderRules[2].Ops[0].Mode = "" }, nil, "request_header_rules[2].ops[0].mode", "all, allowlist or denylist"},
+
+		// Bot detection.
+		{"block setting that isn't block or log", func(c *Config) { c.ConfigRules[0].Settings.Block = new("deny") }, nil, "config_rules[0].settings.block", "must be block or log"},
+		{"count status with a letter inside", func(c *Config) { c.RateLimitRules[1].CountStatuses = []string{"4x4"} }, nil, "rate_limit_rules[1].count_statuses[0]", "must be a status from 100 to 499"},
+		{"distinct path with a name", func(c *Config) {
+			c.RateLimitRules[1].Algorithm, c.RateLimitRules[1].DistinctOf = "distinct", "path:x"
+		}, nil, "rate_limit_rules[1].distinct_of", "path takes no name"},
 	}
 	runRejects(t, cases)
 }

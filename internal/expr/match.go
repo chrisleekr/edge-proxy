@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"sort"
+	"strings"
 )
 
 // wildcard matches a whole value against a pattern where "*" means zero or
@@ -148,6 +149,23 @@ func (s ipSet) contains(a netip.Addr) bool {
 // IPv4, and no zone, since a zone is interface scope, not client identity.
 func clientAddr(a netip.Addr) netip.Addr { return a.WithZone("").Unmap() }
 
+// HTTPVersion writes a viewer HTTP version as CloudFront does: 1.0, 1.1,
+// 2.0 or 3.0. GCP and Cloudflare send HTTP/1.1, HTTP/2 and the like. Any
+// other value is "", absent.
+func HTTPVersion(v string) string {
+	switch strings.TrimPrefix(v, "HTTP/") {
+	case "1.0":
+		return "1.0"
+	case "1.1":
+		return "1.1"
+	case "2", "2.0":
+		return "2.0"
+	case "3", "3.0":
+		return "3.0"
+	}
+	return ""
+}
+
 // lastAddr returns the highest address in p (all host bits set).
 func lastAddr(p netip.Prefix) netip.Addr {
 	b := p.Addr().AsSlice()
@@ -157,3 +175,19 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	a, _ := netip.AddrFromSlice(b)
 	return a
 }
+
+// IPSet is the CIDR matcher expressions use, for address sets that come
+// from elsewhere, such as verified crawler ranges.
+type IPSet struct{ s ipSet }
+
+// NewIPSet builds a set from prefixes.
+func NewIPSet(ps []netip.Prefix) IPSet {
+	items := make([]string, len(ps))
+	for i, p := range ps {
+		items[i] = p.String()
+	}
+	return IPSet{newIPSet(items)}
+}
+
+// Contains reports whether a is in the set. The zero IPSet is empty.
+func (s IPSet) Contains(a netip.Addr) bool { return s.s.contains(a) }

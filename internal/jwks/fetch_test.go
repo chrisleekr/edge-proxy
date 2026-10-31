@@ -42,6 +42,19 @@ func TestFetchFromAnAllowedPrivateHost(t *testing.T) {
 	}
 }
 
+// A crawler range list goes through the same guard with its own size cap,
+// and its errors name it as a source, not a JWKS.
+func TestFetchMaxCapsOtherDocuments(t *testing.T) {
+	ranges := `{"prefixes":[{"ipv4Prefix":"66.249.64.0/27"}]}`
+	u, c := idp(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(ranges)) }, "127.0.0.1")
+	if b, err := c.FetchMax(t.Context(), u, len(ranges)); err != nil || string(b) != ranges {
+		t.Fatalf("FetchMax = %q, %v", b, err)
+	}
+	if _, err := c.FetchMax(t.Context(), u, len(ranges)-1); err == nil || !strings.HasPrefix(err.Error(), "source is larger than") {
+		t.Fatalf("over the cap: %v", err)
+	}
+}
+
 // A JWKS URL can carry a secret in its query. Errors are logged, so they
 // must not repeat the URL.
 func TestFetchErrorsOmitTheURL(t *testing.T) {

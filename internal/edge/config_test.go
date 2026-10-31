@@ -2,6 +2,7 @@ package edge
 
 import (
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -136,6 +137,41 @@ func TestLoadConfigVariants(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.check(t, c)
+		})
+	}
+}
+
+// Without MAX_INFLIGHT the cap follows GOMEMLIMIT, so an overload is shed
+// with 503 before the replica runs out of memory. MAX_INFLIGHT still wins.
+func TestMaxInflightDefaultFollowsMemoryLimit(t *testing.T) {
+	cases := []struct {
+		name  string
+		limit int64
+		set   string
+		want  int
+	}{
+		{"no GOMEMLIMIT keeps 10,000", math.MaxInt64, "", 10_000},
+		{"256 MiB pod with GOMEMLIMIT 230MiB", 230 << 20, "", 920},
+		{"512 MiB pod with GOMEMLIMIT 460MiB", 460 << 20, "", 1840},
+		{"8 GiB pod stays at 10,000", 7 << 30, "", 10_000},
+		{"MAX_INFLIGHT set by the deployment", 230 << 20, "3000", 3000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := memoryLimit
+			memoryLimit = func() int64 { return tc.limit }
+			t.Cleanup(func() { memoryLimit = orig })
+			e := cloudfrontEnv()
+			if tc.set != "" {
+				e["MAX_INFLIGHT"] = tc.set
+			}
+			c, err := LoadConfig(env(e))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.MaxInflight != tc.want {
+				t.Fatalf("MaxInflight %d, want %d", c.MaxInflight, tc.want)
+			}
 		})
 	}
 }

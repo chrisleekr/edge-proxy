@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -86,6 +87,7 @@ func (e *Edge) newReverseProxy() *httputil.ReverseProxy {
 			st := stateOf(resp.Request)
 			st.upTimer.Stop()
 			st.upstream, st.headersAt = true, e.now()
+			e.countResponse(st, resp.StatusCode)
 			// Edge-managed: replaces any the upstream sent.
 			st.setRateLimitHeaders(resp.Header)
 			st.setCORS(resp.Header)
@@ -148,7 +150,7 @@ func (e *Edge) rewrite(pr *httputil.ProxyRequest, st *reqState) {
 	if st.client.ssl {
 		proto = "https"
 	}
-	v := make(headerValues, 0, 10)
+	v := make(headerValues, 0, 11)
 	v.set(h, "X-Forwarded-For", ip)
 	v.set(h, "X-Forwarded-Proto", proto)
 	v.set(h, "X-Forwarded-Host", pr.In.Host)
@@ -163,6 +165,9 @@ func (e *Edge) rewrite(pr *httputil.ProxyRequest, st *reqState) {
 	}
 	if st.client.hasASN {
 		v.set(h, "X-Edge-Geo-Asn", strconv.FormatInt(st.client.asn, 10))
+	}
+	if st.client.ja4 != "" {
+		v.set(h, "X-Edge-Tls-Ja4", st.client.ja4)
 	}
 	if st.authIssuer != "" {
 		v.set(h, "X-Edge-Auth-Issuer", st.authIssuer)
@@ -185,6 +190,15 @@ func (v *headerValues) set(h http.Header, key, val string) {
 
 // proxyError maps a failed upstream exchange to a templated response.
 func (e *Edge) proxyError(st *reqState, r *http.Request, err error) {
+	if st.sw.status == http.StatusSwitchingProtocols {
+		// The upstream's 101 was relayed and writing it to the hijacked
+		// client connection failed; the upstream answered.
+		st.reason, st.rejected = reasonClientGone, true
+		e.m.rejected[reasonClientGone].Add(1)
+		return
+	}
+	// ReverseProxy runs ModifyResponse before it checks a 101's Upgrade; the edge writes this response.
+	st.upstream = false
 	var ne net.Error
 	switch {
 	case st.bodyLarge:
@@ -192,21 +206,69 @@ func (e *Edge) proxyError(st *reqState, r *http.Request, err error) {
 	case st.bodySlow:
 		e.reject(st, kBadRequest, reasonBodyTimeout)
 	case errors.Is(context.Cause(r.Context()), errUpstreamTimeout):
+		// err is the cancellation; the cause says which deadline passed.
+		e.upstreamFailed(st, causeTimeout, context.Cause(r.Context()))
 		e.reject(st, kGatewayTimeout, reasonUpstreamTimeout)
 	case r.Context().Err() != nil:
 		// The client left; there is no one to answer.
 		st.reason, st.rejected = reasonClientGone, true
 		e.m.rejected[reasonClientGone].Add(1)
+	case st.bodyBad:
+		e.reject(st, kBadRequest, reasonBodyInvalid)
 	case errors.As(err, &ne) && ne.Timeout():
+		e.upstreamFailed(st, causeTimeout, err)
 		e.reject(st, kGatewayTimeout, reasonUpstreamTimeout)
 	case isTLSRefusal(err):
-		// The LB has no certificate for this Host. Clients choose the Host,
-		// so this is counted, not logged per request.
+		// The LB has no certificate for this Host, which the client chose.
+		e.upstreamFailed(st, causeTLS, err)
 		e.reject(st, kBadGateway, reasonUpstreamTLS)
 	default:
-		e.log.Warn("upstream request failed", "error", err.Error(), "request_id", st.requestID)
+		e.upstreamFailed(st, causeOf(err), err)
 		e.reject(st, kBadGateway, reasonUpstreamError)
 	}
+}
+
+// upstreamCause is why the edge got no answer from the upstream. 0 is none;
+// otherwise it names UpstreamCauses[c-1].
+type upstreamCause uint8
+
+const (
+	causeNone upstreamCause = iota
+	causeDNS
+	causeRefused
+	causeReset
+	causeTLS
+	causeTimeout
+	causeOther
+)
+
+// UpstreamCauses names each upstreamCause from causeDNS on. Reports and the
+// access line use these names, and admin accepts only them.
+var UpstreamCauses = [...]string{"dns", "refused", "reset", "tls", "timeout", "other"}
+
+// causeOf sorts a failed exchange that is neither a timeout nor a TLS
+// refusal: a name that doesn't resolve, nothing listening, a connection the
+// upstream dropped, or anything else.
+func causeOf(err error) upstreamCause {
+	switch _, dns := errors.AsType[*net.DNSError](err); {
+	case dns:
+		return causeDNS
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return causeRefused
+	case errors.Is(err, syscall.ECONNRESET):
+		return causeReset
+	}
+	return causeOther
+}
+
+// upstreamFailed counts the cause once, here on the error path, and keeps it
+// and the error for the access line. The writer goroutine formats the error:
+// a warn line per failure would take the log handler's lock on the request
+// path during an outage. A proxied request always has a version.
+func (e *Edge) upstreamFailed(st *reqState, c upstreamCause, err error) {
+	st.cause, st.upErr = c, err
+	e.m.upstreamErrors[c-1].Add(1)
+	st.ver.stats.causes[c-1].Add(1)
 }
 
 // isTLSRefusal reports a handshake the upstream refused, or whose certificate
@@ -237,6 +299,12 @@ func (b *body) Read(p []byte) (int, error) {
 		b.st.bodyLarge = true
 	case errors.Is(err, os.ErrDeadlineExceeded):
 		b.st.bodySlow = true
+	case errors.Is(err, http.ErrBodyReadAfterClose):
+		// The transport closes the body when the exchange fails, such as an HTTP/2 reset mid-upload; not the client's fault.
+	default:
+		// Broken framing, such as a bad chunk length. The transport returns
+		// it as the exchange's error, which would read as an upstream failure.
+		b.st.bodyBad = true
 	}
 	return n, err
 }

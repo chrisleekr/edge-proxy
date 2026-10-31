@@ -7,7 +7,8 @@ import (
 )
 
 // Starter is a valid config with no rules: the first draft when nothing has
-// been published. Every edge response is a problem+json body.
+// been published. Every edge response is a problem+json body, except
+// forbidden, which is HTML: a block usually refuses a page request.
 func Starter() *Config {
 	responses := map[string]Response{}
 	defaults := map[string]string{}
@@ -16,6 +17,7 @@ func Starter() *Config {
 			Body: fmt.Sprintf(`{"status":%d,"title":%q}`, status, http.StatusText(status))}
 		defaults[kind] = kind
 	}
+	responses["forbidden"] = forbiddenHTML
 	return &Config{
 		Schema: SupportedSchema,
 		Global: Global{

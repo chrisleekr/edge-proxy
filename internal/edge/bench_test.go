@@ -6,16 +6,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
-// cannedTransport answers every upstream request in memory, so the
-// benchmark measures the edge, not the network.
-type cannedTransport struct{}
+// cannedTransport answers every upstream request in memory with status, so
+// the benchmark measures the edge, not the network.
+type cannedTransport struct{ status int }
 
-func (cannedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Length": {"2"}}, ContentLength: 2, Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
+func (t cannedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: t.status, Header: http.Header{"Content-Length": {"2"}}, ContentLength: 2, Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
 }
 
 // Cost of one allowed, proxied request through steps 1 to 5 and 10, with
@@ -52,7 +53,7 @@ func inMemoryEdge(tb testing.TB, c *snapshot.Config, target string) (*Server, *h
 	if err := s.poller.apply(envelope(c), "admin", 0); err != nil {
 		tb.Fatal(err)
 	}
-	s.edge.rp.Transport = cannedTransport{}
+	s.edge.rp.Transport = cannedTransport{200}
 	req := httptest.NewRequest("GET", "http://api.example.com"+target, nil)
 	req.RemoteAddr = "192.0.2.1:5000"
 	req.Header.Set("CloudFront-Viewer-Address", "198.51.100.7:40000")
@@ -74,27 +75,54 @@ func TestRequestAllocations(t *testing.T) {
 		target string
 		status int
 		max    float64
+		// expires, when set, is when rate-limit rule 0 expires, from now.
+		expires time.Duration
 	}{
-		{"allowed and proxied", func(*snapshot.Config) {}, "/v1/items?id=1", 200, 36},
+		{"allowed and proxied", func(*snapshot.Config) {}, "/v1/items?id=1", 200, 36, 0},
 		{"allowed with RateLimit headers", func(c *snapshot.Config) {
 			r := rlRule("per-ip", "true", "token_bucket", 1_000_000_000, "ip")
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "headers", Expression: mustParse("true"), Settings: snapshot.Settings{RateLimitHeaders: new(true)}})
-		}, "/v1/items?id=1", 200, 43},
+		}, "/v1/items?id=1", 200, 43, 0},
 		{"rate limited with RateLimit headers", func(c *snapshot.Config) {
 			r := rlRule("per-ip", "true", "token_bucket", 1, "ip")
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "headers", Expression: mustParse("true"), Settings: snapshot.Settings{RateLimitHeaders: new(true)}})
-		}, "/v1/items", 429, 19},
+		}, "/v1/items", 429, 19, 0},
+		{"blocked by a config rule", func(c *snapshot.Config) {
+			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent eq "bench"`), Settings: snapshot.Settings{Block: new("block")}})
+		}, "/v1/items", 403, 13, 0},
+		{"count rule counts a 404", func(c *snapshot.Config) {
+			r := rlRule("sweep", "true", "sliding_window", 1_000_000_000, "ip")
+			r.CountStatuses = []string{"404"}
+			c.RateLimitRules = []snapshot.RateLimitRule{r}
+		}, "/v1/missing", 404, 37, 0},
+		// The expiry check adds no allocation.
+		{"rule expiring later", func(c *snapshot.Config) {
+			r := rlRule("ap-scraper", "true", "token_bucket", 1_000_000_000, "ip")
+			r.FailMode = "local"
+			c.RateLimitRules = []snapshot.RateLimitRule{r}
+		}, "/v1/items?id=1", 200, 37, time.Hour},
+		{"expired rule skipped", func(c *snapshot.Config) {
+			r := rlRule("ap-scraper", "true", "token_bucket", 1, "ip")
+			r.FailMode = "local"
+			c.RateLimitRules = []snapshot.RateLimitRule{r}
+		}, "/v1/items?id=1", 200, 36, -time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := testConfig(1)
 			c.Global.Backstop.Limit, c.Global.Backstop.Burst = 1_000_000_000, 1_000_000_000
 			tc.change(c)
+			if tc.expires != 0 {
+				expireRule(t, c, 0, time.Now().Add(tc.expires))
+			}
 			s, req := inMemoryEdge(t, c, tc.target)
+			if tc.status == 404 {
+				s.edge.rp.Transport = cannedTransport{404}
+			}
 			serve := func() {
 				w := httptest.NewRecorder()
 				s.edge.ServeHTTP(w, req)
@@ -106,6 +134,9 @@ func TestRequestAllocations(t *testing.T) {
 			s.edge.ServeHTTP(httptest.NewRecorder(), req)
 			n := testing.AllocsPerRun(200, serve)
 			t.Logf("%v allocations per request", n)
+			if tc.status == 404 && s.store.load().active.local[0].Len() != 1 {
+				t.Fatal("the count rule did not count the 404")
+			}
 			if n > tc.max {
 				t.Fatalf("%v allocations per request, ceiling %v", n, tc.max)
 			}

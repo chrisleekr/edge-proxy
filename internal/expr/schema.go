@@ -41,6 +41,9 @@ const (
 	SourceClientIP
 	SourceLocale
 	SourceJWT
+	// SourceEdge fields are computed by the edge from the request and the
+	// snapshot, in every phase.
+	SourceEdge
 )
 
 // FieldDef describes one field the language can reference.
@@ -62,6 +65,9 @@ type FieldDef struct {
 	// Case is the letter case the edge delivers the value in, so the checker
 	// can reject case-sensitive comparisons that can never match.
 	Case Case
+	// Exact means values are names compared whole: only eq, ne, in and
+	// not_in apply.
+	Exact bool
 }
 
 // Case is the letter case of a field's values.
@@ -96,8 +102,41 @@ var Fields = []FieldDef{
 	{Name: "ssl", Label: "SSL/HTTPS", Type: TypeBool, Source: SourceViewer},
 	{Name: "http.request.version", Label: "HTTP Version", Type: TypeString, Source: SourceViewer},
 	{Name: "client_cert.verified", Label: "Client Certificate Verified", Type: TypeBool, Source: SourceViewer},
+	{Name: "tls.client.ja4", Label: "JA4 Fingerprint", Type: TypeString, Source: SourceViewer},
+	{Name: "tls.client.ja3", Label: "JA3 Fingerprint", Type: TypeString, Source: SourceViewer},
+	{Name: SignalsField, Label: "Client Signals", Type: TypeStringList, Source: SourceEdge, Exact: true},
+	{Name: VerifiedBotField, Label: "Verified Crawler", Type: TypeBool, Source: SourceEdge},
 	{Name: "edge.locale", Label: "Locale", Type: TypeString, Source: SourceLocale},
 	{Name: "http.request.jwt.claims", Label: "JWT claim", Type: TypeStringList, Keyed: true, Source: SourceJWT},
+}
+
+// SignalsField is the edge-computed list of client signals.
+const SignalsField = "client.signals"
+
+// VerifiedBotField is true for an address in the crawler ranges admin
+// fetches from VERIFIED_BOT_SOURCES.
+const VerifiedBotField = "client.verified_bot"
+
+// SignalDef is one client.signals name. Needs lists the viewer fields it
+// reads: without a source for each, it can never fire.
+type SignalDef struct {
+	Name  string   `json:"name"`
+	Needs []string `json:"needs,omitempty"`
+}
+
+// Signals lists every client.signals name in the edge's bit order. Browsers
+// send Sec-Fetch-* and client hints only in secure contexts, and negotiate
+// HTTP/2 only over TLS, so those signals need ssl.
+var Signals = []SignalDef{
+	{Name: "ua_missing"},
+	{Name: "ua_tool"},
+	{Name: "ua_headless"},
+	{Name: "browser_no_accept_language"},
+	{Name: "browser_no_sec_fetch", Needs: []string{"ssl"}},
+	{Name: "chromium_no_client_hints", Needs: []string{"ssl"}},
+	{Name: "client_hints_mismatch", Needs: []string{"ssl"}},
+	{Name: "browser_http1", Needs: []string{"ssl", "http.request.version"}},
+	{Name: "browser_tls_mismatch", Needs: []string{"tls.client.ja4"}},
 }
 
 var fieldsByName = func() map[string]FieldDef {

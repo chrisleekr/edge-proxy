@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -22,6 +23,18 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
+
+// memoryLimit is GOMEMLIMIT, or math.MaxInt64 when it isn't set. A variable
+// so tests can choose it.
+var memoryLimit = func() int64 { return debug.SetMemoryLimit(-1) }
+
+// defaultMaxInflight sizes MAX_INFLIGHT to the memory limit. A load test put
+// about 100 KiB on each in-flight request, kernel socket buffers included;
+// 256 KiB each leaves the rest for streams, the baseline and GC headroom.
+// Without GOMEMLIMIT the edge can't tell, and keeps the old fixed 10,000.
+func defaultMaxInflight(limit int64) int {
+	return int(min(max(limit/(256<<10), 1), 10_000))
+}
 
 // Config is the deployment config, read once from the environment. Admin
 // users can't change any of it (CLAUDE.md, "Trust comes only from deployment config").
@@ -82,7 +95,7 @@ type Config struct {
 
 // ClientIPSource says where the client IP comes from.
 type ClientIPSource struct {
-	// Kind is cloudfront, cloudflare, header, xff or remote_addr.
+	// Kind is cloudfront, cloudflare, gcp, header, xff or remote_addr.
 	Kind string
 	// Header and WithPort apply to every kind but xff and remote_addr.
 	Header   string
@@ -110,6 +123,20 @@ var presets = map[string]struct {
 			"ssl":            "X-Forwarded-Proto",
 		},
 	},
+	// An external Application Load Balancer has no fixed header names: the
+	// LB's custom request headers must set these from {client_ip_address},
+	// {client_region}, {client_protocol} and {client_encrypted}. The LB
+	// overwrites only the headers it adds, so ASN and the TLS fingerprints
+	// are opt-in through VIEWER_HEADERS: not every LB type has {asn} or the
+	// fingerprint variables, and an unset header arrives as the client sent it.
+	"gcp": {
+		ClientIPSource{Kind: "gcp", Header: "X-Gclb-Client-Ip"},
+		map[string]string{
+			"ip.src.country":       "X-Gclb-Region",
+			"http.request.version": "X-Gclb-Protocol",
+			"ssl":                  "X-Gclb-Encrypted",
+		},
+	},
 }
 
 // LoadConfig reads the deployment config. It reports every problem at once,
@@ -128,7 +155,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		BootstrapMaxAge:     p.Duration("BOOTSTRAP_MAX_AGE", 7*24*time.Hour),
 		BootstrapAllowStale: p.Bool("BOOTSTRAP_ALLOW_STALE"),
 		PollInterval:        p.Duration("POLL_INTERVAL", 5*time.Second),
-		MaxInflight:         p.Integer("MAX_INFLIGHT", 10_000),
+		MaxInflight:         p.Integer("MAX_INFLIGHT", defaultMaxInflight(memoryLimit())),
 		MaxStreams:          p.Integer("MAX_STREAMS", 1_000),
 		MaxIdleConns:        p.Integer("UPSTREAM_MAX_IDLE", 256),
 		MaxHeaderBytes:      p.Integer("MAX_HEADER_BYTES", 64<<10),
@@ -216,7 +243,7 @@ func (p *envParser) clientIP(c *Config) {
 	kind := p.Str("CLIENT_IP_SOURCE", "")
 	c.Viewer = map[string]string{}
 	switch {
-	case kind == "cloudfront" || kind == "cloudflare":
+	case kind == "cloudfront" || kind == "cloudflare" || kind == "gcp":
 		c.ClientIP = presets[kind].ip
 		maps.Copy(c.Viewer, presets[kind].viewer)
 	case kind == "xff" || kind == "remote_addr":
@@ -230,7 +257,7 @@ func (p *envParser) clientIP(c *Config) {
 		}
 		c.ClientIP = ClientIPSource{Kind: "header", Header: parts[1], WithPort: parts[2] == "ip_port"}
 	default:
-		p.Fail("CLIENT_IP_SOURCE", "must be cloudfront, cloudflare, header:<Name>:<ip|ip_port>, xff or remote_addr")
+		p.Fail("CLIENT_IP_SOURCE", "must be cloudfront, cloudflare, gcp, header:<Name>:<ip|ip_port>, xff or remote_addr")
 		return
 	}
 
@@ -296,7 +323,7 @@ func LoadDeployment(getenv func(string) string) (snapshot.Deployment, error) {
 
 // Deployment is what snapshot validation needs to know about this deployment.
 func (c *Config) Deployment() snapshot.Deployment {
-	d := snapshot.Deployment{AllowRegex: c.AllowRegex}
+	d := snapshot.Deployment{AllowRegex: c.AllowRegex, VerifiedBots: true}
 	for f, h := range c.Viewer {
 		d.ViewerFields = append(d.ViewerFields, f)
 		d.SourceHeaders = append(d.SourceHeaders, h)

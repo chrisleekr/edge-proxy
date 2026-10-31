@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/chrisleekr/edge-proxy/internal/expr"
 )
 
 // fields implements expr.Request for one request. Values that cost work to
@@ -23,6 +25,9 @@ type fields struct {
 	localeSet bool
 	// claims holds verified JWT claims as strings; nil without a verified token.
 	claims map[string][]string
+	// bots is the snapshot's verified crawler ranges.
+	bots    *expr.IPSet
+	signals uint16
 
 	args url.Values
 	// cookies are sorted by name, in request order within a name, so one
@@ -40,6 +45,7 @@ const (
 	parsedFullURI
 	parsedCookie
 	parsedXFF
+	parsedSignals
 )
 
 // once returns *v, computing it on the first call for bit. Every rule in
@@ -102,6 +108,10 @@ func (f *fields) String(name string) string {
 		return f.c.continent
 	case "http.request.version":
 		return f.c.version
+	case "tls.client.ja4":
+		return f.c.ja4
+	case "tls.client.ja3":
+		return f.c.ja3
 	default: // edge.locale; expr only passes string fields
 		return f.localeValue()
 	}
@@ -158,9 +168,21 @@ func (f *fields) List(name, key string) []string {
 		}
 		// Capped, so a caller appending can't overwrite the next name's values.
 		return f.cookieVals[i:j:j]
+	case expr.SignalsField:
+		return signalLists[f.signalBits()]
 	default: // http.request.jwt.claims; expr only passes list fields
 		return f.claims[key]
 	}
+}
+
+// signalBits computes the request's client signals on first use: only
+// requests a rule reads them for pay for them.
+func (f *fields) signalBits() uint16 {
+	if f.parsed&parsedSignals == 0 {
+		f.signals = signalsOf(f.r.Header, f.c)
+		f.parsed |= parsedSignals
+	}
+	return f.signals
 }
 
 func (f *fields) IP(string) netip.Addr { return f.c.ip }
@@ -168,8 +190,12 @@ func (f *fields) IP(string) netip.Addr { return f.c.ip }
 func (f *fields) Int(string) (int64, bool) { return f.c.asn, f.c.hasASN }
 
 func (f *fields) Bool(name string) bool {
-	if name == "ssl" {
+	switch name {
+	case "ssl":
 		return f.c.ssl
+	case "client.verified_bot":
+		// No ranges loaded means no verified crawler: an exemption fails closed.
+		return f.bots != nil && f.bots.Contains(f.c.ip)
 	}
 	return f.c.certVerified
 }

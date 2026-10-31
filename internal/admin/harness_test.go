@@ -273,7 +273,7 @@ func mustParse(src string) expr.Node {
 func testConfig() *snapshot.Config {
 	responses := map[string]snapshot.Response{}
 	defaults := map[string]string{}
-	for k, st := range map[string]int{"bad_request": 400, "unauthorized": 401, "payload_too_large": 413, "rate_limited": 429, "bad_gateway": 502, "unavailable": 503, "overloaded": 503, "gateway_timeout": 504} {
+	for k, st := range map[string]int{"bad_request": 400, "unauthorized": 401, "payload_too_large": 413, "rate_limited": 429, "bad_gateway": 502, "unavailable": 503, "overloaded": 503, "gateway_timeout": 504, "forbidden": 403} {
 		responses[k] = snapshot.Response{Status: st, ContentType: "application/json", Body: `{"error":"` + k + `"}`}
 		defaults[k] = k
 	}

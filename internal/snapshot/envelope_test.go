@@ -58,6 +58,18 @@ func TestCompileWarns(t *testing.T) {
 		{"limit skipped by sending a header", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and http.request.headers["x-internal"] ne "1"`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.request.headers"},
+		{"HTTP version the edge never writes", func(c *Config) {
+			c.ConfigRules[0].Expression = mustParse(`http.request.version eq "h2"`)
+		}, "config_rules[0].expression", `http.request.version is never "h2"`},
+		{"HTTP version list with a version that doesn't exist", func(c *Config) {
+			c.RateLimitRules[1].Expression = mustParse(`http.request.version in {"1.1" "HTTP/2.1"}`)
+		}, "rate_limit_rules[1].expression", `http.request.version is never "HTTP/2.1"`},
+		{"HTTP version pattern written as the CDN sends it", func(c *Config) {
+			c.ConfigRules[0].Expression = mustParse(`starts_with(http.request.version, "HTTP/1")`)
+		}, "config_rules[0].expression", `"HTTP/1" can't match`},
+		{"negated HTTP version wildcard written as the CDN sends it", func(c *Config) {
+			c.RateLimitRules[1].Expression = mustParse(`not http.request.version wildcard "http/1.*"`)
+		}, "rate_limit_rules[1].expression", `"http/1.*" can't match`},
 		{"limit skipped through a negated group", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and not (http.user_agent contains "monitor" or ssl)`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.user_agent"},
@@ -124,7 +136,8 @@ func TestEnvelopeKeysAtTheFetchCap(t *testing.T) {
 // Admin is upgraded before edges, and re-encodes stored versions with its
 // own types; edges not yet upgraded decode strictly. So a schema 1 envelope
 // must encode exactly as it always has: a field added later must be omitted
-// when unset (omitempty or omitzero) and need a higher schema when set.
+// when unset (omitempty or omitzero) and, when set, need edges that read a
+// higher schema.
 // Never regenerate testdata/schema1-envelope.json to make this pass.
 func TestSchema1EncodingNeverChanges(t *testing.T) {
 	b, err := os.ReadFile("testdata/schema1-envelope.json")
@@ -148,6 +161,123 @@ func TestSchema1EncodingNeverChanges(t *testing.T) {
 	}
 	if !bytes.Equal(got, want.Bytes()) {
 		t.Fatalf("a schema 1 envelope encodes differently, so edges not yet upgraded would reject it:\n got %s\nwant %s", got, want.Bytes())
+	}
+}
+
+// The same holds for schema 3, the last schema before bot detection: a
+// schema 3 envelope with max_inflight set encodes byte for byte as it did,
+// so a schema 3 edge still decodes what an upgraded admin serves.
+// Never regenerate testdata/schema3-envelope.json to make this pass.
+func TestSchema3EncodingNeverChanges(t *testing.T) {
+	b, err := os.ReadFile("testdata/schema3-envelope.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, errs := CompileEnvelope(e, testDeployment); errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	got, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want bytes.Buffer
+	if err := json.Compact(&want, b); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("a schema 3 envelope encodes differently, so schema 3 edges would reject it:\n got %s\nwant %s", got, want.Bytes())
+	}
+}
+
+// The same holds for schema 4, the last schema before expires_at: a schema
+// 4 envelope using every bot detection field encodes byte for byte as it
+// did, so a schema 4 edge still decodes what an upgraded admin serves.
+// Never regenerate testdata/schema4-envelope.json to make this pass.
+func TestSchema4EncodingNeverChanges(t *testing.T) {
+	b, err := os.ReadFile("testdata/schema4-envelope.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, errs := CompileEnvelope(e, botDeployment); errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	got, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want bytes.Buffer
+	if err := json.Compact(&want, b); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("a schema 4 envelope encodes differently, so schema 4 edges would reject it:\n got %s\nwant %s", got, want.Bytes())
+	}
+}
+
+// expires_at came with schema 5. A rate-limit rule of any schema may set
+// it, and then needs edges that read schema 5, so admin holds the publish
+// until every live edge does. Without it a config needs only its own
+// schema.
+func TestExpiresAtNeedsSchema5Edges(t *testing.T) {
+	expires := func(m map[string]any) { ruleJSON(m, "rate_limit_rules", 1)["expires_at"] = "2026-11-01T00:00:00Z" }
+	schema4 := validConfig()
+	schema4.Schema = 4
+	cases := []struct {
+		name   string
+		config *Config
+		patch  func(m map[string]any)
+		want   int
+	}{
+		{"schema 4 policy without it", schema4, nil, 4},
+		{"schema 4 policy with a rule that expires", schema4, expires, 5},
+		{"schema 1 policy with a rule that expires", olderConfig(1), expires, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, errs := compileJSON(t, tc.config, testDeployment, tc.patch)
+			if errs != nil {
+				t.Fatal(expr.Issues(errs))
+			}
+			if got.NeedsSchema != tc.want {
+				t.Fatalf("needs schema %d, want %d", got.NeedsSchema, tc.want)
+			}
+		})
+	}
+}
+
+// max_inflight came with schema 3. A config of any schema may set it, and
+// then needs edges that read schema 3, so admin holds the publish until every
+// live edge does. Without it a config needs only its own schema.
+func TestMaxInflightNeedsSchema3Edges(t *testing.T) {
+	cases := []struct {
+		name                string
+		schema, maxInflight int
+		want                int
+	}{
+		{"schema 1 policy without it", 1, 0, 1},
+		{"schema 1 policy that sets it", 1, 500, 3},
+		{"schema 2 policy that sets it", 2, 500, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := olderConfig(tc.schema)
+			c.Global.MaxInflight = tc.maxInflight
+			got, _, errs := Compile(c, testDeployment)
+			if errs != nil {
+				t.Fatal(expr.Issues(errs))
+			}
+			if got.NeedsSchema != tc.want {
+				t.Fatalf("needs schema %d, want %d", got.NeedsSchema, tc.want)
+			}
+		})
 	}
 }
 
@@ -250,6 +380,30 @@ func TestCompileEnvelopeRejects(t *testing.T) {
 		{"canary without an expiry", func(e *Envelope) { e.CanaryExpiresAt = time.Time{} }, "canary_expires_at", "required during a canary"},
 		{"candidate older than active", func(e *Envelope) { e.Candidate.Version = 7 }, "candidate.version", "newer than the active version 7"},
 		{"negative fleet size", func(e *Envelope) { e.FleetSize = -1 }, "fleet_size", "not be negative"},
+		{"more crawler sources than VERIFIED_BOT_SOURCES allows", func(e *Envelope) {
+			for i := range MaxBotSources + 1 {
+				e.VerifiedBots = append(e.VerifiedBots, BotSet{Source: fmt.Sprintf("https://bots.example.com/%d.json", i), Prefixes: []string{"66.249.64.0/27"}})
+			}
+		}, "verified_bots", "at most 16"},
+		{"one crawler source twice", func(e *Envelope) {
+			b := BotSet{Source: "https://bots.example.com/a.json", Prefixes: []string{"66.249.64.0/27"}}
+			e.VerifiedBots = []BotSet{b, b}
+		}, "verified_bots[1].source", "unique URL"},
+		{"crawler source without ranges", func(e *Envelope) {
+			e.VerifiedBots = []BotSet{{Source: "https://bots.example.com/a.json"}}
+		}, "verified_bots[0].prefixes", "needs 1 to 2000"},
+		{"crawler range that doesn't parse", func(e *Envelope) {
+			e.VerifiedBots = []BotSet{{Source: "https://bots.example.com/a.json", Prefixes: []string{"66.249.64.0/33"}}}
+		}, "verified_bots[0].prefixes[0]", "is not a CIDR range"},
+		{"crawler range wider than /16", func(e *Envelope) {
+			e.VerifiedBots = []BotSet{{Source: "https://bots.example.com/a.json", Prefixes: []string{"66.249.64.0/27", "66.0.0.0/8"}}}
+		}, "verified_bots[0].prefixes[1]", "wider than /16"},
+		{"crawler range wider than /32", func(e *Envelope) {
+			e.VerifiedBots = []BotSet{{Source: "https://bots.example.com/a.json", Prefixes: []string{"2001::/16"}}}
+		}, "verified_bots[0].prefixes[0]", "wider than /16 for IPv4 or /32 for IPv6"},
+		{"crawler range written as IPv4 in IPv6", func(e *Envelope) {
+			e.VerifiedBots = []BotSet{{Source: "https://bots.example.com/a.json", Prefixes: []string{"::ffff:66.249.64.0/123"}}}
+		}, "verified_bots[0].prefixes[0]", "is not an IPv6 range"},
 		{"keys for more issuers than both configs can have", func(e *Envelope) {
 			for i := range 2 * MaxListLen {
 				k := e.Keys[0]
