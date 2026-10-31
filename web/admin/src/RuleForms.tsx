@@ -16,6 +16,9 @@ export const say: Record<string, string> = {
   sliding_window: 'Sliding window: smooth, good for logins',
   token_bucket: 'Token bucket: allows short bursts, good for APIs',
   leaky_bucket: 'Leaky bucket: a steady rate with room for a burst',
+  distinct: 'Distinct: counts different values, such as paths, not requests',
+  path: 'Path',
+  ja4: 'JA4 TLS fingerprint',
   ip: 'Client IP',
   jwt_claim: 'JWT claim',
   header: 'Request header',
@@ -57,6 +60,7 @@ export const kindWhen: Record<string, string> = {
   bad_request: 'The request came from outside the trusted proxies or without the ingress secret, has a bad client IP header, a disallowed method or an ambiguous path, sent its body too slowly, or lacks a rate limit key part with Reject.',
   unauthorized: 'A route needs a token and the request has none, or its token does not verify.',
   payload_too_large: 'The request body is over the body limit.',
+  forbidden: 'A config rule set to block matched the request.',
   rate_limited: 'A rate limit rule set to block, or the per-IP backstop, found the request over its limit.',
   bad_gateway: 'The upstream could not be reached or failed mid-response.',
   unavailable: 'A rule set to answer 503 could not reach Valkey, the edge has no config loaded yet, or it hit an internal error.',
@@ -290,17 +294,21 @@ function RateLimitForm({ value: v, onChange, choices, at }: { value: JsonObject;
         <Errors issues={at('limit')} name="Limit" />
         <Errors issues={at('period')} name="Period" />
       </div>
-      <Labeled label="Algorithm" info="All four count in Valkey and read time from Valkey, so every edge agrees. Fixed window resets on the clock and lets a client send twice the limit across a boundary; sliding window smooths that out. The buckets allow a burst, then a steady rate." issues={at('algorithm')}>
+      <Labeled
+        label="Algorithm"
+        info="All count in Valkey and read time from Valkey, so every edge agrees. Fixed window resets on the clock and lets a client send twice the limit across a boundary; sliding window smooths that out. The buckets allow a burst, then a steady rate. Distinct limits how many different values a client sends per period, such as paths when scanning, from an estimate within 10% (about 4% in tests) up to 1000 values."
+        issues={at('algorithm')}>
         <Choice
           value={v.algorithm as string | undefined}
           options={choices.algorithms}
           onChange={(a) => {
-            // A burst left behind by a bucket would make a window rule fail.
-            const next = setField(v, 'algorithm', a);
+            // A burst or distinct_of left behind would make the new algorithm fail.
+            const next = a === 'distinct' ? setField(v, 'algorithm', a) : without(setField(v, 'algorithm', a), 'distinct_of');
             onChange(bursty.includes(a ?? '') ? { ...next, burst: typeof v.burst === 'number' ? v.burst : (v.limit ?? 1) } : without(next, 'burst'));
           }}
         />
       </Labeled>
+      {v.algorithm === 'distinct' && <DistinctOf value={v.distinct_of} kinds={choices.distinct_of_kinds} onChange={(x) => set('distinct_of', x)} issues={at('distinct_of')} />}
       {bursty.includes(v.algorithm as string) && (
         <Labeled label="Burst" hint="How many requests may come at once on top of the steady rate, such as 20." issues={at('burst')}>
           <Count value={v.burst} min={1} onChange={(x) => set('burst', x)} />
@@ -354,6 +362,19 @@ function RateLimitForm({ value: v, onChange, choices, at }: { value: JsonObject;
           <Choice value={v.on_missing_key as string | undefined} options={choices.on_missing_keys} onChange={(x) => set('on_missing_key', x)} />
         </Labeled>
       )}
+      {v.algorithm !== 'distinct' && (
+        <Lines
+          label="Count only responses with status"
+          item="Status"
+          noun="status"
+          values={v.count_statuses}
+          onChange={(x) => set('count_statuses', x.length ? x : undefined)}
+          at={at}
+          path="count_statuses"
+          placeholder="such as 404 or 4xx"
+          hint="Optional. Counts the upstream's answers instead of requests, such as 404s from a client probing for files. Each edge counts in its own memory and blocks once over the limit. 5xx can't be counted."
+        />
+      )}
       <Labeled
         label="Over the limit"
         info="Block answers 429 with Retry-After. Log only lets the request through and counts it under Over limit, log only in Stats, so you can see who it would block before it blocks anyone."
@@ -376,7 +397,23 @@ function RateLimitForm({ value: v, onChange, choices, at }: { value: JsonObject;
   );
 }
 
+// DistinctOf picks what a distinct rule counts; query takes an argument name.
+function DistinctOf({ value, kinds, onChange, issues }: { value: Json; kinds: string[]; onChange: (v: string | undefined) => void; issues: Issue[] }) {
+  const v = typeof value === 'string' ? value : '';
+  const i = v.indexOf(':');
+  const [kind, name] = i < 0 ? [v || undefined, ''] : [v.slice(0, i), v.slice(i + 1)];
+  return (
+    <Labeled label="Count different" hint="Each different value counts once per period." issues={issues}>
+      <span className="flex flex-wrap items-center gap-2">
+        <Choice value={kind} options={kinds} onChange={(k) => onChange(k === 'query' ? `query:${name}` : k)} />
+        {kind === 'query' && <input aria-label="Query argument name" placeholder="such as id" value={name} onChange={(e) => onChange(`query:${e.target.value}`)} />}
+      </span>
+    </Labeled>
+  );
+}
+
 const yesNo = { true: 'Yes', false: 'No' };
+const blockSays = { block: 'Block: answer 403', log: 'Log only: count what would be blocked, block nothing' };
 
 function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObject; onChange: (v: JsonObject) => void; choices: RuleChoices; config: Config; at: At }) {
   const s = (value.settings ?? {}) as JsonObject;
@@ -416,6 +453,13 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
           <span className="text-body">Tick none to accept the default issuers from the Issuers page.</span>
         </fieldset>
       )}
+      <Labeled
+        label="Block"
+        info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Would block in Stats. The block kill switch under Settings turns every block into log only."
+        hint="Start with Log only and watch Stats before you block."
+        issues={at('settings.block')}>
+        <Choice value={s.block as string | undefined} options={choices.block_modes} labels={blockSays} empty={unset} onChange={(x) => set('block', x)} />
+      </Labeled>
       <Labeled label="CORS policy" issues={at('settings.cors_policy')}>
         <Choice
           value={s.cors_policy as string | undefined}
