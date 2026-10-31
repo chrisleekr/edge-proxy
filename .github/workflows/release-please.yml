@@ -59,7 +59,7 @@ jobs:
 
   notify-helm-charts:
     # After publish: the chart PR points appVersion at the image tag, so it must
-    # not open until both images are pushed.
+    # not open until every image is pushed.
     needs: [release, publish]
     if: needs.release.outputs.release_created == 'true'
     runs-on: ubuntu-latest

@@ -52,9 +52,9 @@
     },
     {
       "customType": "regex",
-      "description": "scripts/ci/ui.sh pins Node in a shell variable.",
+      "description": "scripts/ci/node.sh pins Node in a shell variable.",
       "managerFilePatterns": [
-        "/^scripts/ci/ui\\.sh$/"
+        "/^scripts/ci/node\\.sh$/"
       ],
       "matchStrings": [
         "node_version=\"(?<currentValue>[^\"]+)\""
@@ -114,7 +114,7 @@
       ]
     },
     {
-      "description": "Every Node pin moves together: scripts/ci/ui.sh, the GitHub ui job and the admin image. ui.sh also pins the tarball sha256 per architecture, which Renovate cannot compute, so this PR fails GitLab's ui job (GitHub uses setup-node) until those two hashes are updated by hand from nodejs.org SHASUMS256.txt.",
+      "description": "Every Node pin moves together: scripts/ci/node.sh, the GitHub ui and autopilot jobs, and the admin and autopilot images. node.sh also pins the tarball sha256 per architecture, which Renovate cannot compute, so this PR fails GitLab's ui and autopilot jobs (GitHub uses setup-node) until those two hashes are updated by hand from nodejs.org SHASUMS256.txt.",
       "matchDepNames": [
         "node"
       ],

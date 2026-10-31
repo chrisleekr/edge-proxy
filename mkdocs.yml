@@ -73,6 +73,7 @@ nav:
       - deploy/index.md
       - Edge settings: deploy/edge.md
       - Admin settings: deploy/admin.md
+      - Autopilot runner: deploy/autopilot.md
       - Kubernetes with Helm: deploy/kubernetes.md
       - Capacity planning: deploy/capacity.md
   - Operate:

@@ -64,6 +64,9 @@ configs:
   # The demo log shipper's token, for this throwaway environment only.
   log-token:
     content: demo-log-shipper-token-not-a-secret-0001
+  # The demo autopilot runner's token, for this throwaway environment only.
+  autopilot-token:
+    content: demo-autopilot-runner-token-not-a-secret-01
   # Keeps edge-1's access lines and posts them to admin, as the Helm
   # chart's shipper does with pod logs.
   vector:
@@ -158,8 +161,8 @@ services:
 
   admin:
     image: edge-proxy/admin:dev
-    environment: { <<: *admin-env, LOG_INGEST_TOKEN_FILE: /log-token }
-    configs: [{ source: log-token, target: /log-token }]
+    environment: { <<: *admin-env, LOG_INGEST_TOKEN_FILE: /log-token, AUTOPILOT_TOKEN_FILE: /autopilot-token }
+    configs: [{ source: log-token, target: /log-token }, { source: autopilot-token, target: /autopilot-token }]
     ports: ["127.0.0.1:8081:8081"]
     volumes: [shared:/shared:ro]
     depends_on:
@@ -197,6 +200,33 @@ services:
     configs: [{ source: vector, target: /etc/vector/vector.yaml }]
     volumes: [/var/run/docker.sock:/var/run/docker.sock:ro]
     depends_on: [admin, edge-1]
+
+  # make demo-autopilot only: the autopilot runner, as it runs in a
+  # deployment. The model credential comes from the shell running compose
+  # and is never written here.
+  autopilot:
+    image: edge-proxy/autopilot:dev
+    build: { context: .., dockerfile: build/autopilot.Dockerfile }
+    profiles: [autopilot]
+    read_only: true
+    tmpfs: [/tmp]
+    environment:
+      AUTOPILOT_ADMIN_URL: http://admin:8081
+      AUTOPILOT_TOKEN_FILE: /autopilot-token
+      CLAUDE_CODE_OAUTH_TOKEN:
+      ANTHROPIC_API_KEY:
+      OPENAI_API_KEY:
+    configs: [{ source: autopilot-token, target: /autopilot-token }]
+    depends_on: [admin]
+
+  # make load-full's autopilot step only: a scripted runner that answers
+  # cases from a fixed plan over admin's MCP, so no model is called.
+  agent:
+    image: edge-proxy/tools:dev
+    profiles: [autopilot-load]
+    command: [agent, -admin, http://admin:8081, -token-file, /autopilot-token]
+    configs: [{ source: autopilot-token, target: /autopilot-token }]
+    depends_on: [admin]
 
   # Stands in for the cloud LB in front of the edges.
   lb:

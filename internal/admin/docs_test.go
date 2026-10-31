@@ -105,6 +105,32 @@ func TestDocsListEveryVariable(t *testing.T) {
 	}
 }
 
+// Every variable the autopilot runner reads is in its settings table, and
+// every variable there is still read. The runner reads them as env['NAME'].
+func TestDocsListEveryRunnerVariable(t *testing.T) {
+	files, err := filepath.Glob("../../autopilot/src/*.ts")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no runner sources in autopilot/src, err %v", err)
+	}
+	read := regexp.MustCompile(`env\[['"]([A-Z][A-Z0-9_]{2,})['"]\]`)
+	var code []string
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range read.FindAllStringSubmatch(string(b), -1) {
+			code = append(code, m[1])
+		}
+	}
+	envName := regexp.MustCompile(`^[A-Z][A-Z0-9_]{2,}$`)
+	var documented []string
+	for _, row := range docRows(t, "deploy/autopilot.md", "Variables") {
+		documented = append(documented, spans(row[0], envName)...)
+	}
+	diff(t, "variable", uniq(code), uniq(documented))
+}
+
 // The API reference lists every route with the permission it needs.
 func TestDocsListEveryRoute(t *testing.T) {
 	s := NewServer(&Config{}, nil, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
