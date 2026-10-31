@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/chrisleekr/edge-proxy/compare/v1.0.0...v1.1.0) (2026-10-31)
+
+
+### Features
+
+* **edge:** add client signals, distinct and response-count limits, and rule expiry ([#15](https://github.com/chrisleekr/edge-proxy/issues/15)) ([8bbe37e](https://github.com/chrisleekr/edge-proxy/commit/8bbe37efe921a2b8c361bf6dded78b15fc397b6b))
+* **tracing:** add OpenTelemetry tracing to edge and admin ([#12](https://github.com/chrisleekr/edge-proxy/issues/12)) ([1910976](https://github.com/chrisleekr/edge-proxy/commit/1910976f4847e9a45c8fe64e693163e6642c98a2))
+
 ## 1.0.0 (2026-10-22)
 
 
