@@ -9,6 +9,7 @@
 //	tools gateway    mock gateway behind the edge, routing by path (flags: -routes)
 //	tools streams    hold SSE and WebSocket connections (flags: -sse -ws -for)
 //	tools service X  mock microservice X for the capacity test: catalog, orders, account, content
+//	tools agent      scripted autopilot runner for the load-full attacks (flags: -admin -token-file -plan -concurrency)
 //
 // Configuration comes from the environment, as in compose.yaml.
 package main
@@ -47,7 +48,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("usage: tools upstream|idp|seed|bootstrap|probe|lb|gateway|streams|service")
+		log.Fatal("usage: tools upstream|idp|seed|bootstrap|probe|lb|gateway|streams|service|agent")
 	}
 	var err error
 	switch os.Args[1] {
@@ -70,6 +71,8 @@ func main() {
 		err = streams(os.Args[2:])
 	case "service":
 		err = service(os.Args[2:])
+	case "agent":
+		err = agent(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

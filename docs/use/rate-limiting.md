@@ -1,6 +1,6 @@
 # Rate limiting
 
-Each rule keeps one counter per key in Valkey, shared by every edge, so a limit of 100 means 100 across the fleet. A request makes at most one Valkey round trip, whatever number of rules it matches.
+Each rule keeps one counter per key in Valkey, shared by every edge, so a limit of 100 means 100 across the fleet. A request makes at most one Valkey round trip, whatever number of rules it matches. This page covers the rules you write; [autopilot](autopilot.md) can add short-lived ones during an attack.
 
 ## A rule
 
@@ -285,6 +285,8 @@ A rule with `expires_at` stops running at that time, with no second publish. Fro
 - **Each edge uses its own clock.** Edges whose clocks differ end the rule that much apart; run NTP on every host.
 - **It needs schema 5 edges.** Admin holds the publish while a live edge reads an older schema, naming it.
 - **An expired rule stays valid.** It is skipped, not rejected, so a bootstrap file exported while it ran still loads. A save or check of the draft warns about a rule of yours whose `expires_at` has passed: the rule will not run.
+
+[Autopilot rules](publishing.md#autopilot-rules) always expire, at most 24 hours after they are published.
 
 ## When the key is missing
 

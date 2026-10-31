@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -113,8 +114,8 @@ func TestMachineTrafficIsNotTraced(t *testing.T) {
 	}
 }
 
-// A collector outage never touches the API; admin has no metrics, so the
-// failure shows only in the log.
+// A collector outage never touches the API; the failed export is logged
+// and counted in admin_trace_export_errors_total.
 func TestAdminWorksWithCollectorDown(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -129,6 +130,15 @@ func TestAdminWorksWithCollectorDown(t *testing.T) {
 	h.flush()
 	if !strings.Contains(h.logs.String(), `"msg":"opentelemetry error"`) {
 		t.Fatal("failed export not logged")
+	}
+	const series = "\nadmin_trace_export_errors_total "
+	_, rest, ok := strings.Cut(h.metrics(), series)
+	if !ok {
+		t.Fatal("metrics have no admin_trace_export_errors_total")
+	}
+	var n uint64
+	if _, err := fmt.Sscan(rest, &n); err != nil || n < 1 {
+		t.Fatalf("failed export counted %d times: %v", n, err)
 	}
 }
 

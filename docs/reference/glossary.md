@@ -5,6 +5,7 @@ Terms used in the admin UI, the logs, the metrics and these docs. Each links to 
 | Term | Meaning |
 |---|---|
 | **Action** | What a rule does to the requests its expression matches: settings in `config`, `block` or `log` in `rate_limit`, header operations in `request_headers`. See [Policy](../use/policy.md#phases) |
+| **Adopt** | Copying an autopilot rule into the draft as your own rule, without its `ap-` prefix and expiry. The next publish drops the autopilot copy. See [Publish and roll back](../use/publishing.md#autopilot-rules) |
 | **Admin** | The internal service and UI that manage policy, store it in Postgres and serve it to edges. Never on the request path. See [Admin settings](../deploy/admin.md) |
 | **Audit log** | An append-only record of every change, who made it and a diff. Rows are HMAC-chained with a key kept outside Postgres, so a changed or deleted row is detected. See [Publish and roll back](../use/publishing.md#audit) |
 | **Bootstrap snapshot** | A snapshot file exported from admin (**Versions → Download bootstrap file**) and set as `BOOTSTRAP_PATH`. An edge uses it at start only when admin and `SNAPSHOT_CACHE_PATH` both fail, and refuses it when older than `BOOTSTRAP_MAX_AGE` unless `BOOTSTRAP_ALLOW_STALE=true`. See [Deploy](../deploy/index.md#where-an-edge-gets-its-policy) |
@@ -32,6 +33,7 @@ Terms used in the admin UI, the logs, the metrics and these docs. Each links to 
 | **Local backstop** | A per-IP token bucket in each edge's memory, applied before any shared limit. It absorbs floods without Valkey and works while Valkey is down. Per edge, so the fleet ceiling is about the number of edges times the setting. See [Rate limiting](../use/rate-limiting.md#local-backstop) |
 | **Locale** | The user's language, such as `en-AU`, detected from `Accept-Language` against the supported list and available to rules as `edge.locale`. See [Policy](../use/policy.md#locale) |
 | **Normalized path** | The request path after decoding and resolving, which rules match on. Ambiguous encodings such as `%5C` and `..` segments are rejected with `400`; `%2F` stays encoded. See [Expressions](expressions.md#fields) |
+| **Overlay (autopilot rules)** | Rate-limit rules whose ids start `ap-`, published by autopilot after the rules people write. Each expires. Every publish, revert and guard rollback keeps them while they run. A revert or rollback that would be refused with them publishes without them, when your rules alone pass. See [Publish and roll back](../use/publishing.md#autopilot-rules) |
 | **Penalty** | On a blocking rate-limit rule, how long a key stays blocked after its first rejected request. Edges cache active penalties and answer them without calling Valkey. See [Rate limiting](../use/rate-limiting.md#penalty) |
 | **Phase** | A point in the request path where one kind of rule runs: `config`, `rate_limit` or `request_headers`. See [Policy](../use/policy.md#phases) |
 | **Policy** | Everything you edit: rules in phases, plus templates, CORS policies, issuers and settings. You change it as the draft and publish it as a version. See [Policy](../use/policy.md) |

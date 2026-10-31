@@ -34,6 +34,7 @@ func (s *Server) configRoutes() {
 	s.handle("GET /api/draft", "config.read", s.getDraft)
 	s.handle("PUT /api/draft", "config.write", s.putDraft)
 	s.handle("POST /api/draft/check", "config.read", s.checkDraft)
+	s.handle("POST /api/draft/adopt", "config.write", s.adopt)
 	s.handle("GET /api/draft/rebase", "config.read", s.previewRebase)
 	s.handle("POST /api/draft/rebase", "config.write", s.applyRebase)
 	s.handle("POST /api/simulate", "config.test", s.simulate)
@@ -61,15 +62,18 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 		Keyed     bool         `json:"keyed"`
 		Phases    []expr.Phase `json:"phases"`
 		Available bool         `json:"available"`
+		Exact     bool         `json:"exact"`
 	}
-	viewer := map[string]bool{}
+	// The fields that need deployment config, and whether each has it.
+	deployed := map[string]bool{expr.VerifiedBotField: s.cfg.Deployment.VerifiedBots}
 	for _, f := range s.cfg.Deployment.ViewerFields {
-		viewer[f] = true
+		deployed[f] = true
 	}
 	var fields []field
 	for _, f := range expr.Fields {
+		needs := f.Source == expr.SourceViewer || f.Name == expr.VerifiedBotField
 		fd := field{Name: f.Name, Label: f.Label, Type: f.Type, Keyed: f.Keyed, Phases: []expr.Phase{},
-			Available: f.Source != expr.SourceViewer || viewer[f.Name]}
+			Available: !needs || deployed[f.Name], Exact: f.Exact}
 		for _, p := range phases {
 			if f.InPhase(p) {
 				fd.Phases = append(fd.Phases, p)
@@ -104,18 +108,21 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 	}
 	// The rule editor offers these as choices, so none can be misspelled.
 	rules := map[string]any{
-		"algorithms":      snapshot.Algorithms,
-		"key_kinds":       kinds,
-		"max_key_parts":   snapshot.MaxKeyParts,
-		"on_missing_keys": snapshot.OnMissingKeys,
-		"actions":         snapshot.Actions,
-		"fail_modes":      snapshot.FailModes,
-		"auth_modes":      snapshot.AuthModes,
-		"forward_modes":   snapshot.ForwardModes,
-		"header_ops":      snapshot.HeaderOps,
-		"response_kinds":  kindStatuses,
-		"content_types":   snapshot.ContentTypes,
-		"jwt_algorithms":  snapshot.JWTAlgorithms,
+		"algorithms":        snapshot.Algorithms,
+		"key_kinds":         kinds,
+		"max_key_parts":     snapshot.MaxKeyParts,
+		"on_missing_keys":   snapshot.OnMissingKeys,
+		"actions":           snapshot.Actions,
+		"fail_modes":        snapshot.FailModes,
+		"auth_modes":        snapshot.AuthModes,
+		"forward_modes":     snapshot.ForwardModes,
+		"header_ops":        snapshot.HeaderOps,
+		"response_kinds":    kindStatuses,
+		"content_types":     snapshot.ContentTypes,
+		"jwt_algorithms":    snapshot.JWTAlgorithms,
+		"block_modes":       snapshot.BlockModes,
+		"distinct_of_kinds": snapshot.DistinctOfKinds,
+		"signals":           expr.Signals,
 		// RFC 9110 §9 methods and PATCH (RFC 5789), for CORS and Simulate.
 		// Validation takes any uppercase token; these are what a form offers.
 		"methods": []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
@@ -190,15 +197,18 @@ type draftRow struct {
 	Revision    int64
 	UpdatedBy   string
 	UpdatedAt   time.Time
+	// Adopted lists the overlay rules adopted into the draft since its
+	// last publish.
+	Adopted []string
 }
 
 func (s *Server) loadDraft(ctx context.Context, q querier, lock bool) (*draftRow, error) {
-	sql := "SELECT config, tests, base_version, revision, updated_by, updated_at FROM config_draft"
+	sql := "SELECT config, tests, base_version, revision, updated_by, updated_at, adopted FROM config_draft"
 	if lock {
 		sql += " FOR UPDATE"
 	}
 	var d draftRow
-	err := q.QueryRow(ctx, sql).Scan(&d.Config, &d.Tests, &d.BaseVersion, &d.Revision, &d.UpdatedBy, &d.UpdatedAt)
+	err := q.QueryRow(ctx, sql).Scan(&d.Config, &d.Tests, &d.BaseVersion, &d.Revision, &d.UpdatedBy, &d.UpdatedAt, &d.Adopted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -238,39 +248,69 @@ func (s *Server) getDraft(w http.ResponseWriter, r *http.Request, _ *principal) 
 			return err
 		}
 	}
+	active, err := s.activeConfig(r.Context(), s.db)
+	if err != nil {
+		return err
+	}
 	w.Header().Set("ETag", etag(d.Revision))
 	return writeJSON(w, http.StatusOK, map[string]any{"config": d.Config, "tests": d.Tests, "base_version": d.BaseVersion,
-		"revision": d.Revision, "updated_by": d.UpdatedBy, "updated_at": d.UpdatedAt})
+		"revision": d.Revision, "updated_by": d.UpdatedBy, "updated_at": d.UpdatedAt, "overlay": overlayOf(active, s.now()), "adopted": d.Adopted})
 }
 
-// startDraft is what editing starts from: the active version, or the
-// starter config when nothing is published.
+// startDraft is what editing starts from: the active version's own rules,
+// or the starter config when nothing is published.
 func (s *Server) startDraft(ctx context.Context) (*draftRow, error) {
 	av, err := activeVersion(ctx, s.db)
 	if err != nil || av == nil {
-		return &draftRow{Config: *snapshot.Starter(), Tests: []ConfigTest{}}, err
+		return &draftRow{Config: *snapshot.Starter(), Tests: []ConfigTest{}, Adopted: []string{}}, err
 	}
 	v, err := s.loadVersion(ctx, s.db, *av)
 	if err != nil {
 		return nil, err
 	}
-	return &draftRow{Config: v.Config, Tests: v.Tests, BaseVersion: av}, nil
+	return &draftRow{Config: *baseOf(&v.Config), Tests: v.Tests, BaseVersion: av, Adopted: []string{}}, nil
 }
 
 type draftIn struct {
 	Config *snapshot.Config `json:"config"`
 	Tests  []ConfigTest     `json:"tests"`
+	// adopted replaces the draft's adopted list when set.
+	adopted []string
 }
 
-// validate compiles c as the next version and checks the tests. Nothing
-// invalid is saved.
-func (s *Server) validate(ctx context.Context, q querier, c *snapshot.Config, tests []ConfigTest) (*snapshot.Compiled, []expr.Issue, error) {
+// validateDraft validates c, a person's rules, as the next publish would:
+// merged with the current overlay. It sets c's version as validate does.
+func (s *Server) validateDraft(ctx context.Context, q querier, c *snapshot.Config, tests []ConfigTest, adopted []string) (*snapshot.Compiled, []expr.Issue, error) {
+	if errs := reservedIDs(c); errs != nil {
+		return nil, nil, &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid config", Errors: errs}
+	}
+	active, err := s.activeConfig(ctx, q)
+	if err != nil {
+		return nil, nil, err
+	}
+	now := s.now()
+	merged := withOverlay(c, active, adopted, now)
+	compiled, warns, err := s.validate(ctx, q, s.cfg.Deployment, merged, tests)
+	c.Version = merged.Version
+	// Compile has no clock, so a rule that can never run again is caught
+	// here. It is a warning: the rule is valid, only pointless.
+	for i, r := range c.RateLimitRules {
+		if !r.ExpiresAt.IsZero() && !r.ExpiresAt.After(now) {
+			warns = append(warns, expr.Issue{Path: fmt.Sprintf("config.rate_limit_rules[%d].expires_at", i), Msg: "is already past; the rule will not run"})
+		}
+	}
+	return compiled, warns, err
+}
+
+// validate compiles c against d as the next version and checks the tests.
+// Nothing invalid is saved.
+func (s *Server) validate(ctx context.Context, q querier, d snapshot.Deployment, c *snapshot.Config, tests []ConfigTest) (*snapshot.Compiled, []expr.Issue, error) {
 	var next int64
 	if err := q.QueryRow(ctx, "SELECT coalesce(max(version), 0) + 1 FROM config_versions").Scan(&next); err != nil {
 		return nil, nil, err
 	}
 	c.Version = next
-	compiled, warns, errs := snapshot.Compile(c, s.cfg.Deployment)
+	compiled, warns, errs := snapshot.Compile(c, d)
 	for i := range errs {
 		errs[i].Path = joinPath("config", errs[i].Path)
 	}
@@ -303,17 +343,35 @@ func (s *Server) saveDraft(ctx context.Context, p *principal, rev int64, in draf
 	var saved int64
 	err := s.change(ctx, p.actor, func(tx pgx.Tx) (admindb.Event, error) {
 		old, err := s.loadDraft(ctx, tx, true)
+		if err == nil && old == nil {
+			// With no draft row, FOR UPDATE locked nothing, so a concurrent
+			// publish could supersede the base read below. The publish lock
+			// waits it out. A publish locks the draft row before the publish
+			// lock, so locking a draft created meanwhile would deadlock with
+			// it; that draft is refused as stale instead.
+			var raced *draftRow
+			if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock); err == nil {
+				raced, err = s.loadDraft(ctx, tx, false)
+			}
+			if err == nil && raced != nil {
+				return admindb.Event{}, fail(http.StatusPreconditionFailed, fmt.Sprintf("the draft is at revision %d; reload and reapply your change", raced.Revision))
+			}
+		}
 		if err != nil {
 			return admindb.Event{}, err
 		}
 		var cur int64
+		adopted := in.adopted
 		if old != nil {
 			cur = old.Revision
+			if adopted == nil {
+				adopted = old.Adopted
+			}
 		}
 		if cur != rev {
 			return admindb.Event{}, fail(http.StatusPreconditionFailed, fmt.Sprintf("the draft is at revision %d; reload and reapply your change", cur))
 		}
-		compiled, w, err := s.validate(ctx, tx, in.Config, in.Tests)
+		compiled, w, err := s.validateDraft(ctx, tx, in.Config, in.Tests, adopted)
 		if err != nil {
 			return admindb.Event{}, err
 		}
@@ -323,10 +381,13 @@ func (s *Server) saveDraft(ctx context.Context, p *principal, rev int64, in draf
 			return admindb.Event{}, err
 		}
 		saved = cur + 1
-		_, err = tx.Exec(ctx, `INSERT INTO config_draft (id, config, tests, base_version, revision, updated_by, updated_at)
-			VALUES (true, $1, $2, $3, $4, $5, $6)
-			ON CONFLICT (id) DO UPDATE SET config = $1, tests = $2, base_version = $3, revision = $4, updated_by = $5, updated_at = $6`,
-			in.Config, in.Tests, bv, saved, p.actor, s.now())
+		if adopted == nil {
+			adopted = []string{}
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO config_draft (id, config, tests, base_version, revision, updated_by, updated_at, adopted)
+			VALUES (true, $1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (id) DO UPDATE SET config = $1, tests = $2, base_version = $3, revision = $4, updated_by = $5, updated_at = $6, adopted = $7`,
+			in.Config, in.Tests, bv, saved, p.actor, s.now(), adopted)
 		details := map[string]any{"revision": saved}
 		if old != nil {
 			// Field-level before and after.
@@ -390,7 +451,14 @@ func (s *Server) checkDraft(w http.ResponseWriter, r *http.Request, _ *principal
 	}
 	var warns []expr.Issue
 	if err == nil {
-		_, warns, err = s.validate(r.Context(), s.db, in.Config, nil)
+		var d *draftRow
+		if d, err = s.loadDraft(r.Context(), s.db, false); err == nil {
+			var adopted []string
+			if d != nil {
+				adopted = d.Adopted
+			}
+			_, warns, err = s.validateDraft(r.Context(), s.db, in.Config, nil, adopted)
+		}
 	}
 	// Problems with a path are the answer; anything else is a failed request.
 	if p, ok := errors.AsType[*problem](err); ok && p.Errors != nil {
@@ -511,7 +579,11 @@ func (s *Server) compiledFor(ctx context.Context, v *int64) (*snapshot.Compiled,
 		if d == nil {
 			return nil, nil, fail(http.StatusNotFound, "no draft yet")
 		}
-		c, tests = &d.Config, d.Tests
+		active, err := s.activeConfig(ctx, s.db)
+		if err != nil {
+			return nil, nil, err
+		}
+		c, tests = withOverlay(&d.Config, active, d.Adopted, s.now()), d.Tests
 	} else {
 		vr, err := s.loadVersion(ctx, s.db, *v)
 		if err != nil {
@@ -577,14 +649,30 @@ func (s *Server) loadVersion(ctx context.Context, q querier, v int64) (*versionR
 // are the ones config_versions.source allows.
 var publishActions = map[string]string{
 	"manual": "config.publish", "revert": "config.revert", "guard_rollback": "config.rollback", "import": "config.import",
+	"autopilot": "config.overlay_publish",
 }
 
-// publishReq is one new version from any source.
+// publishReq is one new version from any source. publishTx adds the
+// active version's overlay to config, a person's rules.
 type publishReq struct {
-	config   *snapshot.Config
+	config *snapshot.Config
+	// restore makes config a version to restore: its own rules with the
+	// active overlay, as restoreOf builds.
+	restore bool
+	// adopted are overlay rules adopted into config.
+	adopted []string
+	// keepBase publishes overlay, unexpired rules only, on the active
+	// version's own rules and tests, in place of config and tests. A draft
+	// based on the active version moves onto the new one.
+	keepBase bool
+	// removal marks an overlay publish that only takes rules out. Like a
+	// restore, it runs rules edges already served, so no edge's deployment
+	// or schema may hold it back.
+	removal  bool
+	overlay  []snapshot.RateLimitRule
 	tests    []ConfigTest
 	message  string
-	source   string // manual | revert | guard_rollback | import
+	source   string // manual | revert | guard_rollback | import | autopilot
 	basedOn  *int64
 	override string  // reason to publish despite issuers without keys
 	canary   float64 // percent of clients; 0 publishes to everyone
@@ -602,6 +690,13 @@ type guardIn struct {
 func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req publishReq) (int64, error) {
 	if strings.TrimSpace(req.message) == "" {
 		return 0, &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid publish", Errors: []expr.Issue{{Path: "message", Msg: "is required"}}}
+	}
+	// The draft row before the publish lock, the order a person's publish
+	// takes them in.
+	if req.keepBase {
+		if _, err := tx.Exec(ctx, "SELECT 1 FROM config_draft FOR UPDATE"); err != nil {
+			return 0, err
+		}
 	}
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock); err != nil {
 		return 0, err
@@ -626,27 +721,123 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 			return 0, &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid guard override", Errors: errs}
 		}
 	}
-	if err := s.checkSchema(ctx, tx, req.config.Schema); err != nil {
-		return 0, err
-	}
 	// Reverts and rollbacks restore content edges already served, and must
 	// never wait on an edge that reports a different (or bogus) deployment.
-	if req.source != "revert" && req.source != "guard_rollback" {
+	d := s.cfg.Deployment
+	if req.source != "revert" && req.source != "guard_rollback" && !req.removal {
 		if err := s.checkDeployment(ctx, tx); err != nil {
 			return 0, err
 		}
+	} else {
+		// Edges compile with verified crawlers on, so a restore is not
+		// refused because admin's own sources were removed.
+		d.VerifiedBots = true
 	}
-	compiled, _, err := s.validate(ctx, tx, req.config, req.tests)
+	var prev *versionRow
+	if av, err := activeVersion(ctx, tx); err != nil {
+		return 0, err
+	} else if av != nil {
+		if prev, err = s.loadVersion(ctx, tx, *av); err != nil {
+			return 0, err
+		}
+	}
+	var prevConfig *snapshot.Config
+	if prev != nil {
+		prevConfig = &prev.Config
+	}
+	var cfg *snapshot.Config
+	tests := req.tests
+	switch {
+	case req.keepBase:
+		if prev == nil {
+			return 0, fail(http.StatusConflict, "nothing is published yet")
+		}
+		now := s.now()
+		// An adoption is of the rule as it was, so a rule changed under the
+		// same id would be dropped by the adopted list. A renewal, the same
+		// rule with a new expiry, keeps its id, and so does a rule moving
+		// from logging to blocking once its shadow counts confirm it.
+		var errs []expr.Issue
+		current := overlayOf(prevConfig, now)
+		// The adopted list matches by id until a person publishes, so a new
+		// rule reusing an adopted id that has expired would be dropped by
+		// that publish. Only autopilot's input is refused: the guard's
+		// rollback restores an overlay that already ran.
+		var adopted []string
+		if req.source == "autopilot" {
+			// The row is locked above.
+			d, err := s.loadDraft(ctx, tx, false)
+			if err != nil {
+				return 0, err
+			}
+			if d != nil {
+				adopted = d.Adopted
+			}
+		}
+		for i, r := range req.overlay {
+			r.ExpiresAt, r.Action = time.Time{}, ""
+			if slices.Contains(adopted, r.ID) && !slices.ContainsFunc(current, func(o snapshot.RateLimitRule) bool { return o.ID == r.ID }) {
+				errs = append(errs, expr.Issue{Path: fmt.Sprintf("rules[%d]", i), Msg: fmt.Sprintf("id %q is adopted in the draft; a new autopilot rule needs a new id", r.ID)})
+			}
+			for _, o := range current {
+				o.ExpiresAt, o.Action = time.Time{}, ""
+				if o.ID == r.ID && !jsonEqual(o, r) {
+					errs = append(errs, expr.Issue{Path: fmt.Sprintf("rules[%d]", i), Msg: fmt.Sprintf("id %q is live with other content; a changed autopilot rule needs a new id", r.ID)})
+				}
+			}
+		}
+		if errs != nil {
+			return 0, &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid autopilot rules", Errors: errs}
+		}
+		cfg = merge(baseOf(prevConfig), slices.DeleteFunc(slices.Clone(req.overlay), func(r snapshot.RateLimitRule) bool { return !live(r, now) }))
+		tests = prev.Tests
+	case req.restore:
+		cfg = restoreOf(req.config, prevConfig, s.now())
+	default:
+		cfg = withOverlay(req.config, prevConfig, req.adopted, s.now())
+	}
+	check := func(cfg *snapshot.Config, schema bool) ([]TestResult, error) {
+		compiled, _, err := s.validate(ctx, tx, d, cfg, tests)
+		if err != nil {
+			return nil, err
+		}
+		// The compiled config knows the schema it needs, which a field added
+		// later can raise above the config's own.
+		if schema {
+			if err := s.checkSchema(ctx, tx, compiled.NeedsSchema); err != nil {
+				return nil, err
+			}
+		}
+		results := runTests(compiled, tests)
+		for _, res := range results {
+			if !res.Pass {
+				return nil, &problem{Status: http.StatusUnprocessableEntity, Title: "Config tests failed", Detail: "fix the config or the tests before publishing", Tests: results}
+			}
+		}
+		return results, nil
+	}
+	results, err := check(cfg, !req.removal)
+	overlayDropped := false
+	if err != nil && req.restore {
+		// A restore returns rules that already ran, so today's overlay must
+		// not block it. When the rules pass without it, the overlay goes.
+		// Like the deployment check, the schema check is skipped: an edge
+		// too old to read the rules keeps its snapshot, and must not block
+		// the way back.
+		bare := baseOf(req.config)
+		r, err2 := check(bare, false)
+		if err2 == nil {
+			cfg, results, err, overlayDropped = bare, r, nil, true
+		} else if _, ok := errors.AsType[*problem](err2); ok {
+			// The restored rules fail on their own, so the overlay is not the
+			// cause and its paths would mislead.
+			err = err2
+		}
+	}
 	if err != nil {
 		return 0, err
 	}
-	results := runTests(compiled, req.tests)
-	for _, res := range results {
-		if !res.Pass {
-			return 0, &problem{Status: http.StatusUnprocessableEntity, Title: "Config tests failed", Detail: "fix the config or the tests before publishing", Tests: results}
-		}
-	}
-	missing, err := issuersWithoutKeys(ctx, tx, req.config)
+	missing, err := issuersWithoutKeys(ctx, tx, cfg)
 	if err != nil {
 		return 0, err
 	}
@@ -659,14 +850,10 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 		override = &req.override
 	}
 	summary := "first version"
-	if av, err := activeVersion(ctx, tx); err != nil {
-		return 0, err
-	} else if av != nil {
-		prev, err := s.loadVersion(ctx, tx, *av)
-		if err != nil {
-			return 0, err
-		}
-		summary = semanticDiff(&prev.Config, req.config).summary()
+	var prevKill snapshot.KillSwitch // a first version is compared with all off
+	if prev != nil {
+		summary = semanticDiff(prevConfig, cfg).summary()
+		prevKill = prev.Config.KillSwitch
 	}
 	status := "active"
 	if req.canary > 0 {
@@ -674,7 +861,7 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 	} else if _, err := tx.Exec(ctx, "UPDATE config_versions SET status = 'superseded' WHERE status = 'active'"); err != nil {
 		return 0, err
 	}
-	v := req.config.Version
+	v := cfg.Version
 	now := s.now()
 	var guardWhy *string
 	if req.guard != nil {
@@ -682,11 +869,48 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO config_versions (version, author, published_at, message, source, based_on, status, config, tests, test_results, change_summary, override_reason, guard_override, guard_override_reason)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		v, p.actor, now, req.message, req.source, req.basedOn, status, req.config, req.tests, results, summary, override, req.guard, guardWhy)
+		v, p.actor, now, req.message, req.source, req.basedOn, status, cfg, tests, results, summary, override, req.guard, guardWhy)
 	if err != nil {
 		return 0, err
 	}
+	if req.keepBase {
+		if _, err := tx.Exec(ctx, "UPDATE config_draft SET base_version = $1 WHERE base_version = $2", v, prev.Version); err != nil {
+			return 0, err
+		}
+	} else {
+		// With no draft row, editing starts from the active version at
+		// revision 0. Starting the draft here makes a first save read before
+		// this publish stale, so it can't take this version as its base and
+		// publish the older rules over it. The overlay publish changes no
+		// person's rules, so it leaves a missing draft missing.
+		if _, err := tx.Exec(ctx, `INSERT INTO config_draft (id, config, tests, base_version, revision, updated_by, updated_at, adopted)
+			VALUES (true, $1, $2, $3, 1, $4, $5, '{}') ON CONFLICT (id) DO NOTHING`, baseOf(cfg), tests, v, p.actor, now); err != nil {
+			return 0, err
+		}
+	}
 	details := map[string]any{"version": v, "message": req.message, "change_summary": summary}
+	if overlayDropped {
+		details["overlay_dropped"] = true
+		// The autopilot rules left the edges with this version. Their rows
+		// end with it, so the next tick does not try to publish them back.
+		live, err := s.loadRules(ctx, tx, "state IN ('observing', 'enforcing')")
+		if err != nil {
+			return 0, err
+		}
+		var numbers map[string]any
+		if req.canary > 0 {
+			// The active version still runs them until the canary ends.
+			numbers = map[string]any{"waits_for_canary": v}
+		}
+		var changes []ruleChange
+		for _, r := range live {
+			changes = append(changes, ruleChange{from: r.State, next: ended(r, "retired", "retired", now), reason: "a revert or rollback published without the autopilot rules",
+				actor: p.actor, action: "autopilot.retire", numbers: numbers})
+		}
+		if err := s.applyChanges(ctx, tx, changes, &v); err != nil {
+			return 0, err
+		}
+	}
 	if req.canary > 0 {
 		if _, err := tx.Exec(ctx, "INSERT INTO canary (version, percent, started_at, step_started_at, expires_at) VALUES ($1, $2, $3, $3, $4)",
 			v, req.canary, now, now.Add(canaryLease)); err != nil {
@@ -696,6 +920,11 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 	}
 	if req.basedOn != nil {
 		details["based_on"] = *req.basedOn
+	}
+	// Recorded only on a change, so the activity page and traffic chart can
+	// mark when a kill switch went on or off.
+	if cfg.KillSwitch != prevKill {
+		details["kill_switch"] = cfg.KillSwitch
 	}
 	if req.guard != nil {
 		// The saved settings beside the override, so the log can say what
@@ -782,6 +1011,12 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request, p *principal) e
 		if d == nil || d.Revision != rev {
 			return fail(http.StatusPreconditionFailed, "the draft changed since you loaded it; reload before publishing")
 		}
+		// The base check holds the publish lock, which publishTx takes again,
+		// so no revert or rollback can commit between the check and the
+		// publish.
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock); err != nil {
+			return err
+		}
 		av, err := activeVersion(ctx, tx)
 		if err != nil {
 			return err
@@ -791,17 +1026,22 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request, p *principal) e
 		if !samePtr(av, d.BaseVersion) {
 			return fail(http.StatusConflict, "the active version changed since this draft started; rebase the draft first")
 		}
-		v, err = s.publishTx(ctx, tx, p, publishReq{config: &d.Config, tests: d.Tests, message: in.Message, source: "manual", override: in.OverrideReason, canary: float64(in.CanaryPercent),
+		if s.afterBaseCheck != nil {
+			s.afterBaseCheck()
+		}
+		v, err = s.publishTx(ctx, tx, p, publishReq{config: &d.Config, adopted: d.Adopted, tests: d.Tests, message: in.Message, source: "manual", override: in.OverrideReason, canary: float64(in.CanaryPercent),
 			guard: in.Guard, guardWhy: in.GuardReason})
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, "UPDATE config_draft SET base_version = $1, config = $2, revision = revision + 1", v, &d.Config)
+		d.Config.Version = v
+		_, err = tx.Exec(ctx, "UPDATE config_draft SET base_version = $1, config = $2, adopted = '{}', revision = revision + 1", v, &d.Config)
 		return err
 	}))
 	if err != nil {
 		return err
 	}
+	s.met.published("manual")
 	return writeJSON(w, http.StatusCreated, map[string]int64{"version": v})
 }
 
@@ -816,29 +1056,36 @@ func pathVersion(r *http.Request, name string) (int64, error) {
 }
 
 func (s *Server) listVersions(w http.ResponseWriter, r *http.Request, _ *principal) error {
-	rows, err := s.db.Query(r.Context(), `SELECT version, author, published_at, message, source, based_on, status, change_summary, override_reason, guard_outcome, abort_reason
-		FROM config_versions ORDER BY version DESC`)
-	if err != nil {
-		return err
-	}
-	type item struct {
-		Version        int64           `json:"version"`
-		Author         string          `json:"author"`
-		PublishedAt    time.Time       `json:"published_at"`
-		Message        string          `json:"message"`
-		Source         string          `json:"source"`
-		BasedOn        *int64          `json:"based_on"`
-		Status         string          `json:"status"`
-		ChangeSummary  string          `json:"change_summary"`
-		OverrideReason *string         `json:"override_reason"`
-		GuardOutcome   json.RawMessage `json:"guard_outcome"`
-		AbortReason    *string         `json:"abort_reason"`
-	}
-	list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[item])
+	list, err := s.versionItems(r.Context(), nil)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, list)
+}
+
+// versionItem is a version as the list shows it.
+type versionItem struct {
+	Version        int64           `json:"version"`
+	Author         string          `json:"author"`
+	PublishedAt    time.Time       `json:"published_at"`
+	Message        string          `json:"message"`
+	Source         string          `json:"source"`
+	BasedOn        *int64          `json:"based_on"`
+	Status         string          `json:"status"`
+	ChangeSummary  string          `json:"change_summary"`
+	OverrideReason *string         `json:"override_reason"`
+	GuardOutcome   json.RawMessage `json:"guard_outcome"`
+	AbortReason    *string         `json:"abort_reason"`
+}
+
+// versionItems lists versions newest first, at most limit when set.
+func (s *Server) versionItems(ctx context.Context, limit *int) ([]versionItem, error) {
+	rows, err := s.db.Query(ctx, `SELECT version, author, published_at, message, source, based_on, status, change_summary, override_reason, guard_outcome, abort_reason
+		FROM config_versions ORDER BY version DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[versionItem])
 }
 
 func (s *Server) getVersion(w http.ResponseWriter, r *http.Request, _ *principal) error {
@@ -854,8 +1101,8 @@ func (s *Server) getVersion(w http.ResponseWriter, r *http.Request, _ *principal
 }
 
 // revert publishes version K's content as a new version, validated and
-// tested against today's deployment. Keys are never reverted: they live
-// apart from config.
+// tested against today's deployment with verified crawlers on, as edges
+// have it. Keys are never reverted: they live apart from config.
 func (s *Server) revert(w http.ResponseWriter, r *http.Request, p *principal) error {
 	k, err := pathVersion(r, "v")
 	if err != nil {
@@ -879,13 +1126,14 @@ func (s *Server) revert(w http.ResponseWriter, r *http.Request, p *principal) er
 		if err != nil {
 			return err
 		}
-		v, err = s.publishTx(ctx, tx, p, publishReq{config: &old.Config, tests: old.Tests, message: in.Reason, source: "revert", basedOn: &k, override: in.OverrideReason,
+		v, err = s.publishTx(ctx, tx, p, publishReq{config: &old.Config, restore: true, tests: old.Tests, message: in.Reason, source: "revert", basedOn: &k, override: in.OverrideReason,
 			canary: float64(in.CanaryPercent), guard: in.Guard, guardWhy: in.GuardReason})
 		return err
 	}))
 	if err != nil {
 		return err
 	}
+	s.met.published("revert")
 	return writeJSON(w, http.StatusCreated, map[string]int64{"version": v})
 }
 
@@ -903,12 +1151,13 @@ func (s *Server) copyToDraft(w http.ResponseWriter, r *http.Request, p *principa
 	if err != nil {
 		return err
 	}
-	saved, warns, results, err := s.saveDraft(ctx, p, rev, draftIn{Config: &old.Config, Tests: old.Tests},
+	c := baseOf(&old.Config)
+	saved, warns, results, err := s.saveDraft(ctx, p, rev, draftIn{Config: c, Tests: old.Tests},
 		func(tx pgx.Tx, _ *draftRow) (*int64, error) { return activeVersion(ctx, tx) }, "config.copy_to_draft", map[string]any{"from_version": k})
 	if err != nil {
 		return err
 	}
-	return s.draftSaved(w, ctx, &old.Config, saved, warns, results)
+	return s.draftSaved(w, ctx, c, saved, warns, results)
 }
 
 // rebasePlan is the three-way view of a draft on top of the active version.
@@ -952,10 +1201,12 @@ func (s *Server) rebaseView(ctx context.Context) (*rebasePlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	result, conflicts := rebase(&base.Config, &d.Config, &active.Config)
+	// The draft holds people's rules only, so the overlay takes no part.
+	baseRules, activeRules := baseOf(&base.Config), baseOf(&active.Config)
+	result, conflicts := rebase(baseRules, &d.Config, activeRules)
 	view := map[string]any{
 		"base_version": base.Version, "active_version": active.Version,
-		"draft_changes": semanticDiff(&base.Config, &d.Config), "active_changes": semanticDiff(&base.Config, &active.Config),
+		"draft_changes": semanticDiff(baseRules, &d.Config), "active_changes": semanticDiff(baseRules, activeRules),
 		"result": result, "conflicts": orEmpty(conflicts),
 	}
 	return &rebasePlan{draft: d, active: *av, view: view, result: result}, nil
@@ -997,7 +1248,13 @@ func (s *Server) configOf(ctx context.Context, ref string) (*snapshot.Config, er
 		if d == nil {
 			return nil, fail(http.StatusNotFound, "no draft yet")
 		}
-		return &d.Config, nil
+		// As the next publish would be, so a diff with the active version
+		// does not list the overlay as removed.
+		active, err := s.activeConfig(ctx, s.db)
+		if err != nil {
+			return nil, err
+		}
+		return withOverlay(&d.Config, active, d.Adopted, s.now()), nil
 	}
 	v, err := strconv.ParseInt(ref, 10, 64)
 	if err != nil {
@@ -1147,16 +1404,23 @@ func (s *Server) importConfig(w http.ResponseWriter, r *http.Request, p *princip
 	if in.Config == nil {
 		return fail(http.StatusUnprocessableEntity, "config is required")
 	}
+	// The file's overlay rate-limit rules are ignored below; an "ap-" id in
+	// another phase is a person's rule, refused as a save refuses it.
+	if errs := reservedIDs(&snapshot.Config{ConfigRules: in.Config.ConfigRules, RequestHeaderRules: in.Config.RequestHeaderRules}); errs != nil {
+		return &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid config", Errors: errs}
+	}
 	ctx := r.Context()
 	var v int64
 	err := dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		var err error
-		v, err = s.publishTx(ctx, tx, p, publishReq{config: in.Config, tests: in.Tests, message: in.Message, source: "import", override: in.OverrideReason})
+		// The file's overlay answered attacks elsewhere; this admin keeps its own.
+		v, err = s.publishTx(ctx, tx, p, publishReq{config: baseOf(in.Config), tests: in.Tests, message: in.Message, source: "import", override: in.OverrideReason})
 		return err
 	}))
 	if err != nil {
 		return err
 	}
+	s.met.published("import")
 	return writeJSON(w, http.StatusCreated, map[string]int64{"version": v})
 }
 

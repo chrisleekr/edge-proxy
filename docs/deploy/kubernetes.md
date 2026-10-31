@@ -53,7 +53,7 @@ valkey:
 
 Two settings in this example matter for safety:
 
-- **NetworkPolicy.** The edge trusts the client-IP header from any peer inside `config.trustedProxies`. A pod range is wide, so without `networkPolicy.enabled` any pod in the cluster can reach the edge and choose its own client IP, which defeats per-IP limits. The chart refuses to render with `networkPolicy.enabled` and an empty `edgeFrom`. Turning it on also limits the edge's `:9090` port to `networkPolicy.metricsFrom` (empty admits nothing, so add Prometheus there if it scrapes `/metrics`), and admin to the edges, the log shipper and `networkPolicy.adminFrom`.
+- **NetworkPolicy.** The edge trusts the client-IP header from any peer inside `config.trustedProxies`. A pod range is wide, so without `networkPolicy.enabled` any pod in the cluster can reach the edge and choose its own client IP, which defeats per-IP limits. The chart refuses to render with `networkPolicy.enabled` and an empty `edgeFrom`. Turning it on also limits the edge's `:9090` port to `networkPolicy.metricsFrom` (empty admits nothing, so add Prometheus there if it scrapes `/metrics`). It limits admin's API port to the edges, the log shipper and `networkPolicy.adminFrom`, and admin's internal port `:9091`, which serves `/metrics` with no authentication, to `metricsFrom` only; `adminFrom` does not reach it.
 - **Image tags.** Pin both tags to a digest (`<tag>@sha256:...`) in production, so every node runs the same build. `latest` moves with each release.
 
 The edge-proxy chart is not yet published to the chart repository, so install it from a checkout:
@@ -64,7 +64,7 @@ helm dependency update helm-charts/charts/edge-proxy
 helm install edge-proxy helm-charts/charts/edge-proxy --namespace edge-proxy --create-namespace -f values.yaml
 ```
 
-The image repositories default to `chrisleekr/edge-proxy` and `chrisleekr/edge-proxy-admin` on Docker Hub, and the tags to the chart's `appVersion`. While that is the `0.0.0` placeholder, the render fails until `edge.image.tag` and `admin.image.tag` are set. A GitHub release pushes both images to Docker Hub tagged with its version and `latest`, for amd64 and arm64. GitLab CI pushes only a rolling amd64 `latest` from `main`, to the GitLab project's own registry; to use it, set both `image.repository` values to that registry's `edge-proxy` and `edge-proxy-admin` images.
+The image repositories default to `chrisleekr/edge-proxy` and `chrisleekr/edge-proxy-admin` on Docker Hub, and the tags to the chart's `appVersion`. While that is the `0.0.0` placeholder, the render fails until `edge.image.tag` and `admin.image.tag` are set. A GitHub release pushes them to Docker Hub tagged with its version and `latest`, for amd64 and arm64. GitLab CI pushes only a rolling amd64 `latest` from `main`, to the GitLab project's own registry; to use it, set both `image.repository` values to that registry's `edge-proxy` and `edge-proxy-admin` images.
 
 ## Policy while admin is down
 
@@ -222,6 +222,10 @@ It needs a read-only `hostPath` mount of `/var/log/pods`, to run as root (pod lo
 | `logShipper.nodeSelector`, `logShipper.tolerations` | the edge's | Where it runs |
 
 While admin is unreachable, the shipper keeps up to 10,000 lines in memory and drops newer ones.
+
+## Autopilot runner
+
+Chart 0.7.0 and later can run the autopilot runner beside admin: set `autopilot.enabled` and `autopilot.existingSecret`; `autopilot.tokenSecret` is optional.
 
 ## Reach admin from outside the cluster
 

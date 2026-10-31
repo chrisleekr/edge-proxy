@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -177,16 +179,26 @@ func (s *Server) guardRoutes() {
 type cohort struct {
 	edge.Totals
 	rules map[string]*edge.RuleCounts
+	// configRules holds the IDs in rules that are config rules.
+	configRules map[string]bool
 }
 
 func (s *Server) cohort(ctx context.Context, version int64, from, to time.Time) (*cohort, error) {
 	// Uses the (version, minute) index: only this version's minutes are
 	// read and decoded.
-	rows, err := s.statsWhere(ctx, "version = $1 AND minute >= $2 AND minute < $3", version, from, to)
+	return s.cohortWhere(ctx, s.db, "version = $1 AND minute >= $2 AND minute < $3", version, from, to)
+}
+
+// cohortWhere is the cohort of the stats rows cond selects. cond is a
+// constant; values go in args. A rule's heavy subjects are found minute by
+// minute and left out of its limited count once, over the whole window.
+func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args ...any) (*cohort, error) {
+	rows, err := s.statsWhere(ctx, q, cond, args...)
 	if err != nil {
 		return nil, err
 	}
-	c := &cohort{rules: map[string]*edge.RuleCounts{}}
+	c := &cohort{rules: map[string]*edge.RuleCounts{}, configRules: map[string]bool{}}
+	heavy := map[string]uint64{}
 	for _, r := range rows {
 		addTotals(&c.Totals, r.Totals)
 		// Estimates per rule and subject, summed across replicas.
@@ -195,7 +207,7 @@ func (s *Server) cohort(ctx context.Context, version int64, from, to time.Time) 
 			if top[t.Rule] == nil {
 				top[t.Rule] = map[string]uint64{}
 			}
-			top[t.Rule][t.Key] += t.Limited
+			top[t.Rule][t.Key] += t.Limited - min(t.Err, t.Limited) // at least this many
 		}
 		for _, rc := range r.RateLimit {
 			sum := c.rules[rc.ID]
@@ -203,25 +215,62 @@ func (s *Server) cohort(ctx context.Context, version int64, from, to time.Time) 
 				sum = &edge.RuleCounts{ID: rc.ID}
 				c.rules[rc.ID] = sum
 			}
-			var heavy uint64
-			for _, est := range top[rc.ID] {
-				if float64(est) >= heavyShare*float64(rc.Limited) {
-					heavy += est
-				}
-			}
-			rc.Limited -= min(rc.Limited, heavy)
+			heavy[rc.ID] += heavyIn(rc.Limited, top[rc.ID])
 			addRule(sum, rc)
 		}
+		// A config rule's block setting refuses requests like a rate limit,
+		// out of every request the cohort served.
+		for _, ro := range r.Rules {
+			if ro.Phase != string(expr.PhaseConfig) {
+				continue
+			}
+			sum := c.rules[ro.ID]
+			if sum == nil {
+				sum = &edge.RuleCounts{ID: ro.ID}
+				c.rules[ro.ID] = sum
+			}
+			c.configRules[ro.ID] = true
+			addRule(sum, edge.RuleCounts{Evaluated: r.Requests, Limited: ro.Blocked, WouldLimit: ro.WouldBlock})
+		}
+	}
+	for id, h := range heavy {
+		c.rules[id].Limited = withoutHeavy(c.rules[id].Limited, h)
 	}
 	return c, nil
 }
 
-// heavyShare: a subject is left out of a cohort's limited count only when it
-// holds at least this share of a rule's limited requests in a minute, as an
-// attacker would. Many clients limited a little each are the over-blocking
-// the guard must catch, and their sampled estimates (16 per sample) would
-// otherwise add up to the whole count.
+// heavyShare: a subject is left out of a rule's limited count only when it
+// holds at least this share of the rule's limited requests in a minute, as
+// an attacker would. Many clients limited a little each are the
+// over-blocking the guard must catch, and their sampled estimates
+// (edge.TopSample per sample) would otherwise add up to the whole count.
 const heavyShare = 0.05
+
+// heavyIn is the summed estimates of a minute's heavy subjects of a rule
+// that counted n that minute.
+func heavyIn(n uint64, est map[string]uint64) uint64 {
+	var heavy uint64
+	for _, e := range est {
+		if float64(e) >= heavyShare*float64(n) {
+			heavy += e
+		}
+	}
+	return heavy
+}
+
+// withoutHeavy is a rule's count n over a window less heavy, its heavy
+// subjects' summed estimates, and less their sampling error. An estimate
+// is edge.TopSample per sampled request: unbiased, with a variance of about
+// TopSample x heavy, so 3 standard deviations of it are allowed. Taken once
+// over the window, a minute's shortfall and another's overshoot cancel;
+// taken per minute with a floor at 0, every shortfall would count as
+// collateral, as if attackers' blocks were over-blocking.
+func withoutHeavy(n, heavy uint64) uint64 {
+	if heavy == 0 {
+		return n
+	}
+	return n - min(n, heavy+uint64(3*math.Sqrt(float64(edge.TopSample*heavy))))
+}
 
 func ratio(n, d uint64) float64 {
 	if d == 0 {
@@ -286,6 +335,12 @@ func evaluate(g GuardSettings, sub, base *cohort, changed map[string]bool, adopt
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(sub.rules)) {
+		// Autopilot rules have their own guard, judged by their own shadow
+		// counts, so an autopilot rule blocking an attack never rolls back a
+		// person's publish.
+		if isOverlay(id) {
+			continue
+		}
 		rc := sub.rules[id]
 		v := ratio(rc.Limited, rc.Evaluated)
 		b := base.rules[id]
@@ -295,6 +350,17 @@ func evaluate(g GuardSettings, sub, base *cohort, changed map[string]bool, adopt
 			shadow := 0.0
 			if b != nil {
 				shadow = ratio(b.WouldLimit, b.Evaluated)
+				// A config rule is judged by the larger of what it logged and
+				// what it blocked in the active version: blocking that share
+				// is the intent, even above max_ratio, whether the rule logged
+				// first or was already blocking before this edit.
+				if sub.configRules[id] {
+					shadow = max(shadow, ratio(b.Limited, b.Evaluated))
+				}
+			}
+			if sub.configRules[id] && shadow > 0 {
+				worst(&chRes, id, v, shadow*ch.MaxVsShadow, v > shadow*ch.MaxVsShadow)
+				continue
 			}
 			worst(&chRes, id, v, ch.MaxRatio, v > ch.MaxRatio || (shadow > 0 && v > shadow*ch.MaxVsShadow))
 			continue
@@ -315,15 +381,19 @@ func evaluate(g GuardSettings, sub, base *cohort, changed map[string]bool, adopt
 	return out
 }
 
-// changedRules lists rate-limit rule IDs added or changed from a to b.
+// changedRules lists rate-limit and config rule IDs added or changed from a
+// to b. Rule IDs are unique across phases.
 func changedRules(a, b *snapshot.Config) map[string]bool {
-	d := semanticDiff(a, b).Phases["rate_limit_rules"]
+	diff := semanticDiff(a, b)
 	m := map[string]bool{}
-	for _, id := range d.Added {
-		m[id] = true
-	}
-	for _, c := range d.Changed {
-		m[c.ID] = true
+	for _, phase := range []string{"rate_limit_rules", "config_rules"} {
+		d := diff.Phases[phase]
+		for _, id := range d.Added {
+			m[id] = true
+		}
+		for _, c := range d.Changed {
+			m[c.ID] = true
+		}
 	}
 	return m
 }
@@ -365,51 +435,59 @@ func (s *Server) runGuard(ctx context.Context) error {
 			return err
 		}
 	}
-	av, err := activeVersion(ctx, s.db)
-	if err != nil || av == nil {
-		return err
-	}
-	active, err := s.loadVersion(ctx, s.db, *av)
-	if err != nil {
-		return err
-	}
-	subject := active
+	var subject, baseline *versionRow
+	var g GuardSettings
+	var sub, base *cohort
+	var started time.Time
 	if c != nil {
+		av, err := activeVersion(ctx, s.db)
+		if err != nil || av == nil {
+			return err
+		}
+		if baseline, err = s.loadVersion(ctx, s.db, *av); err != nil {
+			return err
+		}
 		if subject, err = s.loadVersion(ctx, s.db, c.Version); err != nil {
 			return err
 		}
-	}
-	g, err := guardFor(ctx, s.db, subject)
-	if err != nil || !g.Enabled {
-		return err
-	}
-	var baseline *versionRow
-	var from, to, baseFrom, baseTo time.Time
-	var started time.Time
-	if c != nil {
-		baseline, started = active, c.StartedAt
-		from, to = maxTime(c.StepStartedAt, now.Add(-time.Duration(g.Window))), now
-		baseFrom, baseTo = from, to // both cohorts over the same minutes
-	} else {
-		if now.Sub(active.PublishedAt) > time.Duration(g.Window) {
-			return nil // outside the watch window after publish
-		}
-		started = active.PublishedAt
-		prev, err := s.previousVersion(ctx, active)
-		if err != nil || prev == nil {
+		if g, err = guardFor(ctx, s.db, subject); err != nil || !g.Enabled {
 			return err
 		}
-		baseline = prev
-		from, to = active.PublishedAt, now
-		baseFrom, baseTo = active.PublishedAt.Add(-time.Duration(g.Window)), active.PublishedAt
-	}
-	sub, err := s.cohort(ctx, subject.Version, from.Truncate(time.Minute), to)
-	if err != nil {
-		return err
-	}
-	base, err := s.cohort(ctx, baseline.Version, baseFrom.Truncate(time.Minute), baseTo)
-	if err != nil {
-		return err
+		started = c.StartedAt
+		// Both cohorts over the same minutes.
+		from := maxTime(c.StepStartedAt, now.Add(-time.Duration(g.Window))).Truncate(time.Minute)
+		if sub, err = s.cohort(ctx, subject.Version, from, now); err != nil {
+			return err
+		}
+		if base, err = s.cohort(ctx, baseline.Version, from, now); err != nil {
+			return err
+		}
+	} else {
+		// Autopilot publishes change only its own rules, so the version
+		// judged is the latest one a person published, over its own minutes
+		// and those of the autopilot versions after it, against every
+		// version before it over the window before its publish. A canary
+		// aborted since is not the judged version's traffic.
+		if subject, err = s.judged(ctx, s.db); err != nil || subject == nil {
+			return err
+		}
+		if g, err = guardFor(ctx, s.db, subject); err != nil || !g.Enabled {
+			return err
+		}
+		if now.Sub(subject.PublishedAt) > time.Duration(g.Window) {
+			return nil // outside the watch window after publish
+		}
+		started = subject.PublishedAt
+		if baseline, err = s.previousVersion(ctx, subject); err != nil || baseline == nil {
+			return err
+		}
+		if sub, err = s.cohortWhere(ctx, s.db, judgedOrAfter+" AND minute >= $2 AND minute < $3", subject.Version, subject.PublishedAt.Truncate(time.Minute), now); err != nil {
+			return err
+		}
+		if base, err = s.cohortWhere(ctx, s.db, "version < $1 AND minute >= $2 AND minute < $3", subject.Version,
+			subject.PublishedAt.Add(-time.Duration(g.Window)).Truncate(time.Minute), subject.PublishedAt); err != nil {
+			return err
+		}
 	}
 	out := guardOutcome{At: now, Decision: decisionInsufficient, Baseline: baseline.Version}
 	if sub.Requests >= g.MinRequests && base.Requests >= g.MinRequests {
@@ -451,10 +529,33 @@ func (s *Server) previousVersion(ctx context.Context, v *versionRow) (*versionRo
 	return s.loadVersion(ctx, s.db, prev)
 }
 
-// adoption is the share of live edges that loaded version v.
+// judged is the version the guard judges outside a canary: the latest one
+// a person published (or a revert or rollback made) that served, at or
+// before the active version.
+func (s *Server) judged(ctx context.Context, q querier) (*versionRow, error) {
+	var v int64
+	err := q.QueryRow(ctx, `SELECT version FROM config_versions WHERE source <> 'autopilot' AND status IN ('active', 'superseded')
+		AND version <= (SELECT version FROM config_versions WHERE status = 'active') ORDER BY version DESC LIMIT 1`).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.loadVersion(ctx, q, v)
+}
+
+// judgedOrAfter selects version $1 and the autopilot versions after it,
+// which run $1's rules.
+const judgedOrAfter = "(version = $1 OR version > $1 AND version IN (SELECT version FROM config_versions WHERE source = 'autopilot'))"
+
+// adoption is the share of live edges that loaded version v or an
+// autopilot version after it, which runs v's rules too.
 func (s *Server) adoption(ctx context.Context, v int64, now time.Time) (float64, error) {
 	var live, have uint64
-	err := s.db.QueryRow(ctx, "SELECT count(*), count(*) FILTER (WHERE $1 = ANY(versions)) FROM fleet WHERE last_seen > $2", v, now.Add(-fleetWindow)).Scan(&live, &have)
+	err := s.db.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE EXISTS (SELECT 1 FROM unnest(versions) x WHERE x = $1
+		OR x > $1 AND x IN (SELECT version FROM config_versions WHERE source = 'autopilot'))) FROM fleet WHERE last_seen > $2`,
+		v, now.Add(-fleetWindow)).Scan(&live, &have)
 	return ratio(have, live), err
 }
 
@@ -462,18 +563,27 @@ func (s *Server) adoption(ctx context.Context, v int64, now time.Time) (float64,
 // canary or rolls the version back. A revert or rollback is never rolled
 // back: it only alerts.
 func (s *Server) act(ctx context.Context, g GuardSettings, subject, baseline *versionRow, c *canaryRow, out guardOutcome) error {
-	return dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	var took string // the action, once the transaction has decided one
+	err := dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock); err != nil {
 			return err
 		}
 		// runGuard read this state before the lock. If an operator changed it
-		// since, the judgment is stale; the next run judges the new state.
-		var canaryV, activeV *int64
-		if err := tx.QueryRow(ctx, "SELECT (SELECT version FROM canary), (SELECT version FROM config_versions WHERE status = 'active')").Scan(&canaryV, &activeV); err != nil {
+		// since, the judgment is stale; the next run judges the new state. An
+		// autopilot publish since changes nothing judged.
+		var canaryV *int64
+		if err := tx.QueryRow(ctx, "SELECT version FROM canary").Scan(&canaryV); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		canaryMoved := c != nil && (canaryV == nil || *canaryV != c.Version)
-		activeMoved := c == nil && (canaryV != nil || activeV == nil || *activeV != subject.Version)
+		activeMoved := false
+		if c == nil {
+			j, err := s.judged(ctx, tx)
+			if err != nil {
+				return err
+			}
+			activeMoved = canaryV != nil || j == nil || j.Version != subject.Version
+		}
 		if canaryMoved || activeMoved {
 			return nil
 		}
@@ -507,8 +617,10 @@ func (s *Server) act(ctx context.Context, g GuardSettings, subject, baseline *ve
 			} else {
 				action = "guard.rollback"
 				p := &principal{actor: "system:guard"}
-				v, err := s.publishTx(ctx, tx, p, publishReq{config: &baseline.Config, tests: baseline.Tests, source: "guard_rollback", basedOn: &baseline.Version,
-					message: fmt.Sprintf("Guard rolled back version %d", subject.Version), override: "guard rollback restores a version that ran before"})
+				// The rules before the person's publish, under today's overlay.
+				req := publishReq{config: &baseline.Config, restore: true, tests: baseline.Tests, source: "guard_rollback", basedOn: &baseline.Version,
+					message: fmt.Sprintf("Guard rolled back version %d", subject.Version), override: "guard rollback restores a version that ran before"}
+				v, err := s.publishTx(ctx, tx, p, req)
 				if err != nil {
 					return err
 				}
@@ -519,6 +631,15 @@ func (s *Server) act(ctx context.Context, g GuardSettings, subject, baseline *ve
 			}
 		}
 		s.log.Error("guard tripped", "action", action, "version", subject.Version)
+		took = strings.TrimPrefix(action, "guard.")
 		return admindb.Audit(ctx, tx, s.cfg.Audit, s.now, admindb.Event{Actor: "system:guard", Action: action, Target: fmt.Sprintf("version %d", subject.Version), Details: details})
 	}))
+	if err != nil || took == "" {
+		return err
+	}
+	s.met.guardActed(took)
+	if took == "rollback" {
+		s.met.published("guard_rollback")
+	}
+	return nil
 }

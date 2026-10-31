@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net"
 	"net/http"
@@ -47,16 +48,24 @@ func bootstrapEnv(t *testing.T) (map[string]string, testenv.DB) {
 	return e, db
 }
 
-// serveOnce runs admin until check returns, then stops it cleanly.
+// serveOnce runs admin until check returns, then stops it cleanly. It sets
+// LISTEN_ADDR and ADMIN_INTERNAL_ADDR in e to free ports.
 func serveOnce(t *testing.T, e map[string]string, check func(base string)) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// Both listeners stay open until both ports are read, so the two differ.
+	var ls [2]net.Listener
+	for i := range ls {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ls[i] = l
 	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	e["LISTEN_ADDR"] = addr
+	addr := ls[0].Addr().String()
+	e["LISTEN_ADDR"], e["ADMIN_INTERNAL_ADDR"] = addr, ls[1].Addr().String()
+	for _, l := range ls {
+		_ = l.Close()
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan int)
 	var logs bytes.Buffer
@@ -126,7 +135,7 @@ func count(t *testing.T, dsn, sql string) int {
 // starter policy. Restarting changes nothing.
 func TestBootstrapOnAFreshInstall(t *testing.T) {
 	e, db := bootstrapEnv(t)
-	for range 2 {
+	for start := range 2 {
 		serveOnce(t, e, func(base string) {
 			if code := login(t, base, "admin"); code != http.StatusOK {
 				t.Fatalf("bootstrap admin sign-in = %d", code)
@@ -138,6 +147,14 @@ func TestBootstrapOnAFreshInstall(t *testing.T) {
 			if code, _ := fetchSnapshot(t, base, deployToken+"x"); code != http.StatusUnauthorized {
 				t.Fatalf("snapshot with another token = %d, want 401", code)
 			}
+			// The starter policy counts as a manual publish, on the first start only.
+			resp, err := http.Get("http://" + e["ADMIN_INTERNAL_ADDR"] + "/metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := fmt.Sprintf(`admin_publishes_total{source="manual"} %d`, 1-start); !strings.Contains(body(resp), want+"\n") {
+				t.Fatalf("start %d: metrics missing %q", start+1, want)
+			}
 		})
 	}
 	if n := count(t, db.Owner, "SELECT count(*) FROM users"); n != 1 {
@@ -145,6 +162,11 @@ func TestBootstrapOnAFreshInstall(t *testing.T) {
 	}
 	if n := count(t, db.Owner, "SELECT count(*) FROM config_versions"); n != 1 {
 		t.Fatalf("versions after two starts = %d, want 1", n)
+	}
+	// The first-start publish starts the draft, so a first save read before
+	// it is stale.
+	if n := count(t, db.Owner, "SELECT count(*) FROM config_draft WHERE revision = 1 AND base_version = 1"); n != 1 {
+		t.Fatalf("drafts at revision 1 based on version 1 = %d, want 1", n)
 	}
 	if n := count(t, db.Owner, "SELECT count(*) FROM audit_events WHERE actor = 'bootstrap' AND action IN ('user.create', 'config.publish')"); n != 2 {
 		t.Fatalf("bootstrap audit rows = %d, want user.create and config.publish", n)

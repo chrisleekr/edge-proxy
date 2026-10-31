@@ -1,0 +1,150 @@
+{
+  "sensors": [
+    {
+      "name": "idor-paths",
+      "rule": {
+        "expression": "starts_with(http.request.uri.path, \"/api/orders/\")",
+        "algorithm": "distinct",
+        "limit": 30,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "distinct_of": "path"
+      },
+      "block": {
+        "expression": "starts_with(http.request.uri.path, \"/api/orders/\") and http.host eq \"api.example.com\"",
+        "algorithm": "distinct",
+        "limit": 30,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "distinct_of": "path"
+      },
+      "ttl": "5m"
+    },
+    {
+      "name": "catalog-per-user",
+      "rule": {
+        "expression": "starts_with(http.request.uri.path, \"/api/catalog/\")",
+        "algorithm": "distinct",
+        "limit": 100,
+        "period": "1m",
+        "key": [
+          "jwt_claim:sub"
+        ],
+        "on_missing_key": "skip",
+        "distinct_of": "path"
+      },
+      "block": {
+        "expression": "starts_with(http.request.uri.path, \"/api/catalog/\") and http.host eq \"api.example.com\"",
+        "algorithm": "distinct",
+        "limit": 100,
+        "period": "1m",
+        "key": [
+          "jwt_claim:sub"
+        ],
+        "on_missing_key": "skip",
+        "distinct_of": "path"
+      },
+      "ttl": "5m"
+    },
+    {
+      "name": "login-401",
+      "rule": {
+        "expression": "http.request.uri.path eq \"/login\" and http.request.method eq \"POST\"",
+        "algorithm": "sliding_window",
+        "limit": 10,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "count_statuses": [
+          "401"
+        ]
+      },
+      "block": {
+        "expression": "http.request.uri.path eq \"/login\" and http.request.method eq \"POST\" and http.host eq \"api.example.com\"",
+        "algorithm": "sliding_window",
+        "limit": 10,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "count_statuses": [
+          "401"
+        ]
+      },
+      "ttl": "5m"
+    },
+    {
+      "name": "notfound-per-ip",
+      "rule": {
+        "expression": "http.request.method eq \"GET\"",
+        "algorithm": "sliding_window",
+        "limit": 20,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "count_statuses": [
+          "404"
+        ]
+      },
+      "block": {
+        "expression": "http.request.method eq \"GET\" and http.host eq \"api.example.com\"",
+        "algorithm": "sliding_window",
+        "limit": 20,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "count_statuses": [
+          "404"
+        ]
+      },
+      "ttl": "5m"
+    },
+    {
+      "name": "search-per-ip",
+      "rule": {
+        "expression": "http.request.uri.path eq \"/api/search\" and http.request.method eq \"POST\"",
+        "algorithm": "sliding_window",
+        "limit": 30,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip"
+      },
+      "block": {
+        "expression": "http.request.uri.path eq \"/api/search\" and http.request.method eq \"POST\" and http.host eq \"api.example.com\"",
+        "algorithm": "sliding_window",
+        "limit": 30,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip"
+      },
+      "ttl": "5m",
+      "first_try": {
+        "expression": "http.request.uri.path eq \"/api/search\" and http.request.method eq \"POST\" and http.host eq \"api.example.com\"",
+        "algorithm": "sliding_window",
+        "limit": 30,
+        "period": "1m",
+        "key": [
+          "asnum"
+        ],
+        "on_missing_key": "fallback_ip"
+      }
+    }
+  ]
+}

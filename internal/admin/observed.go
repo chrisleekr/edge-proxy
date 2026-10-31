@@ -98,6 +98,8 @@ type accessLine struct {
 	RateLimitRule string    `json:"edge.rate_limit_rule"`
 	// SampleRate is set on allowed lines the edge logged at a rate below 1.
 	SampleRate float64 `json:"edge.sample_rate"`
+	// UpstreamErrorKind is why the edge got no answer from the upstream.
+	UpstreamErrorKind string `json:"edge.upstream_error_kind"`
 }
 
 // usable reports whether the line describes a request on a route. Text
@@ -154,6 +156,7 @@ func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *princip
 	case s.ingest <- struct{}{}:
 		defer func() { <-s.ingest }()
 	default:
+		s.met.logBusy.Add(1)
 		return fail(http.StatusTooManyRequests, "busy; send the batch again")
 	}
 	pats, err := s.routePatterns(r.Context())
@@ -200,6 +203,8 @@ func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *princip
 		s.routeAgg.add(l.hour(now), l.route(pats), l, now)
 	}
 	accepted := len(lines)
+	s.met.linesAccepted.Add(uint64(accepted))
+	s.met.linesRejected.Add(uint64(skipped))
 	return writeJSON(w, http.StatusAccepted, map[string]int{"accepted": accepted, "skipped": skipped})
 }
 
@@ -384,6 +389,8 @@ type routeTotals struct {
 	requests, versioned int64
 	estimated           int64
 	status              [6]int64
+	codes               map[int]int64 // by status code; usable lines are below 600
+	causes              map[string]int64
 	latency             []int64
 	decisions, config   map[string]int64
 	rateLimit, shapes   map[string]int64
@@ -401,7 +408,7 @@ func newRouteAggregator() *routeAggregator {
 }
 
 func newRouteTotals(first time.Time) *routeTotals {
-	return &routeTotals{latency: make([]int64, len(edge.LatencyBoundsMS)+1), first: first, last: first,
+	return &routeTotals{latency: make([]int64, len(edge.LatencyBoundsMS)+1), first: first, last: first, codes: map[int]int64{}, causes: map[string]int64{},
 		decisions: map[string]int64{}, config: map[string]int64{}, rateLimit: map[string]int64{}, shapes: map[string]int64{}}
 }
 
@@ -427,6 +434,11 @@ func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, now tim
 		t.versioned += w
 	}
 	t.status[l.Status/100] += w
+	t.codes[l.Status] += w
+	// Only the edge's own cause names, so a shipper can't grow the map.
+	if slices.Contains(edge.UpstreamCauses[:], l.UpstreamErrorKind) {
+		t.causes[l.UpstreamErrorKind] += w
+	}
 	i := 0
 	for i < len(edge.LatencyBoundsMS) && l.DurationMS > edge.LatencyBoundsMS[i] {
 		i++
@@ -523,15 +535,16 @@ func (s *Server) flushRoutes(ctx context.Context) error {
 				ON CONFLICT (host, method, template) DO UPDATE SET last_seen = greatest(observed_routes.last_seen, EXCLUDED.last_seen),
 					errors_only = observed_routes.errors_only AND EXCLUDED.errors_only
 				RETURNING id)
-			INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes, estimated)
-			SELECT id, $6, $7, $8, $9::bigint[], $10::bigint[], $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15 FROM r
+			INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes, estimated, status_codes, upstream_errors)
+			SELECT id, $6, $7, $8, $9::bigint[], $10::bigint[], $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $17::jsonb, $18::jsonb FROM r
 			ON CONFLICT (route_id, hour) DO UPDATE SET requests = h.requests + EXCLUDED.requests, versioned = h.versioned + EXCLUDED.versioned,
-				estimated = h.estimated + EXCLUDED.estimated,
+				estimated = h.estimated + EXCLUDED.estimated, status_codes = add_counts(h.status_codes, EXCLUDED.status_codes, 600),
+				upstream_errors = add_counts(h.upstream_errors, EXCLUDED.upstream_errors, 20),
 				status = add_counts(h.status, EXCLUDED.status), latency_ms = add_counts(h.latency_ms, EXCLUDED.latency_ms),
 				decisions = add_counts(h.decisions, EXCLUDED.decisions, 200), config_rules = add_counts(h.config_rules, EXCLUDED.config_rules, 200),
 				rate_limit_rules = add_counts(h.rate_limit_rules, EXCLUDED.rate_limit_rules, 200), query_shapes = add_counts(h.query_shapes, EXCLUDED.query_shapes, 20)`,
 			k.route.host, k.route.method, k.route.template, t.first, t.last,
-			k.hour, t.requests, t.versioned, t.status[:], t.latency, t.decisions, t.config, t.rateLimit, t.shapes, t.estimated, t.errorsOnly())
+			k.hour, t.requests, t.versioned, t.status[:], t.latency, t.decisions, t.config, t.rateLimit, t.shapes, t.estimated, t.errorsOnly(), t.codes, t.causes)
 	}
 	if err := tx.SendBatch(ctx, b).Close(); err != nil {
 		return fmt.Errorf("route flush dropped %d route hours: %w", len(held), err)
@@ -606,6 +619,12 @@ func (t *routeTotals) merge(o *routeTotals) {
 	t.estimated += o.estimated
 	for i := range t.status {
 		t.status[i] += o.status[i]
+	}
+	for code, n := range o.codes {
+		t.codes[code] += n
+	}
+	for c, n := range o.causes {
+		t.causes[c] += n
 	}
 	for i := range t.latency {
 		t.latency[i] += o.latency[i]
@@ -718,6 +737,12 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 	if err != nil {
 		return err
 	}
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil || limit < 1 {
+			return fail(http.StatusBadRequest, "limit must be a positive integer")
+		}
+	}
 	rows, err := s.db.Query(r.Context(), routeStatsSelect+` WHERE h.hour >= $1 GROUP BY r.id ORDER BY sum(h.requests) DESC, r.id`, since)
 	if err != nil {
 		return err
@@ -734,8 +759,10 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 		Estimated   int64             `json:"estimated_requests"`
 		Reported    int64             `json:"reported_requests"`
 		Suggestions []routeSuggestion `json:"suggestions"`
-		MaxRoutes   int               `json:"max_routes"`
-		MaxErrors   int               `json:"max_error_routes"`
+		// More counts the routes limit left out.
+		More      int `json:"more"`
+		MaxRoutes int `json:"max_routes"`
+		MaxErrors int `json:"max_error_routes"`
 	}{Since: since, Routes: []routeStats{}, MaxRoutes: maxRoutes, MaxErrors: maxErrorRoutes}
 	for _, rs := range all {
 		out.Logged += rs.Versioned
@@ -754,6 +781,9 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 		return err
 	}
 	out.Suggestions = suggestPatterns(out.Routes, pats)
+	if limit > 0 && len(out.Routes) > limit {
+		out.More, out.Routes = len(out.Routes)-limit, out.Routes[:limit]
+	}
 	return writeJSON(w, http.StatusOK, out)
 }
 
@@ -844,9 +874,18 @@ func (s *Server) getObserved(w http.ResponseWriter, r *http.Request, _ *principa
 	}
 	out := struct {
 		routeStats
-		Since  time.Time `json:"since"`
-		Series []point   `json:"series"`
+		// StatusCodes are answers by code, weighted like Status, and
+		// UpstreamErrors the edge's failures by cause. Only the detail reads
+		// them: summing them for every route would slow the list.
+		StatusCodes    map[int]int64    `json:"status_codes"`
+		UpstreamErrors map[string]int64 `json:"upstream_errors"`
+		Since          time.Time        `json:"since"`
+		Series         []point          `json:"series"`
 	}{Since: since, Series: orEmpty(series)}
+	if err := s.db.QueryRow(r.Context(), "SELECT coalesce(sum_counts(status_codes), '{}'), coalesce(sum_counts(upstream_errors), '{}') FROM observed_route_hour WHERE route_id = $1 AND hour >= $2", id, since).
+		Scan(&out.StatusCodes, &out.UpstreamErrors); err != nil {
+		return err
+	}
 	if len(found) == 1 {
 		out.routeStats = found[0]
 	} else {
@@ -998,12 +1037,14 @@ func mergeIntoPattern(ctx context.Context, tx pgx.Tx, pat routePattern) (int, er
 		if err != nil {
 			return 0, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes, estimated)
+		_, err = tx.Exec(ctx, `INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes, estimated, status_codes, upstream_errors)
 			SELECT $1, hour, sum(requests), sum(versioned), sum_counts(status), sum_counts(latency_ms), add_counts(sum_counts(decisions), '{}', 200),
-				add_counts(sum_counts(config_rules), '{}', 200), add_counts(sum_counts(rate_limit_rules), '{}', 200), add_counts(sum_counts(query_shapes), '{}', 20), sum(estimated)
+				add_counts(sum_counts(config_rules), '{}', 200), add_counts(sum_counts(rate_limit_rules), '{}', 200), add_counts(sum_counts(query_shapes), '{}', 20), sum(estimated),
+				sum_counts(status_codes), sum_counts(upstream_errors)
 			FROM observed_route_hour WHERE route_id = ANY($2) GROUP BY hour
 			ON CONFLICT (route_id, hour) DO UPDATE SET requests = h.requests + EXCLUDED.requests, versioned = h.versioned + EXCLUDED.versioned,
-				estimated = h.estimated + EXCLUDED.estimated,
+				estimated = h.estimated + EXCLUDED.estimated, status_codes = add_counts(h.status_codes, EXCLUDED.status_codes, 600),
+				upstream_errors = add_counts(h.upstream_errors, EXCLUDED.upstream_errors, 20),
 				status = add_counts(h.status, EXCLUDED.status), latency_ms = add_counts(h.latency_ms, EXCLUDED.latency_ms),
 				decisions = add_counts(h.decisions, EXCLUDED.decisions, 200), config_rules = add_counts(h.config_rules, EXCLUDED.config_rules, 200),
 				rate_limit_rules = add_counts(h.rate_limit_rules, EXCLUDED.rate_limit_rules, 200), query_shapes = add_counts(h.query_shapes, EXCLUDED.query_shapes, 20)`,
