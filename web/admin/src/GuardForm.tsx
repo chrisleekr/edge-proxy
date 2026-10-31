@@ -85,7 +85,7 @@ const signals: { name: string; label: string; fields: Threshold[]; trips: (s: Si
 ];
 
 // Decimal is a number with a fraction; a ratio shows and takes a percent.
-function Decimal({ label, value, onChange, kind }: { label: string; value: Json; onChange: (v: number | undefined) => void; kind: Exclude<Kind, 'duration'> }) {
+export function Decimal({ label, value, onChange, kind }: { label: string; value: Json; onChange: (v: number | undefined) => void; kind: Exclude<Kind, 'duration'> }) {
   const percent = kind === 'ratio';
   const shown = typeof value === 'number' ? +(percent ? value * 100 : value).toFixed(4) : '';
   return (

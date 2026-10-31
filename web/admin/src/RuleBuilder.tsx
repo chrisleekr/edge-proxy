@@ -6,8 +6,11 @@ import {
   type FieldSelectorProps,
   QueryBuilder,
   type RuleGroupType,
+  toOptions,
   type ValueEditorProps,
-  ValueSelector,
+  type ValueSelectorProps,
+  useSelectElementChangeHandler,
+  useValueSelector,
 } from 'react-querybuilder';
 import 'react-querybuilder/dist/query-builder.css';
 import { api, type Json, type Phase, type Rendered, type Schema } from './api';
@@ -47,7 +50,22 @@ const valueExample: Record<string, string> = {
   'ip.src.country': 'AU',
   'ip.src.asnum': '13335',
   'edge.locale': 'en-AU',
+  'tls.client.ja4': 't13d1516h2_8daaf6152771_02713d6af862',
+  'tls.client.ja3': '773906b0efdefa24a7f2b8eb6985bf37',
+  'client.signals': 'ua_tool',
 };
+
+// Select is the library's select with its title as its name too: a title
+// alone is not a label every screen reader announces.
+function Select(props: ValueSelectorProps) {
+  const { onChange, val } = useValueSelector(props);
+  const change = useSelectElementChangeHandler({ multiple: !!props.multiple, onChange });
+  return (
+    <select data-testid={props.testID} aria-label={props.title} title={props.title} className={props.className} value={val} disabled={props.disabled} multiple={!!props.multiple} onChange={change}>
+      {toOptions(props.options)}
+    </select>
+  );
+}
 
 // FieldSelector adds the key input (header, cookie, query arg or claim name)
 // for keyed fields.
@@ -56,7 +74,7 @@ function FieldSelector(props: FieldSelectorProps) {
   const keyed = schema.fields.find((f) => f.name === props.value)?.keyed;
   return (
     <>
-      <ValueSelector {...props} />
+      <Select {...props} />
       {keyed && (
         <input
           aria-label="Key"
@@ -85,9 +103,13 @@ function ValueEditor(props: ValueEditorProps) {
   const { schema } = props.context as Ctx;
   const op = schema.operators.find((o) => o.name === props.operator);
   if (!op || op.no_value) return null;
+  const signals = props.field === 'client.signals' && (
+    <span className="order-last basis-full text-sm text-body">Signal names: {schema.rules.signals.map((s) => s.name).join(', ')}.</span>
+  );
   if (op.list) {
     const items = Array.isArray(props.value) ? (props.value as string[]) : [];
     return (
+      <>
       <textarea
         aria-label="Values"
         rows={Math.max(2, items.length)}
@@ -96,12 +118,20 @@ function ValueEditor(props: ValueEditorProps) {
         value={items.join('\n')}
         onChange={(e) => props.handleOnChange(e.target.value === '' ? [] : e.target.value.split('\n'))}
       />
+      {signals}
+      </>
     );
   }
   const wildcard = props.operator.includes('wildcard') && (props.field === 'http.host' ? '*.example.com' : props.field.startsWith('http.request.uri') ? '/v1/*/orders' : undefined);
   const example = wildcard || valueExample[props.field];
   const input = <input aria-label="Value" placeholder={example && `such as ${example}`} value={typeof props.value === 'string' ? props.value : ''} onChange={(e) => props.handleOnChange(e.target.value)} />;
   const how = wildcardHow[props.operator];
+  if (signals) return (
+    <>
+      {input}
+      {signals}
+    </>
+  );
   if (!how) return input;
   return (
     <>
@@ -123,19 +153,24 @@ export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema
     () => schema.fields.filter((f) => f.available && f.phases.includes(phase)).map((f) => ({ name: f.name, label: f.label })),
     [schema, phase],
   );
-  const typeOf = useMemo(() => new Map(schema.fields.map((f) => [f.name, f.type])), [schema]);
+  const byName = useMemo(() => new Map(schema.fields.map((f) => [f.name, f])), [schema]);
+  // An exact field offers only the operators that compare whole values; the server rejects the rest.
+  const offers = (field: string) => {
+    const f = byName.get(field);
+    return schema.operators.filter((o) => o.types.includes(f?.type ?? '') && (!f?.exact || ['eq', 'in'].includes(o.negates ?? o.name)));
+  };
   const context: Ctx = { schema };
   return (
     <QueryBuilderDnD dnd={dnd}>
       <QueryBuilder
         fields={fields}
-        getOperators={(field) => schema.operators.filter((o) => o.types.includes(typeOf.get(field) ?? '')).map((o) => ({ name: o.name, label: o.label }))}
+        getOperators={(field) => offers(field).map((o) => ({ name: o.name, label: o.label }))}
         getDefaultValue={({ operator }) => (schema.operators.find((o) => o.name === operator)?.list ? [] : '')}
         combinators={[
           { name: 'and', label: 'And' },
           { name: 'or', label: 'Or' },
         ]}
-        controlElements={{ fieldSelector: FieldSelector, valueEditor: ValueEditor }}
+        controlElements={{ fieldSelector: FieldSelector, valueEditor: ValueEditor, combinatorSelector: Select, operatorSelector: Select }}
         // Most rules match on the path, which every phase has, so a new
         // condition starts there.
         getDefaultField="http.request.uri.path"
@@ -145,6 +180,9 @@ export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema
           addGroup: { label: '+ Group', title: 'Add group' },
           removeRule: { label: 'Remove', title: 'Remove condition' },
           removeGroup: { label: 'Remove group', title: 'Remove group' },
+          fields: { title: 'Field' },
+          operators: { title: 'Operator' },
+          combinators: { title: 'Match all or any' },
         }}
         // The library's own classes: rows wrap on narrow screens, and tree
         // lines show which group a condition belongs to.

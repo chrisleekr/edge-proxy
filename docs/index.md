@@ -3,6 +3,7 @@
 A Go reverse proxy that sits **between** your CDN or WAF and the load balancer or gateway that routes your services. It enforces application policy for all of them in one layer, then forwards each request, `Host` unchanged, to that one load balancer or gateway:
 
 - exact rate limits shared by every replica (Valkey)
+- short-lived rate limits added during an attack by [autopilot](use/autopilot.md), within checks and budgets you set
 - JWT validation against your identity providers
 - CORS, request header rules and locale detection
 - templated error responses
@@ -36,13 +37,14 @@ flowchart LR
     Edge -.->|"poll snapshot,<br/>push stats"| Admin["Admin + UI<br/>internal only"]
     Admin --> Postgres["Postgres"]
     Operator["Operators"] --> Admin
+    Runner["Autopilot runner"] -.->|"claims cases,<br/>proposes rules"| Admin
 ```
 
 Solid lines are on the request path. Dotted lines are background work: if admin or Postgres is down, edges keep serving with the policy they have.
 
 ## What it does not do
 
-- **It is not a WAF or CDN.** No OWASP rules, bot detection, DDoS absorption or TLS for the public internet. Keep those in front.
+- **It is not a WAF or CDN.** No OWASP rules, bot scores, DDoS absorption or TLS for the public internet. Keep those in front.
 - **It does not route.** Every request goes to one upstream, `UPSTREAM_URL`: your load balancer or gateway, which already knows which service serves each host and path. Adding a service means adding a route there, not on the edge.
 - **It never stops serving because a dependency failed.** Valkey, admin, Postgres and the identity provider each have a defined degraded mode. Readiness reflects only "a policy is loaded and the edge is not draining".
 - **It never retries a rate-limit call**, so a request can't consume quota twice.
@@ -53,6 +55,7 @@ Solid lines are on the request path. Dotted lines are background work: if admin 
 |---|---|
 | Try it on your machine in five minutes | [Get started](get-started.md) |
 | Write rules | [Policy](use/policy.md) and [Rate limiting](use/rate-limiting.md) |
+| Let autopilot add rate limits during an attack | [Autopilot](use/autopilot.md) |
 | Ship a change safely | [Publish and roll back](use/publishing.md) |
 | Find your way around the admin UI | [Dashboard](use/dashboard.md) |
 | Run it in production | [Deploy](deploy/index.md), then [Operate](operate/monitoring.md) |

@@ -29,6 +29,7 @@ export const phases: {
       ['locale', 'true to detect the locale. Needs supported locales under Settings.'],
       ['responses', 'Templates to use for these requests, by kind, such as {"rate_limited": "my-429"}.'],
       ['ratelimit_headers', 'true to send RateLimit and RateLimit-Policy response headers.'],
+      ['block', 'block to answer 403 with the forbidden template, or log to only count it as would block. Start with log.'],
     ],
     example: { settings: { upstream_timeout: '10s', body_limit: 1048576, ratelimit_headers: true } },
   },
@@ -37,13 +38,15 @@ export const phases: {
     key: 'rate_limit_rules',
     title: 'Rate limit rules',
     intro: 'Limit how often matching requests get through.',
-    info: 'Each rule keeps one counter per key in Valkey, shared by every edge, so a limit of 100 means 100 across the fleet. A request is checked against every site-wide rule and up to 5 others, blocking rules first, in one Valkey call.',
+    info: 'Each rule keeps one counter per key in Valkey, shared by every edge, so a limit of 100 means 100 across the fleet. A request is checked against every site-wide rule and up to 5 others, blocking rules first, in one Valkey call. Rules with count_statuses count in each edge\'s memory instead.',
     blank: { algorithm: 'sliding_window', limit: 100, period: '1m', key: ['ip'], on_missing_key: 'fallback_ip', action: 'log', fail_mode: 'open' },
     fields: [
-      ['algorithm', 'fixed_window, sliding_window (smooth, good for logins), token_bucket (allows bursts, good for APIs) or leaky_bucket.'],
+      ['algorithm', 'fixed_window, sliding_window (smooth, good for logins), token_bucket (allows bursts, good for APIs), leaky_bucket, or distinct to limit different values instead of requests.'],
+      ['distinct_of', 'For distinct only: what to count different values of, path, query:<name>, ip, asnum or ja4. Limit is at most 1,000.'],
+      ['count_statuses', 'Optional, such as ["404", "4xx"]: count only upstream responses with these statuses, in each edge\'s memory. Not with distinct; 5xx is refused.'],
       ['limit, period', 'Requests allowed per period: 1 to 1,000,000,000 per "1s" to "24h".'],
       ['burst', 'Bucket size. Required for token_bucket and leaky_bucket, not allowed for the others.'],
-      ['key', '1 to 5 parts that make one counter: ip, jwt_claim:<name>, header:<name>, cookie:<name>, query:<name>, host, method, country, asnum, locale, or constant alone. Header, cookie, query, host and method need ip or jwt_claim with them.'],
+      ['key', '1 to 5 parts that make one counter: ip, jwt_claim:<name>, header:<name>, cookie:<name>, query:<name>, host, method, country, asnum, ja4, locale, or constant alone. Header, cookie, query, host, method and ja4 need ip or jwt_claim with them.'],
       ['on_missing_key', 'When a key part is absent: skip the rule, fallback_ip, or reject the request.'],
       ['action', 'block, or log to only count what would be limited. Start with log and watch Stats.'],
       ['penalty', 'Optional, "1s" to "24h": once over the limit, stay blocked this long.'],
@@ -78,3 +81,9 @@ export const phases: {
 export const phaseOf = (p: string | undefined) => phases.find((x) => x.phase === p);
 
 export const rulesOf = (c: Config, key: (typeof phases)[number]['key']) => c[key] ?? [];
+
+// ruleLink finds the phase a rule lives in, for a link to its editor.
+export function ruleLink(cfg: Config | undefined, id: string) {
+  const p = cfg && phases.find((x) => rulesOf(cfg, x.key).some((r) => r.id === id));
+  return p && `/rules/${p.phase}/${encodeURIComponent(id)}`;
+}

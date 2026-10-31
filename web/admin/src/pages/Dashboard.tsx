@@ -1,11 +1,13 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
+import { type ReactNode, useId } from 'react';
 import { api, type VersionDetail } from '../api';
-import { phases, rulesOf } from '../phases';
+import { phases, ruleLink, rulesOf } from '../phases';
 import { Link } from '../router';
 import { ErrorBox, Info, Page, Rolling, ago, when, who } from '../ui';
 import { type Event, said } from './Audit';
-import { Bars, type Edge, pct, type Range, RangePicker, ranges, type Row, sum, Unranked, useRange } from './Fleet';
+import { LogLink, useLogSearch } from '../logSearch';
+import { Bars, codeName, type Edge, pct, type Range, RangePicker, type Row, statusCodes, statusOf, sum, Unranked, useMarks, useRange } from './Fleet';
+import { type Anomaly, anomaliesQuery, groupAnomalies, label } from './Notifications';
 import { useVersions } from './Publish';
 import { outcomeSays, whyKept } from '../guard';
 
@@ -102,9 +104,11 @@ function useData(can: (p: string) => boolean) {
     queryFn: () => api<Event[]>('GET', '/api/audit?action=audit.verify'),
     enabled: audit,
   });
+  const anomalies = useQuery({ ...anomaliesQuery, enabled: stats });
   return {
     // Attention reads the whole picked range, not a zoom into it.
-    span: ranges.find(([m]) => m === range.minutes)?.[1] ?? 'last hour',
+    span: range.label,
+    anomalies: stats ? anomalies : undefined,
     versions: config ? versions : undefined,
     // With nothing published there is no live config to check.
     live: config && liveVersion !== undefined ? live : undefined,
@@ -121,11 +125,12 @@ function useData(can: (p: string) => boolean) {
 type Data = ReturnType<typeof useData>;
 
 function Panel({ title, info, link, error, children }: { title: string; info?: ReactNode; link?: [string, string]; error?: unknown; children: ReactNode }) {
+  const id = useId();
   return (
-    <section className="flex min-w-0 flex-col gap-4 rounded-card bg-panel p-6 shadow-card">
+    <section aria-labelledby={id} className="flex min-w-0 flex-col gap-4 rounded-card bg-panel p-6 shadow-card">
       <div className="flex items-baseline justify-between gap-3">
         <div className="flex items-center gap-2">
-          <h2>{title}</h2>
+          <h2 id={id}>{title}</h2>
           {info && <Info label={title}>{info}</Info>}
         </div>
         {link && (
@@ -185,10 +190,13 @@ type Item = {
   text: ReactNode;
   to: string;
   action: string;
+  // under lists items shown with this one, such as the rule anomalies under a fleet one.
+  under?: ReactNode[];
 };
 
-// Attention lists states someone should act on or watch. Each is a fact
-// read from admin, not a threshold, so the list never guesses.
+// Attention lists states someone should act on or watch, each read from
+// admin: the dashboard sets no thresholds of its own, only the anomaly
+// checks do.
 function Attention({ d }: { d: Data }) {
   const items: Item[] = [];
   const checked: string[] = [];
@@ -207,6 +215,13 @@ function Attention({ d }: { d: Data }) {
     items.push({
       tone: 'danger',
       text: 'Rate limiting is switched off. No request is blocked for going over a limit; every rule only counts what it would have blocked.',
+      to: '/settings',
+      action: 'Settings',
+    });
+  if (cfg?.kill_switch.block)
+    items.push({
+      tone: 'danger',
+      text: 'Blocking by config rules is switched off. No request gets a 403 from a block setting; every such rule only logs what it would have blocked.',
       to: '/settings',
       action: 'Settings',
     });
@@ -343,6 +358,25 @@ function Attention({ d }: { d: Data }) {
       action: 'Review',
     });
 
+  // Firing anomalies, one line and one action each; rule anomalies for the
+  // same signal as a firing fleet one are listed under it.
+  check(d.anomalies, 'anomalies');
+  const severe = { critical: 'danger', warning: 'warning' } as const;
+  const ruleSays = (k: Anomaly) => (
+    <>
+      {label(k.signal)} for rule <code className="font-medium">{k.rule}</code>: {k.summary}.
+    </>
+  );
+  for (const { a, under } of groupAnomalies((d.anomalies?.data?.anomalies ?? []).filter((x) => x.state === 'firing')))
+    items.push({
+      tone: severe[a.severity as keyof typeof severe] ?? 'neutral',
+      // A fleet summary names its signal; a rule's needs the rule.
+      text: a.rule ? ruleSays(a) : `${a.summary}.`,
+      to: '/notifications',
+      action: 'Notifications',
+      under: under.map(ruleSays),
+    });
+
   const v = d.verify?.data?.[0];
   check(d.verify, 'audit chain');
   if (v?.details?.broken_at)
@@ -362,7 +396,7 @@ function Attention({ d }: { d: Data }) {
   return (
     <Panel
       title="Needs attention"
-      info="Each line is a fact read from admin, such as a running canary or an edge that cannot reach admin, never a guess from a threshold. Red needs action now, amber needs a look, grey is worth knowing."
+      info="Each line is read from admin: a state such as a running canary or an edge that cannot reach admin, or an anomaly the notification checks found firing. Red needs action now, amber needs a look, grey is worth knowing."
     >
       {items.length === 0 ? (
         <p className="text-body">{waiting ? 'Checking…' : `Nothing needs attention. Checked: ${checked.join(', ')}.`}</p>
@@ -372,7 +406,16 @@ function Attention({ d }: { d: Data }) {
             <li key={i} className="flex items-baseline gap-3 py-2 first:pt-0 last:pb-0">
               <span aria-hidden className={`size-2 shrink-0 translate-y-[-1px] rounded-full ${mark[it.tone]}`} />
               <span className="sr-only">{{ danger: 'Urgent:', warning: 'Check:', neutral: 'Note:' }[it.tone]}</span>
-              <span className="min-w-0 flex-1 text-heading">{it.text}</span>
+              <span className="min-w-0 flex-1 text-heading">
+                {it.text}
+                {!!it.under?.length && (
+                  <ul className="mt-1 flex flex-col gap-1 border-l border-line pl-3 text-sm text-body">
+                    {it.under.map((u, j) => (
+                      <li key={j}>{u}</li>
+                    ))}
+                  </ul>
+                )}
+              </span>
               <Link to={it.to} className="text-sm font-medium whitespace-nowrap text-heading underline">
                 {it.action}
               </Link>
@@ -389,14 +432,20 @@ const sum2 = <K extends string>(xs: Record<K, number>[], k: K) => xs.reduce((n, 
 // sources names where an edge got its config, when not from admin.
 const sources: Record<string, string> = { cache: 'their last saved copy', bootstrap: 'the bootstrap file from their deployment' };
 
-// ruleLink finds the phase a rule lives in, for a link to its editor.
-function ruleLink(cfg: VersionDetail['config'] | undefined, id: string) {
-  const p = cfg && phases.find((x) => rulesOf(cfg, x.key).some((r) => r.id === id));
-  return p && `/rules/${p.phase}/${encodeURIComponent(id)}`;
-}
-
 function Traffic({ r }: { r: Range }) {
   const { rows } = r;
+  const logs = useLogSearch();
+  const marks = useMarks(r.from);
+  // The commonest codes each side answered, so a 502 from the edge reads
+  // apart from a 502 the upstream sent.
+  const codes = statusCodes(rows);
+  const top = (origin: 'edge' | 'upstream') =>
+    codes
+      .filter((c) => c.origin === origin)
+      .slice(0, 4)
+      .map((c): [string, string, string | undefined] => [codeName(c.code), count(c.n), logs({ from: r.from, to: r.to, status: statusOf(c.code) })]);
+  const edgeCodes = top('edge');
+  const upstreamCodes = top('upstream');
   const loaded = r.q.data !== undefined;
   const n = sum(rows, (x) => x.requests);
   const limited = sum2(totals(rows), 'limited');
@@ -406,7 +455,7 @@ function Traffic({ r }: { r: Range }) {
       title={`Traffic, ${r.title}`}
       link={['Stats', '/stats']}
       error={r.q.error}
-      info="Counts the edges report every 10 seconds, including the minute in progress. Edge 5xx are answers the edge made itself, such as 503 from a rule that fails closed; upstream 5xx came from the upstream. Drag across the chart to zoom in."
+      info="Counts the edges report every 10 seconds, including the minute in progress. Edge 5xx are answers the edge made itself, such as 503 from a rule that fails closed; upstream 5xx came from the upstream. Drag across the chart to zoom in. The marks above the chart are releases; each opens its version."
     >
       <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-5">
         <Figure
@@ -426,7 +475,13 @@ function Traffic({ r }: { r: Range }) {
         <Figure n={share(sum(rows, (x) => x.upstream_5xx))} label="Upstream 5xx" />
         <Figure n={share(sum(rows, (x) => x.auth_failures))} label="Auth failures" />
       </dl>
-      {loaded && (n === 0 && !r.zoom ? <p className="text-body">No traffic reported {r.phrase}.</p> : <Bars r={r} />)}
+      {loaded && (n === 0 && !r.zoom ? <p className="text-body">No traffic reported {r.phrase}.</p> : <Bars r={r} marks={marks} />)}
+      {n > 0 && (
+        <div className="grid gap-6 sm:grid-cols-2">
+          {edgeCodes.length > 0 && <List title="Status codes the edge sent" items={edgeCodes} />}
+          {upstreamCodes.length > 0 && <List title="Status codes from the upstream" items={upstreamCodes} />}
+        </div>
+      )}
     </Panel>
   );
 }
@@ -473,15 +528,17 @@ function Limiting({ r }: { r: Range }) {
   );
 }
 
-function List({ title, items }: { title: string; items: [string, string][] }) {
+// List is a short ranking; an item's optional third value links its name
+// to the log store.
+function List({ title, items }: { title: string; items: [string, string, (string | undefined)?][] }) {
   return (
     <div className="min-w-0">
       <h3 className="eyebrow mb-1 text-muted">{title}</h3>
       <ul className="divide-y divide-line text-sm">
-        {items.map(([k, v]) => (
+        {items.map(([k, v, to]) => (
           <li key={k + v} className="flex justify-between gap-3 py-1.5">
             <code className="truncate text-heading" title={k}>
-              {k}
+              <LogLink href={to}>{k}</LogLink>
             </code>
             <span className="whitespace-nowrap text-body tabular-nums">{v}</span>
           </li>
@@ -562,7 +619,7 @@ function Fleet({ fleet, liveVersion, canaryVersion }: { fleet: NonNullable<Data[
 }
 
 // Recent changes leaves out what the audit log shows only for the record.
-const quiet = new Set(['auth.login.success', 'auth.login.failure', 'auth.logout', 'audit.verify', 'config.export', 'audit.export']);
+const quiet = new Set(['auth.login.success', 'auth.login.failure', 'auth.logout', 'audit.verify', 'config.export', 'audit.export', 'anomaly.fire', 'anomaly.resolve']);
 
 function Changes({ audit, verify }: { audit: NonNullable<Data['audit']>; verify: Data['verify'] }) {
   const events = (audit.data ?? []).filter((e) => e.action in said && !quiet.has(e.action)).slice(0, 8);

@@ -440,7 +440,7 @@ export function Issuers() {
 export function Settings({ canManage }: { canManage: boolean }) {
   const d = useDraft();
   const ks = d.config.kill_switch;
-  const toggle = (k: 'rate_limit' | 'auth') => d.setConfig((c) => ({ ...c, kill_switch: { ...c.kill_switch, [k]: !c.kill_switch[k] } }));
+  const toggle = (k: 'rate_limit' | 'auth' | 'block') => d.setConfig((c) => ({ ...c, kill_switch: { ...c.kill_switch, [k]: !c.kill_switch[k] } }));
   const schema = useSchema();
   if (!schema.data) return <Pending error={schema.error} />;
   const g = d.config.global;
@@ -460,7 +460,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
       <ReadOnlyNote />
       <Card
         title="Kill switch"
-        intro="Turns enforcement off for every edge once published. Use it in an incident, not as configuration."
+        note="Turns enforcement off for every edge once published. Use it in an incident, not as configuration."
         info="Like any change, it takes effect when you save and publish."
       >
         <Editable>
@@ -476,6 +476,12 @@ export function Settings({ canManage }: { canManage: boolean }) {
               hint="No token is checked on any route, so routes that require one let every request through, and none reaches the upstream with X-Edge-Auth-Sub."
               checked={ks.auth}
               onChange={() => toggle('auth')}
+            />
+            <Check
+              label="Disable blocking by config rules"
+              hint="Every config rule set to block only logs: Stats still shows what it would block, but none gets a 403."
+              checked={ks.block ?? false}
+              onChange={() => toggle('block')}
             />
           </div>
         </Editable>
@@ -518,6 +524,26 @@ export function Settings({ canManage }: { canManage: boolean }) {
             <Count value={backstop.max_entries} min={1} onChange={(v) => setBackstop('max_entries', v)} />
           </Labeled>
         </Section>
+        <Card
+          title="Requests in progress"
+          intro="How many requests each edge works on at once before it answers the rest with the overloaded response."
+          info="Each edge's own limit comes from its memory. A number here can only lower it, for example to shed load sooner while an upstream struggles. A larger number has no effect."
+        >
+          <Editable>
+            <Labeled
+              label="Most requests in progress per edge"
+              hint="Leave empty to use each edge's own limit. Streams (WebSocket and SSE) have their own limit and don't count here."
+              issues={d.at('global.max_inflight')}
+            >
+              <Count
+                value={g.max_inflight}
+                min={1}
+                placeholder="each edge's own"
+                onChange={(v) => d.setConfig((c) => ({ ...c, global: { ...setField(c.global, 'max_inflight', v), defaults: c.global.defaults } }))}
+              />
+            </Labeled>
+          </Editable>
+        </Card>
         <Section
           title="Defaults"
           label="Defaults"

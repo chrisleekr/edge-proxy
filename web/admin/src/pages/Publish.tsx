@@ -1,6 +1,6 @@
 import { skipToken, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { api, type Diff, etag, type Json, type JsonObject, type Me, Problem, type GuardGate, type Version, type VersionDetail } from '../api';
+import { api, useCan, type Diff, etag, type Json, type JsonObject, Problem, type GuardGate, type Version, type VersionDetail } from '../api';
 import { draftKey, useDraft } from '../draft';
 import { Button, Card, Check, Confirm, ConfirmButton, ErrorBox, Hint, Notice, Input, Page, ago, statusName } from '../ui';
 import { GuardForm, guardWhere } from '../GuardForm';
@@ -31,8 +31,7 @@ export const guardAfter = (g: GuardGate | undefined) =>
 // useVersions lists published versions for roles that can read config;
 // for others it stays empty instead of asking and being refused.
 export function useVersions() {
-  const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me'), retry: false });
-  return useQuery({ queryKey: ['versions'], queryFn: () => api<Version[]>('GET', '/api/versions'), enabled: !!me.data?.permissions.includes('config.read') });
+  return useQuery({ queryKey: ['versions'], queryFn: () => api<Version[]>('GET', '/api/versions'), enabled: useCan()('config.read') });
 }
 
 // useDraftDiff compares the saved draft with what traffic gets: the canary
@@ -244,7 +243,7 @@ function Rebase({ onDone, canWrite, matches }: { onDone: (note: string) => void;
   return (
     <Card
       title="Rebase needed"
-      intro={
+      note={
         v
           ? `This draft started from version ${v.base_version}, but ${why}, so version ${v.active_version} is live now. Publishing is blocked until the draft is based on version ${v.active_version}.`
           : 'The live version changed since this draft started.'
@@ -373,7 +372,7 @@ function Canary({ can, onChange }: { can: (p: string) => boolean; onChange: (not
   return (
     <Card
       title={`Canary: version ${c.version} on ${c.percent}% of traffic`}
-      intro={
+      note={
         `Started ${ago(c.started_at)}${c.step_started_at !== c.started_at ? `; this step started ${ago(c.step_started_at)}` : ''}. ` +
         (!g || from === undefined
           ? "Each step needs the guard's minimum time and requests before the next."

@@ -1,10 +1,14 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
-import { api, type Diff, type Json } from '../api';
+import { api, type Config, type Diff, type Json } from '../api';
+import { useOptionalDraft } from '../draft';
+import { ruleLink } from '../phases';
+import { Link } from '../router';
 import { Badge, Button, download, ErrorBox, Hint, Notice, Input, Page, Table, ago, when, who } from '../ui';
 import { outcomeSays } from '../guard';
 import { guardWords } from '../GuardForm';
 import { DiffView, isEmpty } from './DiffView';
+import { RangeSelect, ranges, useRangeKey } from './Fleet';
 
 export interface Event {
   seq: number;
@@ -24,6 +28,7 @@ export interface Event {
     after?: Json;
     guard_settings?: Json;
     guard_override?: Json;
+    kill_switch?: { rate_limit?: boolean; auth?: boolean; block?: boolean };
   } | null;
 }
 
@@ -37,6 +42,8 @@ export const said: Record<string, string> = {
   'config.rebase': 'rebased the',
   'config.copy_to_draft': 'copied a version to the',
   'config.import': 'imported config',
+  'config.overlay_publish': 'published autopilot rules as',
+  'config.adopt': 'adopted an autopilot rule into the',
   'canary.manage': 'changed the canary',
   'canary.step': 'stepped the canary',
   'canary.promote': 'promoted the canary',
@@ -46,12 +53,15 @@ export const said: Record<string, string> = {
   'guard.alert': 'raised an alert on',
   'settings.save': 'changed settings',
   'settings.guard': 'changed guard settings',
+  'settings.autopilot': 'changed autopilot settings',
   'user.create': 'added user',
   'user.disable': 'disabled user',
   'user.roles': 'changed roles of',
   'token.create': 'created token',
   'token.revoke': 'revoked token',
   'jwks.keys_changed': 'saw new signing keys for',
+  'verified_bots.changed': 'saw new crawler ranges at',
+  'verified_bots.removed': 'dropped the crawler ranges of',
   'auth.login.success': 'signed in',
   'auth.login.failure': 'failed to sign in as',
   'auth.logout': 'signed out',
@@ -63,7 +73,39 @@ export const said: Record<string, string> = {
   'route.delete_all': 'deleted every route',
   'route_pattern.create': 'grouped routes as',
   'route_pattern.delete': 'stopped grouping routes as',
+  'settings.notifications': 'changed notification settings',
+  'anomaly.fire': 'found an anomaly on',
+  'anomaly.resolve': 'resolved an anomaly on',
 };
+
+// The categories the log narrows to, each a list of actions.
+const categories: [string, string[]][] = [
+  ['Releases', ['config.publish', 'config.revert', 'config.rollback', 'config.import', 'config.overlay_publish', 'canary.step', 'canary.promote', 'canary.abort', 'guard.rollback', 'guard.canary_abort', 'guard.alert']],
+  ['Draft', ['config.save', 'config.rebase', 'config.copy_to_draft', 'config.adopt', 'config.export']],
+  ['Settings', ['settings.guard', 'settings.notifications', 'settings.autopilot']],
+  ['Anomalies', ['anomaly.fire', 'anomaly.resolve']],
+  ['Users and tokens', ['user.create', 'user.disable', 'user.roles', 'token.create', 'token.revoke', 'auth.password.change']],
+  ['Sign-ins', ['auth.login.success', 'auth.login.failure', 'auth.logout']],
+  ['Routes', ['route.delete', 'route.delete_all', 'route_pattern.create', 'route_pattern.delete']],
+  ['Keys and crawlers', ['jwks.keys_changed', 'verified_bots.changed', 'verified_bots.removed']],
+  ['Audit log', ['audit.verify', 'audit.export']],
+];
+
+// Target is an event's target, linked to its page when it has one: a
+// version, or a rule the draft still has.
+function Target({ target, cfg }: { target: string; cfg: Config | undefined }) {
+  const v = /^version (\d+)$/.exec(target)?.[1];
+  const r = /^rule (.+)$/.exec(target)?.[1];
+  const to = v ? `/versions/${v}` : r && ruleLink(cfg, r);
+  const text = <span className="wrap-anywhere text-heading">{target}</span>;
+  return to ? (
+    <Link to={to} className="underline">
+      {text}
+    </Link>
+  ) : (
+    text
+  );
+}
 
 // flat lists an object's leaf values by dotted path, to compare two.
 const flat = (v: Json, at = ''): [string, string][] =>
@@ -110,6 +152,12 @@ const example = {
 
 export function Audit() {
   const qc = useQueryClient();
+  const draft = useOptionalDraft();
+  const [range, pick] = useRangeKey();
+  // From when the page opened, so loaded pages stay as time passes.
+  const [opened] = useState(Date.now);
+  const since = new Date(opened - ranges[range].minutes * 60_000).toISOString();
+  const [picked, setPicked] = useState<string[]>([]);
   const [typed, setTyped] = useState({ actor: '', action: '', target: '', mentions: '' });
   // Filters apply once typing pauses, not on every keystroke.
   const [filter, setFilter] = useState(typed);
@@ -117,11 +165,13 @@ export function Audit() {
     const t = setTimeout(() => setFilter(typed), 300);
     return () => clearTimeout(t);
   }, [typed]);
+  // A typed action narrows further than a category, so it replaces them.
+  const action = filter.action || categories.filter(([c]) => picked.includes(c)).flatMap(([, a]) => a).join(',');
   const q = useInfiniteQuery({
-    queryKey: ['audit', filter],
+    queryKey: ['audit', filter, action, since],
     initialPageParam: 0,
     queryFn: ({ pageParam }) => {
-      const p = new URLSearchParams(filter);
+      const p = new URLSearchParams({ ...filter, action, since });
       if (pageParam) p.set('before', String(pageParam));
       return api<Event[]>('GET', `/api/audit?${p}`);
     },
@@ -159,6 +209,7 @@ export function Audit() {
     queryFn: () => api<Event[]>('GET', '/api/audit'),
   });
   const seen = recent.data ?? [];
+  const cfg = draft?.config;
   // Memoized: typing in a filter re-renders the page on every keystroke, and
   // a few loaded pages are hundreds of rows.
   const rows = useMemo(
@@ -173,7 +224,7 @@ export function Audit() {
               <span>
                 {/* The code stays beside the words: the action filter takes it. */}
                 <span className="font-medium text-heading">{said[e.action] ?? e.action}</span>{' '}
-                {e.target !== who(e.actor) && <span className="wrap-anywhere text-heading">{e.target}</span>} <code className="text-xs text-muted">{e.action}</code>
+                {e.target !== who(e.actor) && <Target target={e.target} cfg={cfg} />} <code className="text-xs text-muted">{e.action}</code>
               </span>
               {/* A guard event's signals, in the words the dashboard uses. */}
               {e.details?.signals && (
@@ -210,7 +261,7 @@ export function Audit() {
           </td>
         </tr>
       )),
-    [q.data],
+    [q.data, cfg],
   );
   return (
     <Page
@@ -218,6 +269,7 @@ export function Audit() {
       info="Every change, sign-in and automatic action, append-only. Each row is chained to the one before it with a key kept outside the database, so an edited or deleted row breaks the chain. It is verified every 5 minutes and in full daily; Verify chain checks it now."
       actions={
         <>
+          <RangeSelect value={range} onChange={pick} />
           <Button onClick={() => verify.mutate()} disabled={verify.isPending}>
             Verify chain
           </Button>
@@ -260,18 +312,38 @@ export function Audit() {
         </div>
         <Hint>
           Actor, action and target match the whole value exactly; pick from the suggestions as you type. Mentions matches any part of the target or details, so a rule ID finds the
-          saves that changed that rule and a username finds what happened to that user.
+          saves that changed that rule and a username finds what happened to that user. A typed action replaces the categories below.
         </Hint>
       </form>
+      <div role="group" aria-label="Category" className="flex flex-wrap items-center gap-2">
+        <span className="eyebrow text-body">Category</span>
+        {categories.map(([c]) => (
+          <button
+            key={c}
+            type="button"
+            aria-pressed={picked.includes(c)}
+            onClick={() => setPicked(picked.includes(c) ? picked.filter((x) => x !== c) : [...picked, c])}
+            className="rounded-full px-3 py-1 text-sm shadow-field hover:bg-soft aria-pressed:bg-brand aria-pressed:text-on-brand"
+          >
+            {c}
+          </button>
+        ))}
+      </div>
       {/* Action, target and details share a cell so a row fits a laptop
           screen without scrolling sideways. */}
-      <Table head={['#', 'When', 'Actor', 'Event']} num={[0]} empty={q.data && 'No events match these filters.'}>
+      <Table head={['#', 'When', 'Actor', 'Event']} num={[0]} empty={q.data && `No events match these filters in the ${ranges[range].label}.`}>
         {rows}
       </Table>
       {q.hasNextPage && (
         <Button onClick={() => void q.fetchNextPage()} disabled={q.isFetchingNextPage}>
           Older events
         </Button>
+      )}
+      {/* The list stops at the range's start, not at the log's. */}
+      {q.data && !q.hasNextPage && q.data.pages[0]!.length > 0 && (
+        <p className="text-sm text-body">
+          These are the events in the {ranges[range].label}. For older ones, {range === '30d' ? 'use' : 'pick a longer range or use'} Export with HMACs.
+        </p>
       )}
     </Page>
   );

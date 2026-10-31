@@ -8,7 +8,7 @@ import { useVersions } from './Publish';
 
 const testFields: Field[] = [
   ['name', 'What the test checks, shown in results.'],
-  ['request', 'The request to send. Same fields as Simulate below: method, host, path, ip, headers, country, asn, ssl, jwt_claims.'],
+  ['request', 'The request to send. Same fields as Simulate below: method, host, path, ip, headers, country, asn, ssl, http_version, ja4, ja3, verified_bot, jwt_claims.'],
   ['expect.rejected', 'The check that stops the request, such as auth or rate_limit_key.'],
   ['expect.preflight', 'true when the edge answers it as a CORS preflight.'],
   ['expect.config_rules, rate_limit_rules', 'Exactly the IDs of the rules that match, in order. [] means none.'],
@@ -97,6 +97,10 @@ function RequestForm({ value, onChange, methods, issues }: { value: JsonObject; 
         <Count value={value.asn} min={1} onChange={(n) => set('asn', n)} />
       </Labeled>
       <Check label="Sent over HTTPS" checked={value.ssl === true} onChange={(e) => set('ssl', e.target.checked || undefined)} />
+      {text('http_version', 'HTTP version', 'The version the CDN reports, such as 2.0 or HTTP/2. Leave empty for unknown.')}
+      {text('ja4', 'JA4 fingerprint', 'The TLS fingerprint the CDN reports. With an HTTPS source configured, applies only with Sent over HTTPS checked. Leave empty for unknown.', 't13d1516h2_8daaf6152771_02713d6af862')}
+      {text('ja3', 'JA3 fingerprint', 'The older TLS fingerprint, 32 hex characters. With an HTTPS source configured, applies only with Sent over HTTPS checked. Leave empty for unknown.')}
+      <Check label="From a verified crawler" checked={value.verified_bot === true} onChange={(e) => set('verified_bot', e.target.checked || undefined)} />
       <Pairs label="Headers" noun="Header" value={value.headers} onChange={(h) => set('headers', h)} hint="Headers the client sends." example={['user-agent', 'curl/8.7.1']} />
       <div className="flex flex-col gap-2">
         <Check label="Has a token that verified" checked={token} onChange={(e) => set('jwt_claims', e.target.checked ? { sub: 'user-123' } : undefined)} />

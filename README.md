@@ -1,6 +1,6 @@
 # Edge Proxy
 
-One policy layer in front of all your services. Edge Proxy is a Go reverse proxy that sits behind your content delivery network (CDN) or web application firewall (WAF) and enforces rate limits, JSON Web Token (JWT) validation, cross-origin resource sharing (CORS) and header rules for every route, so each service doesn't build its own. You manage the policy in an admin UI, where every change is tested, versioned, optionally canaried and audited.
+One policy layer in front of all your services. Edge Proxy is a Go reverse proxy that sits behind your content delivery network (CDN) or web application firewall (WAF) and enforces rate limits, JSON Web Token (JWT) validation, cross-origin resource sharing (CORS) and header rules for every route, so each service doesn't build its own. You manage the policy in an admin UI, where every change is tested, versioned, optionally canaried and audited. During an attack, autopilot can add short-lived rate limits for you, within checks and budgets you set.
 
 ```mermaid
 flowchart LR
@@ -11,6 +11,7 @@ flowchart LR
     LB --> Services["Your services"]:::ext
     Edge -.->|"loads policy, sends stats"| Admin["Admin + UI<br/>internal only"]:::edge
     Admin --> Postgres["Postgres"]:::dep
+    Runner["Autopilot runner<br/>holds model credentials"]:::ext -.->|"claims cases, proposes rules"| Admin
 
     classDef edge fill:#2c3e50,color:#ffffff
     classDef dep fill:#ecf0f1,color:#2c3e50
@@ -27,6 +28,7 @@ The edge never routes: it forwards every request it allows to one upstream, your
 |---|---|
 | Exact rate limits shared by every replica | "2 logins per minute per IP, then blocked for 1 minute", counted in one Valkey key |
 | Limits keyed on who the user is | Per user or tenant ID, taken from a verified JWT claim |
+| Rate limits added during an attack | A traffic surge opens an [autopilot](docs/use/autopilot.md) case; a model proposes a limit per IP on the route; admin checks it, runs it log-only for 5 minutes, then lets it block; it is renewed only while it still blocks someone |
 | JWT validation | `/private/*` returns `401` without a valid token from your identity provider |
 | CORS, header rules, locale detection | Add or strip headers per route; services reached only through the edge get edge headers clients can't forge |
 | Templated responses | A branded HTML `429` page instead of a bare status |
@@ -40,11 +42,34 @@ match:  http.request.uri.path eq "/login"
 limit:  2 per 1m, keyed on ip, sliding window, 1m penalty
 ```
 
+## Autopilot
+
+Autopilot adds a short-lived rate limit during an attack. A language model investigates and proposes a rule; admin checks it, runs it log-only first, and lets it block only when it would block few other clients.
+
+```mermaid
+flowchart LR
+    Anomaly["Anomaly,<br/>such as a traffic surge"]:::ext --> Model["Model investigates,<br/>proposes a rule"]:::ext
+    Model --> Checks{"Admin's checks<br/>and budgets"}:::edge
+    Checks -->|"refused, with reasons"| Model
+    Checks -->|accepted| LogOnly["Logs only<br/>for 5 minutes"]:::edge
+    LogOnly -->|"blocks few other clients"| Blocks["Blocks"]:::edge
+    LogOnly -->|"too broad, or<br/>attack stopped"| Rejected["Rejected"]:::dep
+    Blocks --> Expires["Expires once it<br/>blocks no one"]:::dep
+
+    classDef edge fill:#2c3e50,color:#ffffff
+    classDef dep fill:#ecf0f1,color:#2c3e50
+    classDef ext fill:#ffffff,color:#2c3e50
+```
+
+A proposal like "20 `POST /login` per minute per IP, for 1 hour" passes. One that names an IP address, AS number or JWT claim value, is just `true`, fails closed or is keyed only on values the client chooses is refused. Each autopilot rule expires at most 24 hours ahead and is renewed only while it is still needed, up to 7 days by default; a blocking rule only while it still blocks someone. Setting `mode` to `off` removes them all in one publish, once no canary is running.
+
+It needs the [autopilot runner](docs/deploy/autopilot.md), a separate process that holds your model provider credentials. You watch and steer it on the admin UI's **Autopilot** page: cases with the model's evidence and every check, live rules, settings, spend and the off switch. See [Autopilot](docs/use/autopilot.md).
+
 ## Is it for you?
 
 Use it when your CDN's rate limits are too approximate, you need limits keyed on a verified user, or you want one policy model that doesn't change when your CDN or cloud does. See [why it exists](docs/index.md#why-it-exists) and the [comparison with CDN vendors](docs/vendor-comparison.md).
 
-Don't use it as a WAF or CDN (no managed attack rules, bot detection or distributed denial-of-service (DDoS) absorption) or as a router. If approximate per-IP limits are all you need, your CDN alone is simpler.
+Don't use it as a WAF or CDN (no managed attack rules, bot scores or distributed denial-of-service (DDoS) absorption) or as a router. If approximate per-IP limits are all you need, your CDN alone is simpler.
 
 ## Why a custom proxy
 
@@ -76,7 +101,8 @@ Full docs: https://chrisleekr.github.io/edge-proxy/
 
 | You want to | Read |
 |---|---|
-| Write rules | [Policy](docs/use/policy.md), [Rate limiting](docs/use/rate-limiting.md), [Expressions](docs/reference/expressions.md) |
+| Write rules | [Policy](docs/use/policy.md), [Rate limiting](docs/use/rate-limiting.md), [Bot detection](docs/use/bots.md), [Expressions](docs/reference/expressions.md) |
+| Let autopilot add rate limits during an attack | [Autopilot](docs/use/autopilot.md) |
 | Ship a change safely | [Publish and roll back](docs/use/publishing.md) |
 | Find your way around the admin UI | [Dashboard](docs/use/dashboard.md) |
 | Run it in production | [Deploy](docs/deploy/index.md), [Kubernetes with Helm](docs/deploy/kubernetes.md), [Capacity planning](docs/deploy/capacity.md) |

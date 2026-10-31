@@ -11,7 +11,7 @@ import { canaryPercent, guardAfter, OverrideReason, useVersions } from './Publis
 const statusTone = (s: string) => (s === 'active' ? 'green' : s === 'canary' ? 'amber' : s === 'rolled_back' ? 'red' : 'slate');
 
 // sourceName is how a version came to be published.
-const sourceName = (s: string) => ({ manual: 'published', revert: 'revert', guard_rollback: 'guard rollback', import: 'import' })[s] ?? s;
+const sourceName = (s: string) => ({ manual: 'published', revert: 'revert', guard_rollback: 'guard rollback', import: 'import', autopilot: 'autopilot' })[s] ?? s;
 
 export function Versions({ can }: { can: (p: string) => boolean }) {
   const q = useVersions();

@@ -13,6 +13,8 @@ flowchart LR
 
 Set [`ALERTMANAGER_URL`](../deploy/admin.md#variables) to send them. Without it, anomalies are still found and shown on **Notifications** in the admin UI.
 
+![Notifications](../assets/screenshots/notifications.png)
+
 ## How a check decides
 
 Each minute, admin compares the last **window** (5 minutes) with the **baseline** before it (60 minutes), both whole minutes, summed over every version and edge. The newest 30 seconds are left out, since edges may still be reporting them.
