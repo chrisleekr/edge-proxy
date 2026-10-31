@@ -609,9 +609,10 @@ test('an autopilot setting the server refuses shows its reason by the field, and
   await confirm('Save autopilot settings');
   await expect(field.getByRole('alert')).toHaveText('must be 1m to 1h');
   await expect(page.getByRole('alert').filter({ hasText: 'Not saved: fix the settings marked above.' })).toBeVisible();
-  // An hour of logging first, so approving early below is always refused.
+  // Half an hour of logging first, so approving early below is always
+  // refused. An hour would need a default ttl over 61m30s for enforce rules.
   await field.getByRole('combobox', { name: 'Unit' }).selectOption('m');
-  await observe.fill('60');
+  await observe.fill('30');
   await page.getByRole('combobox', { name: /^Mode( |$)/ }).selectOption('observe');
   await page.getByRole('button', { name: 'Save autopilot settings' }).click();
   await confirm('Save autopilot settings');
