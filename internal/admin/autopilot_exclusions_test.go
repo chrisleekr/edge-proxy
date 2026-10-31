@@ -154,6 +154,23 @@ func TestAutopilotExclusions(t *testing.T) {
 			}
 		})
 	})
+	t.Run("protected networks that don't fit beside the active exclusions are refused", func(t *testing.T) {
+		_, pub, _ := autopilotHarness(t)
+		for i := range 60 { // until the exclusions fill the shared half
+			resp := pub.do("POST", "/api/autopilot/exclusions", map[string]any{"subject": "198.51.100." + fmt.Sprint(i+1), "host": "api.example.com", "reason": "Our CI"})
+			if resp.StatusCode == 422 {
+				_ = resp.Body.Close()
+				break
+			}
+			status(t, resp, 201)
+		}
+		s := pub.autopilotSettings()
+		s["protected_subjects"] = []string{"203.0.113.0/24", "192.0.2.0/24"}
+		resp := pub.do("PUT", "/api/settings/autopilot", s)
+		if p := decode[problem](t, resp); resp.StatusCode != 422 || len(p.Errors) != 1 || p.Errors[0].Path != "protected_subjects" {
+			t.Fatalf("%d %+v", resp.StatusCode, p)
+		}
+	})
 	t.Run("the list keeps revoked and expired exclusions for 30 days, newest first", func(t *testing.T) {
 		h, pub, _ := autopilotHarness(t)
 		expiring := exclude(t, pub, map[string]any{"subject": "198.51.100.7", "host": "api.example.com", "reason": "Our CI", "ttl": "1h"})

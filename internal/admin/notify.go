@@ -245,11 +245,13 @@ func pct(v float64) string { return fmt.Sprintf("%.1f%%", 100*v) }
 func (n NotifySettings) problems() []expr.Issue {
 	var errs []expr.Issue
 	add := func(p, m string) { errs = append(errs, expr.Issue{Path: p, Msg: m}) }
-	if n.Window < snapshot.Duration(time.Minute) || n.Window > snapshot.Duration(time.Hour) {
-		add("window", "window must be 1m to 1h")
+	// Whole minutes: stats are kept per minute, and a span of part of one
+	// scales its counts wrong.
+	if n.Window < snapshot.Duration(time.Minute) || n.Window > snapshot.Duration(time.Hour) || time.Duration(n.Window)%time.Minute != 0 {
+		add("window", "window must be whole minutes from 1m to 1h")
 	}
-	if n.Baseline < n.Window || n.Baseline > snapshot.Duration(24*time.Hour) {
-		add("baseline", "baseline must be at least the window and at most 24h")
+	if n.Baseline < n.Window || n.Baseline > snapshot.Duration(24*time.Hour) || time.Duration(n.Baseline)%time.Minute != 0 {
+		add("baseline", "baseline must be whole minutes, at least the window and at most 24h")
 	}
 	if n.FireAfter < 1 || n.FireAfter > 60 || n.ResolveAfter < 1 || n.ResolveAfter > 60 {
 		add("fire_after", "fire_after and resolve_after must be 1 to 60 checks")
@@ -482,6 +484,13 @@ func (s *Server) liveRules(ctx context.Context) ([]subject, error) {
 	return out, nil
 }
 
+// ownTransition reports a signal an autopilot rule trips by design: it
+// starts blocking after logging only, and stops matching when the attack
+// ends. autopilot_enforced and autopilot_rolled_back report those.
+func ownTransition(rule, signal string) bool {
+	return strings.HasPrefix(rule, overlayPrefix) && (signal == "rule_block_spike" || signal == "rule_stopped_matching")
+}
+
 // evaluateNotify runs every signal that is on against w and b.
 func evaluateNotify(n NotifySettings, w, b *span, rules []subject) []finding {
 	var out []finding
@@ -489,7 +498,7 @@ func evaluateNotify(n NotifySettings, w, b *span, rules []subject) []finding {
 		for _, name := range notifyNames {
 			c := notifyChecks[name]
 			sig := n.signalFor(sub.ID, name)
-			if sig.Mode != "notify" || !slices.Contains(c.phases, sub.Phase) {
+			if sig.Mode != "notify" || !slices.Contains(c.phases, sub.Phase) || ownTransition(sub.ID, name) {
 				continue
 			}
 			tripped, summary := c.check(sig, w, b, sub.ID)
@@ -591,7 +600,9 @@ func (s *Server) autopilotFindings(ctx context.Context, n NotifySettings) ([]fin
 			out = append(out, finding{Signal: signal, Rule: rule, Phase: autopilotPhase, Severity: sig.Severity, Summary: summary, Tripped: true})
 		}
 	}
-	rows, err := s.db.Query(ctx, `SELECT id, state FROM autopilot_rules WHERE state = 'enforcing' OR state = 'rolled_back' AND ended_at > $1 ORDER BY id LIMIT 100`, now.Add(-time.Hour))
+	// No LIMIT: a rule that dropped out would resolve while it still holds.
+	// max_enforcing and the hour's rollbacks of those rules bound the rows.
+	rows, err := s.db.Query(ctx, `SELECT id, state FROM autopilot_rules WHERE state = 'enforcing' OR state = 'rolled_back' AND ended_at > $1 ORDER BY id`, now.Add(-time.Hour))
 	if err != nil {
 		return nil, err
 	}

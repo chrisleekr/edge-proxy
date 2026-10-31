@@ -203,7 +203,9 @@ func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, i
 	if in.TTL != nil {
 		c.ttl = time.Duration(*in.TTL)
 	}
-	shapeOK = shapeOK && c.ttl >= set.minRenewableTTL()
+	// An enforce rule logs only for observe_for first; a TTL that ends
+	// sooner would hold an enforcing slot and never block.
+	shapeOK = shapeOK && c.ttl >= set.minRenewableTTL() && (in.Action != "enforce" || c.ttl > set.enforceTTLFloor())
 	if shapeOK && in.Cites != "" {
 		rules, err := s.loadRules(ctx, q, "id = $1 AND kind = 'sensor' AND state = 'observing'", in.Cites)
 		if err != nil {
@@ -213,8 +215,8 @@ func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, i
 			c.cited = &rules[0]
 		}
 	}
-	c.check("not_overlay_shape", shapeOK, fmt.Sprintf("action add_sensor or enforce, a name of 1 to 40 of a-z, 0-9 and - not starting ap- (admin adds it), a rule, a ttl of at least %s and cites naming an observing sensor",
-		set.minRenewableTTL()))
+	c.check("not_overlay_shape", shapeOK, fmt.Sprintf("action add_sensor or enforce, a name of 1 to 40 of a-z, 0-9 and - not starting ap- (admin adds it), a rule, a ttl of at least %s (for enforce, over %s, so it outlasts observe_for) and cites naming an observing sensor",
+		set.minRenewableTTL(), set.enforceTTLFloor()))
 	if !shapeOK {
 		return c, nil
 	}
@@ -351,7 +353,11 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 	// puts first: the display's first part is then the address the edge
 	// keyed. Later parts are client-written and never parsed.
 	checkIP := len(ar.Rule.Key) > 0 && ar.Rule.Key[0] == "ip"
+	// subjects keeps first-seen order, so a refusal names the same subject
+	// each time; seen dedupes in constant time, since this runs under the
+	// draft and publish locks over up to a day of minutes.
 	var subjects []netip.Prefix
+	seen := map[netip.Prefix]bool{}
 	recentFrom := now.Add(-observe)
 	for _, r := range rows {
 		fleet += r.Requests
@@ -361,7 +367,8 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 				continue
 			}
 			top[t.Key] += t.WouldLimit - min(t.Err, t.WouldLimit) // at least this many
-			if p, ok := subjectPrefix(t.Display); checkIP && ok && !slices.Contains(subjects, p) {
+			if p, ok := subjectPrefix(t.Display); checkIP && ok && !seen[p] {
+				seen[p] = true
 				subjects = append(subjects, p)
 			}
 		}

@@ -219,6 +219,9 @@ func TestAutopilotSettings(t *testing.T) {
 		// A rule renews in its last quarter, on a tick that may publish: one
 		// 30s tick plus min_publish_interval (1m here), so at least 6m.
 		{"a default TTL too short to renew within one tick and the publish interval", "default_ttl", "5m", "default_ttl"},
+		// observe_for 5m, min_publish_interval 1m and a 30s tick: an enforce
+		// rule with a 6m default would expire before it blocks.
+		{"a default TTL an enforce rule would expire within before blocking", "default_ttl", "6m", "default_ttl"},
 		{"a lifetime over 30 days", "max_lifetime", "721h", "max_lifetime"},
 		{"a lifetime under max_ttl", "max_lifetime", "12h", "max_lifetime"},
 		{"a block share over 20%", "max_block_share", 0.5, "max_block_share"},

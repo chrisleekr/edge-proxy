@@ -533,7 +533,7 @@ func (s *Server) ddQueryMetrics(ctx context.Context, args json.RawMessage) (map[
 	}
 	items := make([]map[string]any, 0, min(len(a.Series), 10))
 	for _, ser := range a.Series[:min(len(a.Series), 10)] {
-		items = append(items, map[string]any{"metric": ser.Metric, "scope": untrusted(ser.Scope), "points": everyKth(orEmpty(ser.Pointlist), connMaxPoints)})
+		items = append(items, map[string]any{"metric": untrusted(ser.Metric), "scope": untrusted(ser.Scope), "points": everyKth(orEmpty(ser.Pointlist), connMaxPoints)})
 	}
 	return fit(items, func(kept []map[string]any, dropped int) map[string]any {
 		return map[string]any{"from": from, "to": to, "series": kept, "more": len(a.Series) - len(items) + dropped, "link": nil}

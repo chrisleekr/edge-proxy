@@ -64,15 +64,24 @@ func (a AutopilotSettings) minRenewableTTL() time.Duration {
 	return 4 * (autopilotEvery + time.Duration(a.MinPublishInterval))
 }
 
+// enforceTTLFloor is what an enforce rule's TTL must exceed to ever block:
+// it logs only for observe_for, then waits for a tick that may publish.
+func (a AutopilotSettings) enforceTTLFloor() time.Duration {
+	return time.Duration(a.ObserveFor) + time.Duration(a.MinPublishInterval) + autopilotEvery
+}
+
 func (a AutopilotSettings) problems() []expr.Issue {
 	var errs []expr.Issue
 	add := func(p, m string) { errs = append(errs, expr.Issue{Path: p, Msg: m}) }
 	d := func(v snapshot.Duration) time.Duration { return time.Duration(v) }
 	publishOK := d(a.MinPublishInterval) >= 30*time.Second && d(a.MinPublishInterval) <= 15*time.Minute
-	renewable := func(field string, v snapshot.Duration) {
+	observeOK := d(a.ObserveFor) >= time.Minute && d(a.ObserveFor) <= time.Hour
+	renewable := func(field string, v snapshot.Duration) bool {
 		if publishOK && d(v) < a.minRenewableTTL() {
 			add(field, fmt.Sprintf("must be at least %s, 4 times a %s tick plus min_publish_interval: a rule renews in the last quarter of its ttl", a.minRenewableTTL(), autopilotEvery))
+			return false
 		}
+		return true
 	}
 	if a.Mode != "off" && a.Mode != "observe" && a.Mode != "auto" {
 		add("mode", "must be off, observe or auto")
@@ -83,7 +92,7 @@ func (a AutopilotSettings) problems() []expr.Issue {
 	if a.MaxSensors < 0 || a.MaxSensors > 50 {
 		add("max_sensors", "must be 0 to 50")
 	}
-	if d(a.ObserveFor) < time.Minute || d(a.ObserveFor) > time.Hour {
+	if !observeOK {
 		add("observe_for", "must be 1m to 1h")
 	}
 	if d(a.MaxTTL) < time.Minute || d(a.MaxTTL) > maxOverlayTTL {
@@ -93,8 +102,9 @@ func (a AutopilotSettings) problems() []expr.Issue {
 	}
 	if d(a.DefaultTTL) < time.Minute || a.DefaultTTL > a.MaxTTL {
 		add("default_ttl", "must be from 1m to max_ttl")
-	} else {
-		renewable("default_ttl", a.DefaultTTL)
+	} else if renewable("default_ttl", a.DefaultTTL) && publishOK && observeOK && d(a.DefaultTTL) <= a.enforceTTLFloor() {
+		add("default_ttl", fmt.Sprintf("must be over %s, observe_for plus min_publish_interval and a %s tick: an enforce rule using it would expire before it blocks",
+			a.enforceTTLFloor(), autopilotEvery))
 	}
 	if a.MaxLifetime < a.MaxTTL || d(a.MaxLifetime) > 30*24*time.Hour {
 		add("max_lifetime", "must be from max_ttl to 720h (30 days)")
@@ -237,6 +247,24 @@ func (s *Server) putAutopilotSettings(w http.ResponseWriter, r *http.Request, p 
 		before, err := loadAutopilot(ctx, tx)
 		if err != nil {
 			return err
+		}
+		// The protected networks share half of every autopilot rule's
+		// expression with the active exclusions, as addExclusion checks.
+		ex, err := activeExclusions(ctx, tx, s.now())
+		if err != nil {
+			return err
+		}
+		used := 0
+		if en, ok := exclusionNode(ex); ok {
+			used += len(expr.Render(en))
+		}
+		if pn, ok := protectedExclusion(a); ok {
+			used += len(expr.Render(pn))
+		}
+		if used > expr.MaxTextLen/2 {
+			return &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid autopilot settings", Errors: []expr.Issue{{Path: "protected_subjects",
+				Msg: fmt.Sprintf("the networks and %d active exclusions take %d characters of every autopilot rule's expression, over %d; use fewer or wider CIDRs, or revoke exclusions",
+					len(ex), used, expr.MaxTextLen/2)}}}
 		}
 		if a.Mode == "off" && before.Mode != "off" {
 			if published, cancelled, err = s.killSwitch(ctx, tx, p); err != nil {

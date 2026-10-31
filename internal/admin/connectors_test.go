@@ -625,6 +625,9 @@ func TestConnectorDatadog(t *testing.T) {
 		if p := untrustedOnly(out, "host:web-", "", false); p != "" {
 			t.Fatalf("scope outside untrusted at %s", p)
 		}
+		if p := untrustedOnly(out, "trace.http.request.hits", "", false); p != "" {
+			t.Fatalf("metric name outside untrusted at %s", p)
+		}
 		if _, ok := out["evidence_id"]; !ok {
 			t.Fatal("no evidence_id")
 		}

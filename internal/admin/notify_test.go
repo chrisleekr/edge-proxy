@@ -691,6 +691,8 @@ func TestNotifySettings(t *testing.T) {
 		c.Signals["rule_block_spike"] = s
 	}, "signals.rule_block_spike")
 	bad(func(c *NotifySettings) { c.Window = 0 }, "window")
+	bad(func(c *NotifySettings) { c.Window = snapshot.Duration(90 * time.Second) }, "window")
+	bad(func(c *NotifySettings) { c.Baseline = snapshot.Duration(90*time.Minute + 30*time.Second) }, "baseline")
 	bad(func(c *NotifySettings) { c.FireAfter = 0 }, "fire_after")
 	bad(func(c *NotifySettings) {
 		c.Rules = map[string]map[string]NotifySignal{"login": {"traffic_drop": {Mode: "off"}}}

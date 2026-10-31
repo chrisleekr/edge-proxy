@@ -15,7 +15,7 @@ Set [`ALERTMANAGER_URL`](../deploy/admin.md#variables) to send them. Without it,
 
 ## How a check decides
 
-Each minute, admin compares the last **window** (5 minutes) with the **baseline** before it (60 minutes), summed over every version and edge. The newest 30 seconds are left out, since edges may still be reporting them.
+Each minute, admin compares the last **window** (5 minutes) with the **baseline** before it (60 minutes), both whole minutes, summed over every version and edge. The newest 30 seconds are left out, since edges may still be reporting them.
 
 - A signal **trips** when its value passes its thresholds, and only with at least `min_requests` to judge, so a quiet hour can't page anyone. A share of errors also needs at least `min_events` of them (the 5xx or failed token checks), so a handful of errors in a quiet window doesn't trip it. Saved settings keep the thresholds they were saved with, and one missing from a saved signal is 0: only a signal never saved takes the defaults, so set a missing `min_events` on **Notifications**.
 - An anomaly starts **pending** and notifies (**firing**) after `fire_after` checks in a row trip (2). A blip that trips once is dropped.
@@ -106,7 +106,7 @@ Admin can only notify while it runs and receives stats. Alert on admin itself fr
 
 While the [autopilot](../use/autopilot.md) is on and a runner was seen in the last 2 minutes, admin holds back an anomaly it hasn't sent yet in three cases, and **Notifications** says which:
 
-- **Its own rule:** a `rule_would_block` or `rule_subject_dominates` anomaly on an autopilot rule (`ap-`), sensor or enforce, other than a critical one, is the autopilot's input. It opens a case from it and notifies what it concludes: `autopilot_needs_person` for an unsure verdict, a failed case, or an attack with no enforce rule accepted, or with one waiting for a person's approval in `observe` mode. Its other anomalies, such as `rule_fail_mode`, are treated as any rule's.
+- **Its own rule:** a `rule_would_block` or `rule_subject_dominates` anomaly on an autopilot rule (`ap-`), sensor or enforce, other than a critical one, is the autopilot's input. It opens a case from it and notifies what it concludes: `autopilot_needs_person` for an unsure verdict, a failed case, or an attack with no enforce rule accepted, or with one waiting for a person's approval in `observe` mode. Its other anomalies, such as `rule_fail_mode`, are treated as any rule's, except `rule_block_spike` and `rule_stopped_matching`, which an autopilot rule trips by design when it starts blocking and when the attack ends: they are not checked on `ap-` rules, and `autopilot_enforced` and `autopilot_rolled_back` report those changes.
 - **Investigating:** an anomaly that opens a case, other than a critical one, waits up to 10 minutes after it fired for the case's verdict, and is then sent with "Autopilot case N: verdict." added to `description`. The case's summary is left out: the model writes it after reading traffic clients control.
 - **Benign:** an `info` anomaly whose case closed `benign` is not sent. A warning closed benign is still sent, with the verdict: traffic an attacker shapes could talk the model into a benign verdict, so the verdict only delays it.
 

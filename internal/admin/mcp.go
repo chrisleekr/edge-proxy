@@ -962,7 +962,8 @@ func (s *Server) propose(ctx context.Context, call *mcpCall, in proposeIn) (*pro
 		}
 		var ttl *int
 		if in.Action != "retire" {
-			sec := int(c.ttl / time.Second)
+			// Clamped to fit the int column; the policy already refused a ttl past max_ttl.
+			sec := int(min(c.ttl, maxOverlayTTL+time.Second) / time.Second)
 			ttl = &sec
 		}
 		rule := any(map[string]any{})

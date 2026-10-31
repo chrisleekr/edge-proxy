@@ -294,6 +294,27 @@ func TestAutopilotPolicy(t *testing.T) {
 			t.Fatalf("proposal %+v", p)
 		}
 	})
+	t.Run("an enforce ttl that ends before observe_for does is refused when proposed", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"observe_for": "30m"})
+		_, cs := agentCase(t, h, pub, agent)
+		in := proposal("enforce", "login-stuffing", loginRule())
+		in["ttl"] = "15m"
+		p := propose(t, cs, in)
+		i := slices.IndexFunc(p.Checks, func(c policyCheck) bool { return c.Name == "not_overlay_shape" })
+		if p.Accepted || i < 0 || !strings.Contains(p.Checks[i].Detail, "over 31m30s") {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
+	t.Run("a ttl far past max_ttl is refused and recorded, not an error", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		_, cs := agentCase(t, h, pub, agent)
+		in := proposal("add_sensor", "login-watch", loginRule())
+		in["ttl"] = "1000000h"
+		if p := propose(t, cs, in); p.Accepted || !slices.Contains(p.Reasons, "ttl_over_max") {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
 	// An enforcing rule's lifetime counts from the sensor it cites.
 	t.Run("lifetime_over_max is refused when proposed", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
@@ -531,7 +552,7 @@ func TestAutopilotRuleLifecycle(t *testing.T) {
 	t.Run("an observing rule whose max_lifetime was lowered past its age ends expired instead of enforcing", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		id := liveRule(t, h, pub, agent, proposal("enforce", "login-stuffing", loginRule()))
-		pub.setAutopilot(map[string]any{"max_ttl": "6m", "default_ttl": "6m", "max_lifetime": "6m"})
+		pub.setAutopilot(map[string]any{"observe_for": "1m", "max_ttl": "6m", "default_ttl": "6m", "max_lifetime": "6m"})
 		h.advance(7 * time.Minute) // past observe_for and the new max_lifetime
 		ruleMinutes(h, pub, 7, 10_000, 1_000, 0, 100, id, "[]")
 		h.tick()
@@ -1326,6 +1347,21 @@ func TestAutopilotNotifications(t *testing.T) {
 		}
 		if firing != 21 {
 			t.Fatalf("%d cases needing a person are firing, want 21", firing)
+		}
+	})
+	t.Run("an autopilot rule starting to block is not a rule_block_spike", func(t *testing.T) {
+		h, pub, agent := setup(t)
+		id := enforcingRule(t, h, pub, agent)
+		h.advance(5 * time.Minute)
+		ruleMinutes(h, pub, 5, 10_000, 1_000, 100, 0, id, "[]") // blocking 10% after logging only
+		h.check()
+		for _, a := range h.anomalies(pub) {
+			if a.Rule == id && (a.Signal == "rule_block_spike" || a.Signal == "rule_stopped_matching") {
+				t.Fatalf("anomaly %+v on an autopilot rule doing what it was made for", a)
+			}
+		}
+		if st := state(h, pub, "autopilot_enforced"); st != "firing" {
+			t.Fatalf("autopilot_enforced %s", st)
 		}
 	})
 	t.Run("autopilot_enforced fires while a rule enforces", func(t *testing.T) {
