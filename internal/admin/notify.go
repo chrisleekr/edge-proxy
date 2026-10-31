@@ -398,10 +398,11 @@ func (s *span) limit(id string) edge.RuleCounts {
 }
 
 // blocking is a rule's refusals as rate-limit counts. A config rule checks
-// every request, so its evaluated count is the span's requests.
+// every request while it is live, so its evaluated count is the requests of
+// the minutes and versions that list it.
 func (s *span) blocking(id string) edge.RuleCounts {
 	if o := s.outcomes[id]; o != nil && o.Phase == string(expr.PhaseConfig) {
-		return edge.RuleCounts{ID: id, Evaluated: s.Requests, Limited: o.Blocked, WouldLimit: o.WouldBlock}
+		return edge.RuleCounts{ID: id, Evaluated: s.live[id], Limited: o.Blocked, WouldLimit: o.WouldBlock}
 	}
 	return s.limit(id)
 }
@@ -645,14 +646,17 @@ func (s *Server) autopilotFindings(ctx context.Context, n NotifySettings) ([]fin
 	// accepted, or one was but observe mode waits for approval. A case on an
 	// autopilot rule that already enforces does not: that rule blocks it, and
 	// the duplicate check refuses a second one. Nor does a case whose own
-	// enforce rule a person approved or that enforces now.
+	// enforce rule a person approved or that enforces now. No LIMIT: a case
+	// that dropped out would resolve while it still needs a person, and the
+	// hour bounds the rows, since cases close after runs and cases_per_hour
+	// allows at most 200 runs an hour.
 	rows, err = s.db.Query(ctx, `SELECT c.id, c.state, c.verdict, p.accepted FROM autopilot_cases c
 		CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM autopilot_proposals p WHERE p.case_id = c.id AND p.action = 'enforce' AND p.accepted) AS accepted) p
 		WHERE c.closed_at > $1 AND (c.state = 'failed' OR c.verdict = 'unsure'
 			OR c.verdict = 'attack' AND (NOT p.accepted OR $2 <> 'auto')
 				AND NOT EXISTS (SELECT 1 FROM autopilot_rules r WHERE (r.id = c.rule OR r.case_id = c.id)
 					AND (r.enforcing_since IS NOT NULL OR r.approved_by IS NOT NULL) AND r.ended_at IS NULL))
-		ORDER BY c.id DESC LIMIT 20`, now.Add(-time.Hour), set.Mode)
+		ORDER BY c.id DESC`, now.Add(-time.Hour), set.Mode)
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +678,8 @@ func (s *Server) autopilotFindings(ctx context.Context, n NotifySettings) ([]fin
 	}); err != nil {
 		return nil, err
 	}
-	rows, err = s.db.Query(ctx, `SELECT DISTINCT note_id FROM autopilot_note_revisions WHERE change = 'contested' AND at > $1 ORDER BY note_id LIMIT 20`, now.Add(-time.Hour))
+	// Contests come from re-run cases, so the same budget bounds these rows.
+	rows, err = s.db.Query(ctx, `SELECT DISTINCT note_id FROM autopilot_note_revisions WHERE change = 'contested' AND at > $1 ORDER BY note_id`, now.Add(-time.Hour))
 	if err != nil {
 		return nil, err
 	}
@@ -739,12 +744,17 @@ func (s *Server) recordAnomalies(ctx context.Context, n NotifySettings, found []
 // trip counts a tripped check and fires the anomaly after fire_after.
 func (s *Server) trip(ctx context.Context, tx pgx.Tx, n NotifySettings, a *anomaly, f finding, now time.Time) error {
 	a.Tripped++
+	// Severity labels the Alertmanager alert, so it is kept once the alert
+	// fires: a new value would start a second alert and orphan the first.
+	if a.State == "pending" {
+		a.Severity = f.Severity
+	}
 	fire := a.State == "pending" && a.Tripped >= n.FireAfter
 	if fire {
 		a.State, a.FiredAt = "firing", &now
 	}
 	if _, err := tx.Exec(ctx, "UPDATE anomalies SET state = $2, tripped = $3, passed = 0, fired_at = $4, severity = $5, summary = $6 WHERE id = $1",
-		a.ID, a.State, a.Tripped, a.FiredAt, f.Severity, f.Summary); err != nil || !fire {
+		a.ID, a.State, a.Tripped, a.FiredAt, a.Severity, f.Summary); err != nil || !fire {
 		return err
 	}
 	s.log.Warn("anomaly firing", "signal", a.Signal, "rule", a.Rule, "summary", f.Summary)

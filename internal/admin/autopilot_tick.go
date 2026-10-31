@@ -103,7 +103,7 @@ const (
 
 // expireCases requeues a running case whose lease lapsed, once; after the
 // last attempt the case fails and needs a person. A case queued past
-// queuedMax is cancelled.
+// queuedMax, since it was opened or last requeued, is cancelled.
 func (s *Server) expireCases(ctx context.Context) error {
 	var failed, cancelled []string
 	err := dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
@@ -132,7 +132,7 @@ func (s *Server) expireCases(ctx context.Context) error {
 				_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'failed', lease_until = NULL, closed_at = $2, summary = $3 WHERE id = $1",
 					c.ID, now, fmt.Sprintf("the runner's lease lapsed on all %d attempts; a person needs to look", maxAttempts))
 			} else {
-				_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'queued', lease_until = NULL WHERE id = $1", c.ID)
+				_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'queued', lease_until = NULL, queued_at = $2 WHERE id = $1", c.ID, now)
 			}
 			if err != nil {
 				return err
@@ -142,7 +142,7 @@ func (s *Server) expireCases(ctx context.Context) error {
 				return err
 			}
 		}
-		cancelled, err = s.cancelCases(ctx, tx, "system:autopilot", "state = 'queued' AND created_at < $3", "no runner claimed it within an hour", now.Add(-queuedMax))
+		cancelled, err = s.cancelCases(ctx, tx, "system:autopilot", "state = 'queued' AND queued_at < $3", "no runner claimed it within an hour", now.Add(-queuedMax))
 		return err
 	}))
 	if err != nil {

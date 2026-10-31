@@ -36,6 +36,8 @@ CREATE TABLE autopilot_cases (
     summary     text NOT NULL DEFAULT '',
     opened_by   text NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now(),
+    -- When the case was last queued: opened, or requeued for another attempt.
+    queued_at   timestamptz NOT NULL DEFAULT now(),
     closed_at   timestamptz
 );
 CREATE UNIQUE INDEX autopilot_cases_open ON autopilot_cases (dedupe_key) WHERE state IN ('queued', 'running');

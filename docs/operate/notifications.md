@@ -93,7 +93,7 @@ Each alert is named after its signal (`rule_block_spike` is `EdgeProxyRuleBlockS
 | `alertname` | `EdgeProxy` and the signal |
 | `service` | `edge-proxy` |
 | `signal` | The signal |
-| `severity` | `critical`, `warning` or `info` |
+| `severity` | `critical`, `warning` or `info`, as set when the anomaly fired; a later change applies from its next firing |
 | `rule`, `phase` | The rule's ID and phase; fleet alerts have neither |
 
 Annotations: `summary` names the signal and rule, and `description` gives the numbers, such as "Blocked 31.0% of the requests it checked in the last 5 minutes, against 1.0% in the hour before".

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -472,6 +473,42 @@ func (c *client) events(runID int64, events ...map[string]any) *http.Response {
 	return c.do("POST", fmt.Sprintf("/v1/autopilot/runs/%d/events", runID), map[string]any{"events": events})
 }
 
+// A last event batch that waits while the run's result is stored is refused
+// once the result is in, so the result's events hash covers every event.
+func TestEventsRacingTheResultAreRefused(t *testing.T) {
+	h, pub, agent := autopilotHarness(t)
+	c := openAndClaim(t, pub, agent)
+	tx, err := h.owner.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }() //nolint:usetesting // t.Context may be cancelled
+	if _, err := tx.Exec(t.Context(), "SELECT pg_advisory_xact_lock(hashtextextended('autopilot-run:' || $1::bigint, 0))", c.RunID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int)
+	go func() {
+		resp := agent.events(c.RunID, event(1, "assistant", `{"text":"last"}`))
+		resp.Body.Close()
+		done <- resp.StatusCode
+	}()
+	waitingOnLocks(t, h, 1)
+	if _, err := tx.Exec(t.Context(), `INSERT INTO autopilot_run_results (run_id, finished_at, status, turns, tool_calls, input_tokens,
+		output_tokens, cache_read_tokens, cache_write_tokens, transcript_bytes, telemetry_complete) VALUES ($1, now(), 'ok', 1, 0, 0, 0, 0, 0, 0, true)`, c.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-done; code != http.StatusConflict {
+		t.Fatalf("events after the result: status %d, want 409", code)
+	}
+	var n int
+	if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM autopilot_run_events WHERE run_id = $1 AND source = 'runner'", c.RunID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("%d runner events stored after the result, err %v", n, err)
+	}
+}
+
 // textPayload is a compact JSON payload of about n bytes.
 func textPayload(n int) string { return `{"text":"` + strings.Repeat("a", n) + `"}` }
 
@@ -535,6 +572,12 @@ func TestAutopilotRunRecords(t *testing.T) {
 			}
 			status(t, agent.events(c.RunID, batch...), 204)
 		}
+		// The last batch sent again, as after a lost answer, is not refused.
+		var last []map[string]any
+		for i := 901; i <= 1000; i++ {
+			last = append(last, event(i, "assistant_text", `{"text":"thinking"}`))
+		}
+		status(t, agent.events(c.RunID, last...), 204)
 		status(t, agent.events(c.RunID, event(1001, "assistant_text", `{"text":"one more"}`)), 409)
 		var n int
 		if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM autopilot_run_events WHERE run_id = $1", c.RunID).Scan(&n); err != nil || n != 1000 {

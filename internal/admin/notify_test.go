@@ -184,6 +184,29 @@ func TestNotifyFiresAfterTwoChecksAndResolvesAfterFive(t *testing.T) {
 	}
 }
 
+// Changing a signal's severity while its anomaly fires keeps the alert's
+// labels, so Alertmanager sees one alert, not a second one beside it.
+func TestNotifyKeepsSeverityWhileFiring(t *testing.T) {
+	h, pub, am := notifyHarness(t)
+	h.put(65, 6, minute{requests: 1000})
+	h.put(5, 1, minute{requests: 1000, upstream5xx: 200})
+	h.check()
+	h.advance(time.Minute)
+	h.put(1, 1, minute{requests: 1000, upstream5xx: 200})
+	h.check()
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	s := n.Signals["upstream_5xx_ratio"]
+	s.Severity = "warning"
+	n.Signals["upstream_5xx_ratio"] = s
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	h.advance(time.Minute)
+	h.put(1, 1, minute{requests: 1000, upstream5xx: 200})
+	h.check()
+	if sent := am.last(); len(sent) != 1 || sent[0].Labels["severity"] != "critical" {
+		t.Fatalf("sent %+v, want the firing alert still critical", sent)
+	}
+}
+
 // A blip that trips one check and passes the next never notifies and
 // leaves nothing behind.
 func TestNotifyIgnoresAOneCheckBlip(t *testing.T) {
@@ -196,6 +219,24 @@ func TestNotifyIgnoresAOneCheckBlip(t *testing.T) {
 	h.check()
 	if a := h.anomalies(pub); len(a) != 0 || am.last() != nil {
 		t.Fatalf("anomalies %+v, sent %+v", a, am.last())
+	}
+}
+
+// A block rule published just before the window is judged on the minutes it
+// was live, so its steady block share is not a spike.
+func TestNotifyBlockSpikeCountsOnlyLiveMinutes(t *testing.T) {
+	h, pub, _ := notifyHarness(t)
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.FireAfter = 1
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	block := []edge.RuleOutcome{{Phase: "config", ID: "admin-route", Matched: 100, Blocked: 100}}
+	h.put(65, 11, minute{requests: 1000})
+	h.put(10, 1, minute{requests: 1000, rules: block}) // 10% blocked since it was published
+	h.check()
+	for _, a := range h.anomalies(pub) {
+		if a.Signal == "rule_block_spike" {
+			t.Fatalf("a steady block share fired %+v", a)
+		}
 	}
 }
 

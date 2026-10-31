@@ -283,10 +283,28 @@ func (s *Server) addEvents(ctx context.Context, tx pgx.Tx, runID int64, source s
 	if err := tx.QueryRow(ctx, "SELECT count(*), coalesce(sum(bytes), 0) FROM autopilot_run_events WHERE run_id = $1", runID).Scan(&n, &total); err != nil {
 		return err
 	}
-	for _, e := range evs {
-		total += int64(len(e.Payload))
+	// Only events not stored yet count: a batch sent again after a lost
+	// answer must not be refused for events it already stored.
+	seqs := make([]int, len(evs))
+	for i, e := range evs {
+		seqs[i] = e.Seq
 	}
-	if n+int64(len(evs)) > maxRunEvents || total > maxRunEventBytes {
+	rows, err := tx.Query(ctx, "SELECT seq FROM autopilot_run_events WHERE run_id = $1 AND source = $2 AND seq = ANY($3)", runID, source, seqs)
+	if err != nil {
+		return err
+	}
+	stored, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		return err
+	}
+	for _, e := range evs {
+		if !slices.Contains(stored, e.Seq) {
+			stored = append(stored, e.Seq)
+			n++
+			total += int64(len(e.Payload))
+		}
+	}
+	if n > maxRunEvents || total > maxRunEventBytes {
 		return errEventCap
 	}
 	for _, e := range evs {
@@ -323,6 +341,11 @@ func (s *Server) runEvents(w http.ResponseWriter, r *http.Request, _ *principal)
 	}
 	ctx := r.Context()
 	err = dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// Locked before the check: the result hashes the run's events under
+		// this lock, so a batch checked first could land after it.
+		if err := lockRun(ctx, tx, id); err != nil {
+			return err
+		}
 		var finished bool
 		err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM autopilot_run_results WHERE run_id = $1) FROM autopilot_runs WHERE id = $1", id).Scan(&finished)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -514,7 +537,7 @@ func (s *Server) caseResult(w http.ResponseWriter, r *http.Request, _ *principal
 			}
 		case attempts < maxAttempts:
 			action, details["state"] = "autopilot.case_release", "queued"
-			_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'queued', lease_until = NULL WHERE id = $1", id)
+			_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'queued', lease_until = NULL, queued_at = $2 WHERE id = $1", id, now)
 		default:
 			closedAs, details["state"] = "failed", "failed"
 			_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'failed', summary = $2, closed_at = $3, lease_until = NULL WHERE id = $1",

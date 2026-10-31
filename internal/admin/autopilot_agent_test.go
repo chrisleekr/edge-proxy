@@ -1114,6 +1114,25 @@ func TestAutopilotLease(t *testing.T) {
 			t.Fatalf("case %s after %d attempts", st, n)
 		}
 	})
+	t.Run("a case requeued an hour after it opened gets its second attempt", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		agent.seen()
+		id := pub.investigate("login", "Is someone guessing passwords?")
+		h.advance(55 * time.Minute) // waiting under cases_per_hour
+		if c := agent.claimCase(); c.CaseID != id {
+			t.Fatalf("claimed %+v", c)
+		}
+		h.advance(11 * time.Minute)
+		h.tick()
+		if st, n := caseState(t, h, id); st != "queued" || n != 1 {
+			t.Fatalf("case %s after %d attempts, want it queued again", st, n)
+		}
+		h.advance(61 * time.Minute)
+		h.tick()
+		if st, _ := caseState(t, h, id); st != "cancelled" {
+			t.Fatalf("case %s an hour after it was requeued, want cancelled", st)
+		}
+	})
 	t.Run("a result after the lease lapsed is refused and still recorded", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		c := openAndClaim(t, pub, agent)
@@ -1289,6 +1308,24 @@ func TestAutopilotNotifications(t *testing.T) {
 		h.check()
 		if st := state(h, pub, "autopilot_needs_person"); st != "firing" {
 			t.Fatalf("autopilot_needs_person %s", st)
+		}
+	})
+	t.Run("autopilot_needs_person stays firing for every such case in the hour, past 20", func(t *testing.T) {
+		h, pub, agent := setup(t)
+		pub.setAutopilot(map[string]any{"cases_per_hour": 30})
+		for range 21 {
+			c := openAndClaim(t, pub, agent)
+			status(t, agent.result(c.CaseID, resultBody(c.RunID, "unsure", usage{Input: 10}, nil, 0)), 204)
+		}
+		h.check()
+		firing := 0
+		for _, a := range h.anomalies(pub) {
+			if a.Signal == "autopilot_needs_person" && a.State == "firing" {
+				firing++
+			}
+		}
+		if firing != 21 {
+			t.Fatalf("%d cases needing a person are firing, want 21", firing)
 		}
 	})
 	t.Run("autopilot_enforced fires while a rule enforces", func(t *testing.T) {

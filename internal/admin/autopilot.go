@@ -221,8 +221,8 @@ func (s *Server) openCase(ctx context.Context, tx pgx.Tx, c caseIn, actor string
 		return 0, false, nil
 	}
 	var id int64
-	err = tx.QueryRow(ctx, `INSERT INTO autopilot_cases (kind, dedupe_key, rule, route_id, anomaly_id, question, brief, state, opened_by, created_at, ablation_of, withheld_notes)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11) ON CONFLICT (dedupe_key) WHERE state IN ('queued', 'running') DO NOTHING RETURNING id`,
+	err = tx.QueryRow(ctx, `INSERT INTO autopilot_cases (kind, dedupe_key, rule, route_id, anomaly_id, question, brief, state, opened_by, created_at, queued_at, ablation_of, withheld_notes)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $9, $10, $11) ON CONFLICT (dedupe_key) WHERE state IN ('queued', 'running') DO NOTHING RETURNING id`,
 		c.Kind, c.DedupeKey, c.Rule, c.RouteID, c.AnomalyID, c.Question, c.Brief, actor, s.now(), c.AblationOf, orEmpty(c.Withheld)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
