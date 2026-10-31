@@ -45,6 +45,13 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// LockAudit takes the lock Audit takes, for a transaction that must hold
+// it before the row locks it takes next. It is released at commit.
+func LockAudit(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", auditLock)
+	return err
+}
+
 // Audit appends e in tx, the transaction of the change it records, so no
 // change commits without its row. now is the caller's clock (admin's, which
 // tests freeze); it is read under the lock, so times follow seq.
@@ -57,7 +64,7 @@ func Audit(ctx context.Context, tx pgx.Tx, k AuditKeys, now func() time.Time, e 
 	if e.Details == nil {
 		details = []byte("{}")
 	}
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", auditLock); err != nil {
+	if err := LockAudit(ctx, tx); err != nil {
 		return err
 	}
 	var seq int64

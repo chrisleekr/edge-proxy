@@ -107,15 +107,21 @@ func serve(ctx context.Context, ui fs.FS, getenv func(string) string, log *slog.
 	if err != nil {
 		return err
 	}
-	log.Info("admin listening", "addr", l.Addr().String())
+	in, err := net.Listen("tcp", cfg.InternalAddr)
+	if err != nil {
+		_ = l.Close()
+		return err
+	}
+	log.Info("admin listening", "addr", l.Addr().String(), "internal_addr", in.Addr().String())
 	s := NewServer(cfg, db, log)
 	s.edgeDB = edgeDB
 	s.tracing = tp
 	if err := bootstrap(ctx, db, s, log); err != nil {
 		_ = l.Close()
+		_ = in.Close()
 		return fmt.Errorf("bootstrap: %w", err)
 	}
-	return s.Serve(ctx, l)
+	return s.Serve(ctx, l, in)
 }
 
 // openPool opens the pool admin requests use. With tracing on, each query

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -53,6 +54,7 @@ type routeList struct {
 	Estimated   int64             `json:"estimated_requests"`
 	Reported    int64             `json:"reported_requests"`
 	Suggestions []routeSuggestion `json:"suggestions"`
+	More        int               `json:"more"`
 }
 
 // routes flushes what admin holds and lists the routes.
@@ -133,6 +135,7 @@ func TestRoutesAreGroupedFromAccessLines(t *testing.T) {
 	if users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}"); users.Requests != 3 {
 		t.Fatalf("after a second batch, users route = %+v", users)
 	}
+	h.wantMetrics(`admin_log_lines_total{result="accepted"} 6`, `admin_log_lines_total{result="rejected"} 5`)
 }
 
 // When the edges log a sample of allowed requests, each sampled line counts
@@ -169,6 +172,48 @@ func TestSampledLinesCountForTheirShare(t *testing.T) {
 	status(t, h.shipper().post(access("GET", "api.example.com", "/health", "edge.sample_rate", 0.3)), http.StatusAccepted)
 	if health := find(h.routes(pub), "GET", "api.example.com", "/health"); health.Requests != 7 || health.Estimated != 7 {
 		t.Fatalf("rounded down, health route = %+v", health)
+	}
+}
+
+// A route's detail lists its answers by status code, so an operator sees
+// a 502 apart from a 503. Sampled lines count for their share, as in Status.
+func TestRouteDetailCountsStatusCodes(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(
+		access("GET", "api.example.com", "/users/1", "edge.sample_rate", 0.5),
+		access("GET", "api.example.com", "/users/2", "http.response.status_code", 502, "edge.decision", "upstream_error"),
+		access("GET", "api.example.com", "/users/3", "http.response.status_code", 503),
+		access("GET", "api.example.com", "/users/4", "http.response.status_code", 503),
+	), http.StatusAccepted)
+	users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
+	detail := decode[struct {
+		StatusCodes map[int]int64 `json:"status_codes"`
+	}](t, pub.do("GET", fmt.Sprint("/api/observed-routes/", users.ID), nil))
+	if want := map[int]int64{200: 2, 502: 1, 503: 2}; !maps.Equal(detail.StatusCodes, want) {
+		t.Fatalf("status codes %v, want %v", detail.StatusCodes, want)
+	}
+}
+
+// A route's detail lists the edge's upstream failures by cause, so an
+// operator sees a name that stopped resolving apart from a stopped upstream.
+func TestRouteDetailCountsUpstreamErrorKinds(t *testing.T) {
+	h, pub := published(t)
+	failed := func(path, kind string) string {
+		return access("GET", "api.example.com", path, "http.response.status_code", 502, "edge.decision", "upstream_error",
+			"edge.upstream_answered", false, "edge.upstream_error", "dial tcp: connect: failure", "edge.upstream_error_kind", kind)
+	}
+	status(t, h.shipper().post(
+		access("GET", "api.example.com", "/users/1"),
+		failed("/users/2", "dns"),
+		failed("/users/3", "refused"),
+		failed("/users/4", "refused"),
+	), http.StatusAccepted)
+	users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
+	detail := decode[struct {
+		UpstreamErrors map[string]int64 `json:"upstream_errors"`
+	}](t, pub.do("GET", fmt.Sprint("/api/observed-routes/", users.ID), nil))
+	if want := map[string]int64{"dns": 1, "refused": 2}; !maps.Equal(detail.UpstreamErrors, want) {
+		t.Fatalf("upstream errors %v, want %v", detail.UpstreamErrors, want)
 	}
 }
 
@@ -324,6 +369,26 @@ func TestDeletedRoutesAreCollectedAgain(t *testing.T) {
 	}
 }
 
+// limit keeps the busiest routes; the totals and suggestions still cover
+// the routes it leaves out.
+func TestLimitKeepsTheBusiestRoutes(t *testing.T) {
+	h, pub := published(t)
+	lines := []string{access("GET", "api.example.com", "/home"), access("GET", "api.example.com", "/home")}
+	for i := range minSiblings {
+		lines = append(lines, access("GET", "api.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i)))
+	}
+	status(t, h.shipper().post(lines...), http.StatusAccepted)
+	all := h.routes(pub)
+	l := decode[routeList](t, pub.do("GET", "/api/observed-routes?limit=1", nil))
+	if len(l.Routes) != 1 || l.Routes[0].Template != "/home" || l.More != minSiblings ||
+		l.Logged != all.Logged || l.Estimated != all.Estimated || !slices.Equal(l.Suggestions, all.Suggestions) || len(l.Suggestions) != 1 {
+		t.Fatalf("limit 1 = %+v, all = %+v", l, all)
+	}
+	for _, bad := range []string{"0", "-1", "abc"} {
+		status(t, pub.do("GET", "/api/observed-routes?limit="+bad, nil), http.StatusBadRequest)
+	}
+}
+
 // Many sibling routes get a suggested pattern; creating it merges their
 // history into one route, and later traffic is grouped under it.
 func TestPatternsGroupSiblingRoutes(t *testing.T) {
@@ -333,6 +398,9 @@ func TestPatternsGroupSiblingRoutes(t *testing.T) {
 	for i := range minSiblings {
 		lines = append(lines, access("GET", "api.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i)))
 	}
+	lines = append(lines, access("GET", "api.example.com", "/blog/post-a", "http.response.status_code", 404),
+		access("GET", "api.example.com", "/blog/post-b", "http.response.status_code", 502, "edge.decision", "upstream_error",
+			"edge.upstream_answered", false, "edge.upstream_error", "dial tcp: connect: failure", "edge.upstream_error_kind", "refused"))
 	status(t, sh.post(lines...), http.StatusAccepted)
 	l := h.routes(pub)
 	if len(l.Suggestions) != 1 || l.Suggestions[0] != (routeSuggestion{Host: "api.example.com", Pattern: "/blog/*", Routes: minSiblings}) {
@@ -342,19 +410,37 @@ func TestPatternsGroupSiblingRoutes(t *testing.T) {
 	status(t, pub.do("POST", "/api/route-patterns", map[string]string{"host": "api.example.com", "pattern": "/blog/x*"}), http.StatusUnprocessableEntity)
 	status(t, pub.do("POST", "/api/route-patterns", map[string]string{"host": "api.example.com", "pattern": "/blog/*"}), http.StatusCreated)
 	l = h.routes(pub)
-	if blog := find(l, "GET", "api.example.com", "/blog/{*}"); len(l.Routes) != 1 || blog.Requests != minSiblings || len(l.Suggestions) != 0 {
+	blog := find(l, "GET", "api.example.com", "/blog/{*}")
+	if len(l.Routes) != 1 || blog.Requests != minSiblings+2 || len(l.Suggestions) != 0 {
 		t.Fatalf("after grouping, routes = %+v", l)
 	}
+	type routeDetail struct {
+		StatusCodes    map[int]int64    `json:"status_codes"`
+		UpstreamErrors map[string]int64 `json:"upstream_errors"`
+	}
+	// The merged routes' answers by code and failure causes move with them.
+	detail := decode[routeDetail](t, pub.do("GET", fmt.Sprint("/api/observed-routes/", blog.ID), nil))
+	if want := map[int]int64{200: minSiblings, 404: 1, 502: 1}; !maps.Equal(detail.StatusCodes, want) {
+		t.Fatalf("after grouping, status codes %v, want %v", detail.StatusCodes, want)
+	}
+	if want := map[string]int64{"refused": 1}; !maps.Equal(detail.UpstreamErrors, want) {
+		t.Fatalf("after grouping, upstream errors %v, want %v", detail.UpstreamErrors, want)
+	}
 	status(t, sh.post(access("GET", "api.example.com", "/blog/new-post")), http.StatusAccepted)
-	if blog := find(h.routes(pub), "GET", "api.example.com", "/blog/{*}"); blog.Requests != minSiblings+1 {
+	if blog := find(h.routes(pub), "GET", "api.example.com", "/blog/{*}"); blog.Requests != minSiblings+3 {
 		t.Fatalf("new post not grouped: %+v", blog)
+	}
+	// A later flush into the grouped route's hour adds to its answers by code.
+	detail = decode[routeDetail](t, pub.do("GET", fmt.Sprint("/api/observed-routes/", blog.ID), nil))
+	if want := map[int]int64{200: minSiblings + 1, 404: 1, 502: 1}; !maps.Equal(detail.StatusCodes, want) {
+		t.Fatalf("after a later flush, status codes %v, want %v", detail.StatusCodes, want)
 	}
 
 	// Lines held when a pattern is created are grouped by it at the flush,
 	// so the merged routes don't come back.
 	status(t, sh.post(access("GET", "api.example.com", "/blog/held-post")), http.StatusAccepted)
 	status(t, pub.do("POST", "/api/route-patterns", map[string]string{"host": "", "pattern": "/docs/*"}), http.StatusCreated)
-	if l := h.routes(pub); len(l.Routes) != 1 || find(l, "GET", "api.example.com", "/blog/{*}").Requests != minSiblings+2 {
+	if l := h.routes(pub); len(l.Routes) != 1 || find(l, "GET", "api.example.com", "/blog/{*}").Requests != minSiblings+4 {
 		t.Fatalf("held lines = %+v", l)
 	}
 
@@ -505,10 +591,13 @@ func TestIngestLimits(t *testing.T) {
 	if ok := find(l, "GET", "api.example.com", "/ok"); len(l.Routes) != 1 || l.NotGrouped != 1 || ok.QueryShapes[otherKey] != 1 {
 		t.Fatalf("routes = %+v", l)
 	}
+	h.wantMetrics("admin_log_batches_busy_total 0")
 	for range ingestSlots {
 		h.s.ingest <- struct{}{}
 	}
 	status(t, sh.post(access("GET", "api.example.com", "/")), http.StatusTooManyRequests)
+	// A refused batch is resent whole, so only the refusal counts, not its lines.
+	h.wantMetrics("admin_log_batches_busy_total 1", `admin_log_lines_total{result="accepted"} 3`)
 }
 
 // Route hours older than retention are dropped, then routes with none left.

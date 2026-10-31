@@ -22,5 +22,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags grpcnotrace -
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:516757106de35205efb70b91ba03f6f1298424a0678c603255cf2852a7000087
 COPY --from=build /out/admin /admin
+# Only the API port: docker run -P publishes every exposed port, and :9091
+# serves /metrics with no authentication.
 EXPOSE 8081
 ENTRYPOINT ["/admin"]

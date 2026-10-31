@@ -3,6 +3,9 @@ package admin
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -26,6 +29,12 @@ func TestDraftLifecycle(t *testing.T) {
 	if first.Revision != 0 || len(first.Config.Global.Responses) != 9 || first.Config.RateLimitRules != nil {
 		t.Fatalf("first draft %+v", first)
 	}
+	t.Run("the draft lists no autopilot rules before any are published", func(t *testing.T) {
+		raw := decode[map[string]json.RawMessage](t, ed.do("GET", "/api/draft", nil))
+		if string(raw["overlay"]) != "[]" || string(raw["adopted"]) != "[]" {
+			t.Fatalf("overlay %s, adopted %s", raw["overlay"], raw["adopted"])
+		}
+	})
 	status(t, ed.save("", testConfig()), 428)
 	resp := ed.save(`"0"`, testConfig(), adminTest)
 	if resp.Header.Get("ETag") != `"1"` {
@@ -146,6 +155,46 @@ func TestPublish(t *testing.T) {
 	})
 	if got := h.actions(); !slices.Contains(got, "config.publish version 1") || !slices.Contains(got, "config.publish version 2") {
 		t.Fatalf("audit %v", got)
+	}
+}
+
+// A publish that turns a kill switch on or off says so in its audit row,
+// so the activity page and the traffic chart can mark it; one that leaves
+// it alone does not.
+func TestPublishAuditsKillSwitchChange(t *testing.T) {
+	_, pub := published(t) // version 1, kill switch off
+	c := testConfig()
+	c.KillSwitch.RateLimit = true
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("turn rate limiting off"), 201)
+	c.RateLimitRules[0].Limit = 5
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("tighten login"), 201)
+	status(t, pub.do("POST", "/api/versions/1/revert", map[string]string{"reason": "rate limiting back on"}), 201)
+	events := decode[[]struct {
+		Action, Target string
+		Details        map[string]any
+	}](t, pub.do("GET", "/api/audit", nil))
+	got := map[string]any{}
+	for _, e := range events {
+		if e.Action == "config.publish" || e.Action == "config.revert" {
+			got[e.Target] = e.Details["kill_switch"]
+		}
+	}
+	for _, tc := range []struct {
+		name, target string
+		want         any
+	}{
+		{"the first version with the switch off says nothing", "version 1", nil},
+		{"turning rate limiting off records the new switch", "version 2", map[string]any{"rate_limit": true, "auth": false}},
+		{"a publish that leaves the switch alone says nothing", "version 3", nil},
+		{"a revert that turns it back records the new switch", "version 4", map[string]any{"rate_limit": false, "auth": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if fmt.Sprint(got[tc.target]) != fmt.Sprint(tc.want) {
+				t.Fatalf("%s kill_switch = %v, want %v", tc.target, got[tc.target], tc.want)
+			}
+		})
 	}
 }
 
@@ -270,6 +319,217 @@ func TestRevert(t *testing.T) {
 	})
 }
 
+// A revert started after publish checked the draft's base must wait for
+// that publish, and then land on top of it. Were the revert to commit in
+// between, publishing the draft would silently undo it.
+func TestPublishRechecksBaseUnderLock(t *testing.T) {
+	h, pub := published(t) // version 1
+	c := testConfig()
+	c.RateLimitRules[0].Limit = 5
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("v2 too tight"), 201)
+	c.RateLimitRules[0].Limit = 3
+	status(t, pub.save(pub.revision(), c, adminTest), 200) // a draft based on version 2
+
+	reverted := make(chan reply, 1)
+	// The hook runs on the server's goroutine, where t.Fatal may not; the
+	// test reads hookErr once publishDraft returns.
+	var hookErr error
+	h.s.afterBaseCheck = func() {
+		go func() {
+			reverted <- pub.send("POST", "/api/versions/1/revert", map[string]string{"reason": "Login limit locked users out"})
+		}()
+		// Wait until the revert either finished, which the publish lock
+		// should prevent, or is waiting on that lock.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(reverted) > 0 {
+				return
+			}
+			var waiting bool
+			if err := h.db.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+				AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))`).Scan(&waiting); err != nil {
+				hookErr = err
+				return
+			} else if waiting {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		hookErr = errors.New("the revert never waited on the publish lock")
+	}
+	resp := pub.publishDraft("tighter still")
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	if b := body(resp); resp.StatusCode != 201 {
+		t.Fatalf("the draft's publish got %d %s", resp.StatusCode, b)
+	}
+	if got := <-reverted; got.err != nil || got.code != 201 {
+		t.Fatalf("the revert got %d %v", got.code, got.err)
+	}
+	list := decode[[]versionRow](t, pub.do("GET", "/api/versions", nil))
+	if len(list) != 4 || list[0].Source != "revert" || list[0].Status != "active" || list[1].Source != "manual" || list[1].Message != "tighter still" {
+		t.Fatalf("versions %+v", list)
+	}
+}
+
+// reply is a request's status, or the error that stopped it.
+type reply struct {
+	code int
+	err  error
+}
+
+// send is do for a goroutine other than the test's: it reports a failed
+// request instead of calling t.Fatal, which only the test goroutine may.
+func (c *client) send(method, path string, in any, headers ...string) reply {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return reply{err: err}
+	}
+	req, err := http.NewRequest(method, c.h.srv.URL+path, bytes.NewReader(b))
+	if err != nil {
+		return reply{err: err}
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	resp, err := c.c.Do(req)
+	if err != nil {
+		return reply{err: err}
+	}
+	_ = resp.Body.Close()
+	return reply{code: resp.StatusCode}
+}
+
+// advisoryWaiters is how many transactions wait on an advisory lock.
+func advisoryWaiters(t *testing.T, h *harness) int {
+	t.Helper()
+	var n int
+	if err := h.db.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+		AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// A first save, with no draft row to lock, waits for a publish in
+// progress, so the active version it records as its base can't be
+// superseded before it commits. The publish here is refused and rolls
+// back: one that commits creates the draft, and the save is then stale.
+func TestFirstSaveWaitsForPublish(t *testing.T) {
+	h := newHarness(t) // nothing published, so no draft row
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	ctx := t.Context()
+	publishing, err := h.db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = publishing.Rollback(ctx) }()
+	if _, err := publishing.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock); err != nil {
+		t.Fatal(err)
+	}
+	saved := make(chan reply, 1)
+	go func() {
+		saved <- pub.send("PUT", "/api/draft", map[string]any{"config": testConfig(), "tests": []ConfigTest{}}, "If-Match", `"0"`)
+	}()
+	waitFor(t, func() bool { return len(saved) > 0 || advisoryWaiters(t, h) == 1 })
+	if len(saved) > 0 {
+		t.Fatalf("the save finished during the publish: %+v", <-saved)
+	}
+	if err := publishing.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-saved; got.err != nil || got.code != 200 {
+		t.Fatalf("the save got %d %v", got.code, got.err)
+	}
+}
+
+// A first save that waited for the publish lock while an import or revert
+// created the draft is stale. It must not then wait for the draft row:
+// autopilot's publish locks that row once it is committed, then waits for
+// the publish lock this save holds.
+func TestFirstSaveRefusesDraftCreatedWhileWaiting(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	ctx := t.Context()
+	// The import holds the publish lock at session level, so it outlasts the
+	// commit that makes the draft visible. That splits the commit, letting
+	// autopilot lock the new row before the save, queued first, takes the
+	// publish lock: an order a real commit allows, made deterministic.
+	conn, err := h.db.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	defer func() { _, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock_all()") }()
+	importing, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = importing.Rollback(ctx) }()
+	if _, err := importing.Exec(ctx, "SELECT pg_advisory_lock($1)", publishLock); err != nil {
+		t.Fatal(err)
+	}
+	saved := make(chan reply, 1)
+	go func() {
+		saved <- pub.send("PUT", "/api/draft", map[string]any{"config": testConfig(), "tests": []ConfigTest{}}, "If-Match", `"0"`)
+	}()
+	waitFor(t, func() bool { return len(saved) > 0 || advisoryWaiters(t, h) == 1 })
+	// The import starts the draft, as publishTx does, and commits.
+	if _, err := importing.Exec(ctx, "INSERT INTO config_draft (config, updated_by) VALUES ($1, 'user:importer')", testConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if err := importing.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	other, err := h.db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Rollback(ctx) }()
+	if _, err := other.Exec(ctx, "SELECT 1 FROM config_draft FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	locked := make(chan error, 1)
+	go func() {
+		_, err := other.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock)
+		locked <- err
+	}()
+	waitFor(t, func() bool { return advisoryWaiters(t, h) == 2 })
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", publishLock); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-saved; got.err != nil || got.code != 412 {
+		t.Fatalf("the save got %d %v", got.code, got.err)
+	}
+	if err := <-locked; err != nil {
+		t.Fatalf("the other publish failed: %v", err)
+	}
+}
+
+// A first save is stale once an import or revert has published since the
+// draft was read. Taken as current, it would record the new version as its
+// base, and the next publish would quietly put back the rules read before.
+func TestFirstSaveAfterImportIsStale(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "publisher")
+	pub := h.signedIn("pub")
+	if got := pub.revision(); got != `"0"` {
+		t.Fatalf("revision %s, want no draft yet", got)
+	}
+	status(t, pub.do("POST", "/api/import", map[string]any{"config": testConfig(), "tests": []ConfigTest{adminTest}, "message": "Promote from staging"}), 201)
+	status(t, pub.save(`"0"`, snapshot.Starter()), 412)
+	if d := pub.draft(); d.Revision != 1 || d.BaseVersion == nil || *d.BaseVersion != 1 || !slices.Equal(rateLimitIDs(d.Config), []string{"login"}) {
+		t.Fatalf("draft revision %d based on %v, rules %v", d.Revision, d.BaseVersion, rateLimitIDs(d.Config))
+	}
+}
+
 func TestCopyToDraftAndHistory(t *testing.T) {
 	h := newHarness(t)
 	h.user("pub", "publisher")
@@ -346,17 +606,23 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 		Fields []struct {
 			Name      string
 			Available bool
+			Exact     bool
 			Phases    []string
 		}
 		Operators []op
 	}](t, ed.do("GET", "/api/expr/schema", nil))
-	avail := map[string]bool{}
+	avail, exact := map[string]bool{}, map[string]bool{}
 	for _, f := range schema.Fields {
-		avail[f.Name] = f.Available
+		avail[f.Name], exact[f.Name] = f.Available, f.Exact
 	}
-	// The cloudfront preset has country but not continent.
-	if !avail["ip.src.country"] || avail["ip.src.continent"] || slices.ContainsFunc(schema.Operators, func(o op) bool { return o.Name == "matches" }) {
+	// The cloudfront preset has country but not continent, and without
+	// VERIFIED_BOT_SOURCES the verified crawler flag is unavailable.
+	if !avail["ip.src.country"] || avail["ip.src.continent"] || avail["client.verified_bot"] || slices.ContainsFunc(schema.Operators, func(o op) bool { return o.Name == "matches" }) {
 		t.Fatalf("schema availability %v", avail)
+	}
+	// Signal names are matched whole, so the UI offers only exact operators.
+	if !exact["client.signals"] {
+		t.Fatalf("client.signals is not exact: %v", exact)
 	}
 	// The UI picks operators by these type names.
 	if gt := schema.Operators[slices.IndexFunc(schema.Operators, func(o op) bool { return o.Name == "gt" })]; !slices.Equal(gt.Types, []string{"int"}) {
@@ -376,10 +642,13 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 				Name   string
 				Status int
 			} `json:"response_kinds"`
-			HeaderOps     []string `json:"header_ops"`
-			ContentTypes  []string `json:"content_types"`
-			JWTAlgorithms []string `json:"jwt_algorithms"`
-			Methods       []string
+			HeaderOps       []string         `json:"header_ops"`
+			ContentTypes    []string         `json:"content_types"`
+			JWTAlgorithms   []string         `json:"jwt_algorithms"`
+			BlockModes      []string         `json:"block_modes"`
+			DistinctOfKinds []string         `json:"distinct_of_kinds"`
+			Signals         []expr.SignalDef `json:"signals"`
+			Methods         []string
 		}
 	}](t, ed.do("GET", "/api/expr/schema", nil)).Rules
 	header := choices.KeyKinds[slices.IndexFunc(choices.KeyKinds, func(k struct {
@@ -393,7 +662,9 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 			Name   string
 			Status int
 		}{"rate_limited", 429}) || !slices.Equal(choices.HeaderOps, snapshot.HeaderOps) ||
-		!slices.Equal(choices.ContentTypes, snapshot.ContentTypes) || !slices.Equal(choices.JWTAlgorithms, snapshot.JWTAlgorithms) || !slices.Contains(choices.Methods, "POST") {
+		!slices.Equal(choices.ContentTypes, snapshot.ContentTypes) || !slices.Equal(choices.JWTAlgorithms, snapshot.JWTAlgorithms) || !slices.Contains(choices.Methods, "POST") ||
+		!slices.Equal(choices.BlockModes, snapshot.BlockModes) || !slices.Equal(choices.DistinctOfKinds, snapshot.DistinctOfKinds) ||
+		!slices.EqualFunc(choices.Signals, expr.Signals, func(a, b expr.SignalDef) bool { return a.Name == b.Name && slices.Equal(a.Needs, b.Needs) }) {
 		t.Fatalf("rule choices %+v", choices)
 	}
 
@@ -455,14 +726,14 @@ func TestExportLoadsOnAnEdgeAndImports(t *testing.T) {
 	if v := decode[versionRow](t, p.do("GET", "/api/versions/1", nil)); v.Source != "import" {
 		t.Fatalf("source %s", v.Source)
 	}
-	// With no draft yet, editing starts from what is active.
+	// The import starts the draft from what it published.
 	d := decode[struct {
 		Config      snapshot.Config
 		Tests       []ConfigTest
 		Revision    int64
 		BaseVersion int64 `json:"base_version"`
 	}](t, p.do("GET", "/api/draft", nil))
-	if d.Revision != 0 || d.BaseVersion != 1 || len(d.Config.RateLimitRules) != 1 || len(d.Tests) != 1 {
+	if d.Revision != 1 || d.BaseVersion != 1 || len(d.Config.RateLimitRules) != 1 || len(d.Tests) != 1 {
 		t.Fatalf("draft %+v", d)
 	}
 	if !slices.Contains(h.actions(), "config.export version 1") {
@@ -552,4 +823,46 @@ func TestDraftCheck(t *testing.T) {
 	if d := decode[struct{ Revision int64 }](t, ed.do("GET", "/api/draft", nil)); d.Revision != 1 {
 		t.Fatalf("checking saved the draft: revision %d", d.Revision)
 	}
+}
+
+// Each new version counts under how it was made, so a dashboard shows
+// publish activity by source. A publish refused for a stale draft makes no
+// version and counts nothing.
+func TestPublishesAreCounted(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "publisher")
+	pub := h.signedIn("pub")
+	status(t, pub.save(`"0"`, testConfig(), adminTest), 200)
+	counts := func(manual, revert, imported int) []string {
+		return []string{
+			fmt.Sprintf(`admin_publishes_total{source="manual"} %d`, manual),
+			fmt.Sprintf(`admin_publishes_total{source="revert"} %d`, revert),
+			`admin_publishes_total{source="guard_rollback"} 0`,
+			fmt.Sprintf(`admin_publishes_total{source="import"} %d`, imported),
+		}
+	}
+	want := func(when string, lines []string) {
+		t.Helper()
+		m := h.metrics()
+		for _, l := range lines {
+			if !strings.Contains(m, l+"\n") {
+				t.Errorf("%s: metrics missing %q", when, l)
+			}
+		}
+	}
+
+	status(t, pub.do("POST", "/api/publish", map[string]string{"message": "stale"}, "If-Match", `"0"`), 412)
+	want("after a stale publish", counts(0, 0, 0))
+	status(t, pub.publishDraft("v1"), 201)
+	c := clone(testConfig())
+	c.RateLimitRules[0].Limit = 5
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("v2 tighter login limit"), 201)
+	want("after two publishes", counts(2, 0, 0))
+	status(t, pub.do("POST", "/api/versions/1/revert", map[string]string{"reason": "Login limit locked users out"}), 201)
+	want("after a revert", counts(2, 1, 0))
+	imported := clone(testConfig())
+	imported.RateLimitRules[0].Limit = 20
+	status(t, pub.do("POST", "/api/import", map[string]any{"config": imported, "tests": []ConfigTest{adminTest}, "message": "Promote from staging"}), 201)
+	want("after an import", counts(2, 1, 1))
 }

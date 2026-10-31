@@ -41,7 +41,7 @@ func TestLoginSetsAHardenedSessionCookie(t *testing.T) {
 		Username    string
 		Permissions []string
 	}](t, c.do("GET", "/api/auth/me", nil))
-	if me.Username != "alice" || !slices.Equal(me.Permissions, []string{"audit.read", "config.read", "stats.read"}) {
+	if me.Username != "alice" || !slices.Equal(me.Permissions, []string{"audit.read", "autopilot.read", "config.read", "stats.read"}) {
 		t.Fatalf("me = %+v", me)
 	}
 	// Only the hash of the session ID is stored.
@@ -52,6 +52,41 @@ func TestLoginSetsAHardenedSessionCookie(t *testing.T) {
 	}
 	if got := h.actions(); !slices.Equal(got, []string{"user.create alice", "auth.login.success alice"}) {
 		t.Fatalf("audit %v", got)
+	}
+}
+
+// The UI links Stats, Dashboard, route detail and anomaly rows to the
+// deployment's log store with the LOG_SEARCH_URL template, which it reads
+// once with the signed-in user. Without it there is no template, so the UI
+// shows no links. Only stats pages use it, so a principal that can't read
+// stats doesn't get it.
+func TestSignedInUserGetsTheLogSearchTemplate(t *testing.T) {
+	const tmpl = "https://logs.example.com/search?q=status%3A{status}%20host%3A{host}&from={from_ms}&to={to_ms}"
+	for _, c := range []struct {
+		name   string
+		set    map[string]string
+		scopes []string // a user token with these scopes, or a session when nil
+		want   string
+	}{
+		{"a stats reader gets the template", map[string]string{"LOG_SEARCH_URL": tmpl}, nil, tmpl},
+		{"no template when it is unset", nil, nil, ""},
+		{"a token without stats.read gets no template", map[string]string{"LOG_SEARCH_URL": tmpl}, []string{"config.read"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarnessWith(t, c.set)
+			h.user("alice", "admin")
+			cl := h.signedIn("alice")
+			if c.scopes != nil {
+				tok := decode[map[string]string](t, cl.do("POST", "/api/tokens", map[string]any{"name": "ci", "kind": "user", "scopes": c.scopes, "expires_in": "720h"}))
+				cl = h.client()
+				cl.token = tok["token"]
+			}
+			me := decode[map[string]any](t, cl.do("GET", "/api/auth/me", nil))
+			got, ok := me["log_search_url"]
+			if c.want != "" && got != c.want || c.want == "" && ok {
+				t.Fatalf("log_search_url = %v (present %t), want %q", got, ok, c.want)
+			}
+		})
 	}
 }
 
@@ -579,7 +614,7 @@ func TestListRoles(t *testing.T) {
 		Name        string
 		Permissions []string
 	}](t, h.signedIn("vera").do("GET", "/api/roles", nil))
-	if len(roles) != 4 || roles[0].Name != "admin" || !slices.Contains(roles[0].Permissions, "users.manage") || roles[3].Name != "viewer" || len(roles[3].Permissions) != 3 {
+	if len(roles) != 4 || roles[0].Name != "admin" || !slices.Contains(roles[0].Permissions, "users.manage") || roles[3].Name != "viewer" || len(roles[3].Permissions) != 4 {
 		t.Fatalf("roles %+v", roles)
 	}
 	status(t, h.client().do("GET", "/api/roles", nil), 401)
