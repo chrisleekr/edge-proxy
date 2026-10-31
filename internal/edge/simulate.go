@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"slices"
+	"time"
 
+	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
@@ -21,6 +24,12 @@ type SimRequest struct {
 	Country string
 	ASN     int64
 	SSL     bool
+	// JA4, JA3 and HTTPVersion are what the CDN would send; malformed
+	// fingerprints and unknown versions are absent, as live.
+	JA4, JA3    string
+	HTTPVersion string
+	// VerifiedBot puts the IP in the verified crawler ranges.
+	VerifiedBot bool
 	// JWTClaims stand in for a verified token's claims.
 	JWTClaims map[string][]string
 }
@@ -58,6 +67,7 @@ type SimSettings struct {
 	BodyLimit        int64             `json:"body_limit"`
 	UpstreamTimeout  snapshot.Duration `json:"upstream_timeout"`
 	RateLimitHeaders bool              `json:"ratelimit_headers"`
+	Block            string            `json:"block"`
 }
 
 // Simulate runs the edge's own path and method checks, config phase, CORS
@@ -86,9 +96,25 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	if err != nil {
 		return SimResult{Rejected: reasonNames[reasonPath]}, nil
 	}
-	st := &reqState{client: client{ip: clean(ip), country: isoCode(req.Country), ssl: req.SSL, asn: req.ASN, hasASN: req.ASN > 0}, requestID: "simulated"}
+	cl := client{ip: clean(ip), country: isoCode(req.Country), ssl: req.SSL, asn: req.ASN, hasASN: req.ASN > 0, version: httpVersion(req.HTTPVersion)}
+	// As in identify: with an ssl source, a fingerprint on a plain request is
+	// absent, since only TLS has one.
+	if req.SSL || !slices.Contains(c.Deployment.ViewerFields, "ssl") {
+		if expr.ValidJA4(req.JA4) {
+			cl.ja4 = req.JA4
+		}
+		if expr.ValidJA3(req.JA3) {
+			cl.ja3 = req.JA3
+		}
+	}
+	// Rule expiry is judged at the time of the simulation.
+	st := &reqState{client: cl, requestID: "simulated", start: time.Now()}
 	st.fields = newFields(r, &st.client, p)
 	f := &st.fields
+	if req.VerifiedBot {
+		bots := expr.NewIPSet([]netip.Prefix{netip.PrefixFrom(cl.ip, cl.ip.BitLen())})
+		f.bots = &bots
+	}
 	set, matched := resolve(c, defaults(c), f, nil)
 	if set.locale {
 		f.loc = newLocaleResolver(c)
@@ -100,12 +126,16 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	res.Settings = SimSettings{
 		AuthMode: set.authMode, Accepted: set.accepted, CORSPolicy: set.cors, Locale: set.locale,
 		Responses: map[string]string{}, BodyLimit: set.bodyLimit,
-		UpstreamTimeout: snapshot.Duration(set.upstreamTimeout), RateLimitHeaders: set.rateLimitHeaders,
+		UpstreamTimeout: snapshot.Duration(set.upstreamTimeout), RateLimitHeaders: set.rateLimitHeaders, Block: set.block,
 	}
 	for k, name := range set.responses {
 		res.Settings.Responses[kindNames[k]] = name
 	}
-	// Steps 6 to 9 in serve's order, stopping where live traffic stops.
+	// Steps 4 to 9 in serve's order, stopping where live traffic stops.
+	if set.block == "block" {
+		res.Rejected = reasonNames[reasonBlocked]
+		return res, nil
+	}
 	if set.cors != "" && isPreflight(r) {
 		res.Preflight = true
 		return res, nil

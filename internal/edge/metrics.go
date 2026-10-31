@@ -30,8 +30,10 @@ const (
 	reasonUpstreamError
 	reasonUpstreamTLS
 	reasonBodyTimeout
+	reasonBodyInvalid
 	reasonClientGone
 	reasonPanic
+	reasonBlocked
 	numReasons
 )
 
@@ -39,7 +41,7 @@ var reasonNames = [numReasons]string{
 	"overloaded", "streams_overloaded", "untrusted_peer", "ingress_secret",
 	"client_ip", "path", "method", "no_snapshot", "auth", "backstop", "rate_limited", "rate_limit_key",
 	"rate_limit_unavailable",
-	"payload_too_large", "upstream_timeout", "upstream_error", "upstream_tls", "body_timeout", "client_gone", "panic",
+	"payload_too_large", "upstream_timeout", "upstream_error", "upstream_tls", "body_timeout", "body_invalid", "client_gone", "panic", "blocked",
 }
 
 // metrics are process-wide counters, exposed on /metrics in Prometheus text
@@ -48,8 +50,12 @@ type metrics struct {
 	// tracing is nil when tracing is off; its counters then read 0.
 	tracing *tracing.Provider
 
-	requests [6]atomic.Uint64 // by status class; index 0 is "client left before a response"
-	rejected [numReasons]atomic.Uint64
+	// codes counts finished requests by origin and status slot, as
+	// versionStats does: index 0 of each origin is "client left before a
+	// response". Classes are derived from it.
+	codes          [2][maxCodeSlot + 1]atomic.Uint64
+	upstreamErrors [len(UpstreamCauses)]atomic.Uint64
+	rejected       [numReasons]atomic.Uint64
 
 	inflight, streams atomic.Int64
 
@@ -75,13 +81,38 @@ type metrics struct {
 func (m *metrics) writeTo(w io.Writer) {
 	// A scrape that disconnects mid-write has nothing to recover.
 	p := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format, args...) }
+	// Read each counter once, so classes and codes agree within a scrape.
+	var codes [2][maxCodeSlot + 1]uint64
+	var classes [6]uint64
+	for origin := range m.codes {
+		for slot := range m.codes[origin] {
+			n := m.codes[origin][slot].Load()
+			codes[origin][slot] = n
+			// Slot 600, any code above 599, counts as 5xx as in reports.
+			classes[min(slot/100, 5)] += n
+		}
+	}
 	p("# TYPE edge_requests_total counter\n")
-	for i := range m.requests {
+	for i, n := range classes {
 		class := "none"
 		if i > 0 {
 			class = fmt.Sprintf("%dxx", i)
 		}
-		p("edge_requests_total{class=%q} %d\n", class, m.requests[i].Load())
+		p("edge_requests_total{class=%q} %d\n", class, n)
+	}
+	p("# TYPE edge_responses_total counter\n")
+	for origin, name := range [...]string{"edge", "upstream"} {
+		for slot, n := range codes[origin] {
+			// The edge's own 502, 503 and 504 always have a series, so rate()
+			// sees the first one; other codes stay sparse.
+			if n > 0 || origin == 0 && slot >= 502 && slot <= 504 {
+				p("edge_responses_total{origin=%q,code=\"%d\"} %d\n", name, slot, n)
+			}
+		}
+	}
+	p("# TYPE edge_upstream_errors_total counter\n")
+	for i := range m.upstreamErrors {
+		p("edge_upstream_errors_total{cause=%q} %d\n", UpstreamCauses[i], m.upstreamErrors[i].Load())
 	}
 	p("# TYPE edge_rejected_total counter\n")
 	for i := range m.rejected {

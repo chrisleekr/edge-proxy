@@ -22,6 +22,8 @@ func FuzzBuilderAST(f *testing.F) {
 		`{"combinator":"and","rules":[{"field":"http.request.uri.path","operator":"wildcard","value":"/A/*\\*"},{"combinator":"or","rules":[{"field":"ssl","operator":"is_true"}]}]}`,
 		`{"field":"ip.src.asnum","operator":"ge","value":"64500"}`,
 		`{"field":"http.user_agent","operator":"matches","value":"^curl/"}`,
+		`{"field":"client.signals","operator":"in","value":["ua_tool","browser_tls_mismatch"]}`,
+		`{"field":"tls.client.ja4","operator":"eq","value":"t13d1516h2_8daaf6152771_02713d6af862"}`,
 	} {
 		f.Add([]byte(s), "/A/b", "10.1.2.3")
 	}
@@ -158,4 +160,31 @@ func linearContains(item string, a netip.Addr) bool {
 		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 	}
 	return p.Contains(a)
+}
+
+// ja4Pattern is the JA4 grammar as a regular expression: obviously right,
+// too slow and allocating for the request path.
+var ja4Pattern = regexp.MustCompile(`^[tqd](1[0-3]|s[23]|d[1-3]|00)[di][0-9]{4}[0-9A-Za-z]{2}_[0-9a-f]{12}_[0-9a-f]{12}$`)
+
+var ja3Pattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// The hand-written fingerprint checks accept exactly what the grammar's
+// regular expressions accept, for any header value a CDN or client sends.
+func FuzzJA4(f *testing.F) {
+	for _, s := range []string{"t13d1516h2_8daaf6152771_02713d6af862", "q13i0310h3_55b375c5d22e_cd85d2d88918", "d00d0000000_000000000000_000000000000",
+		"t12d1209h1_8daaf6152771_02713d6af862", "ts3d1516h2_8daaf6152771_02713d6af862", "t14d1516h2_8daaf6152771_02713d6af862",
+		"e7d705a3286e19ea42f587b344ee6865", "", "t13d1516h2_8DAAF6152771_02713d6af862", "t13d1516h2",
+		// One malformed part each: protocol, version, SNI, counts, ALPN.
+		"x13d1516h2_8daaf6152771_02713d6af862", "t19d1516h2_8daaf6152771_02713d6af862", "ts4d1516h2_8daaf6152771_02713d6af862", "td4d1516h2_8daaf6152771_02713d6af862", "t01d1516h2_8daaf6152771_02713d6af862",
+		"tx3d1516h2_8daaf6152771_02713d6af862", "t13x1516h2_8daaf6152771_02713d6af862", "t13d15a6h2_8daaf6152771_02713d6af862", "t13d1516h!_8daaf6152771_02713d6af862", "t13d1516H2_8daaf6152771_02713d6af862"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if got, want := ValidJA4(s), ja4Pattern.MatchString(s); got != want {
+			t.Fatalf("ValidJA4(%q) = %v, grammar says %v", s, got, want)
+		}
+		if got, want := ValidJA3(s), ja3Pattern.MatchString(s); got != want {
+			t.Fatalf("ValidJA3(%q) = %v, grammar says %v", s, got, want)
+		}
+	})
 }

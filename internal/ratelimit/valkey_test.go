@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,6 +67,9 @@ func TestLuaMatchesModel(t *testing.T) {
 			v := connect(t, addrs, time.Second)
 			raw := rawClient(t, addrs)
 			for a := range numAlgos {
+				if a == Distinct {
+					continue // no Go model; TestDistinctEstimateTracksAnExactCount covers it
+				}
 				for run := range 3 {
 					t.Run(fmt.Sprint(a, run), func(t *testing.T) {
 						t.Parallel()
@@ -189,7 +193,8 @@ func TestSharedQuotaAcrossEdges(t *testing.T) {
 				for i := range 400 {
 					wg.Go(func() {
 						out := make([]Outcome, 1)
-						edges[i%len(edges)].Do([]Call{{Key: key, P: p}}, out)
+						// distinct counts values, so each call brings a new one.
+						edges[i%len(edges)].Do([]Call{{Key: key, P: p, Bit: DistinctBit(strconv.Itoa(i))}}, out)
 						if out[0].Err != nil {
 							t.Error(out[0].Err)
 						}
@@ -200,8 +205,13 @@ func TestSharedQuotaAcrossEdges(t *testing.T) {
 				}
 				wg.Wait()
 				// Token and leaky buckets refill during the run, at most
-				// a few tokens at 100 per minute.
-				if n := allowed.Load(); n < 100 || n > 102 {
+				// a few tokens at 100 per minute. distinct estimates its
+				// count, within a few values at 100.
+				lo, hi := int64(100), int64(102)
+				if a == Distinct {
+					lo, hi = 92, 108
+				}
+				if n := allowed.Load(); n < lo || n > hi {
 					t.Fatalf("%s: %d allowed across 4 edges, want 100", a, n)
 				}
 			}
@@ -234,6 +244,48 @@ func TestScriptCacheLoss(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Run reconnects every few seconds to keep the slot map current. A node that
+// already took the scripts doesn't get them again on each reconnect.
+func TestReconnectSkipsLoadedScripts(t *testing.T) {
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			addrs := m.addrs(t)
+			v := connect(t, addrs, time.Second)
+			raw := rawClient(t, addrs)
+			before := scriptLoads(t, raw)
+			if err := v.Connect(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if after := scriptLoads(t, raw); after != before {
+				t.Fatalf("reconnect sent %d SCRIPT LOAD commands, want 0", after-before)
+			}
+		})
+	}
+}
+
+// scriptLoads sums SCRIPT LOAD calls across every node, from INFO commandstats.
+func scriptLoads(t *testing.T, raw valkey.Client) int {
+	t.Helper()
+	total := 0
+	for _, n := range raw.Nodes() {
+		info, err := n.Do(t.Context(), n.B().Info().Section("commandstats").Build()).ToString()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line := range strings.Lines(info) {
+			if rest, ok := strings.CutPrefix(line, "cmdstat_script|load:calls="); ok {
+				calls, _, _ := strings.Cut(rest, ",")
+				c, err := strconv.Atoi(calls)
+				if err != nil {
+					t.Fatal(err)
+				}
+				total += c
+			}
+		}
+	}
+	return total
 }
 
 // One failed shard affects only its keys. Calls to it fail until its breaker
@@ -397,7 +449,8 @@ func canceledCtx() context.Context {
 }
 
 // Shutdown can arrive mid-connect. The attempt fails and the previous
-// topology stays in use.
+// topology stays in use. A standalone reconnect has no I/O left to interrupt
+// once the scripts are loaded.
 func TestConnectInterruptedByShutdown(t *testing.T) {
 	for _, m := range modes {
 		t.Run(m.name, func(t *testing.T) {
@@ -405,7 +458,7 @@ func TestConnectInterruptedByShutdown(t *testing.T) {
 			before := v.topo.Load()
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
-			if err := v.Connect(ctx); err == nil {
+			if err := v.Connect(ctx); m.name == "cluster" && err == nil {
 				t.Fatal("connect with a cancelled context succeeded")
 			}
 			if err := v.refresh(ctx, v.client.Load()); m.name == "cluster" && err == nil {
@@ -437,6 +490,129 @@ func BenchmarkScripts(b *testing.B) {
 				if out[0].Err != nil {
 					b.Fatal(out[0].Err)
 				}
+			}
+		})
+	}
+}
+
+// The distinct script's count follows an exact count of distinct values
+// closely enough for limits up to snapshot.MaxDistinct: a crawler is
+// refused near its limit, never far before it. Repeating a value adds
+// nothing, and the window resets the count.
+func TestDistinctEstimateTracksAnExactCount(t *testing.T) {
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			v := connect(t, m.addrs(t), time.Second)
+			key := uniqueKey(t, "distinct")
+			p := Params{Algo: Distinct, Limit: snapshot.MaxDistinct, Period: 60_000}
+			call := func(value string) Result {
+				t.Helper()
+				out := make([]Outcome, 1)
+				v.Do([]Call{{Key: key, P: p, Bit: DistinctBit(value)}}, out)
+				if out[0].Err != nil {
+					t.Fatal(out[0].Err)
+				}
+				return out[0].Result
+			}
+			var worst float64
+			for n := int64(1); n <= snapshot.MaxDistinct; n++ {
+				r := call(fmt.Sprintf("/products/%d", n))
+				if !r.Allowed {
+					// Over 1000 means at least 10% over the exact count here.
+					if n < snapshot.MaxDistinct*9/10 {
+						t.Fatalf("refused at %d distinct values, limit %d", n, p.Limit)
+					}
+					continue
+				}
+				est := p.Limit - r.Remaining
+				// Exact for a handful, then within 10%: linear counting's
+				// standard error at 1000 values in 1024 bits is about 3%.
+				if d := float64(est - n); d < -max(1, 0.1*float64(n)) || d > max(1, 0.1*float64(n)) {
+					t.Fatalf("estimate %d for %d distinct values", est, n)
+				} else if n >= 10 {
+					worst = max(worst, max(d, -d)/float64(n))
+				}
+				if n == 3 {
+					if again := call("/products/1"); again.Remaining != r.Remaining {
+						t.Fatalf("a repeated value changed the count: remaining %d, then %d", r.Remaining, again.Remaining)
+					}
+				}
+			}
+			t.Logf("worst relative error from 10 values: %.3f", worst)
+
+			short := Params{Algo: Distinct, Limit: 2, Period: 1000}
+			key = uniqueKey(t, "window")
+			for i, want := range []bool{true, true, false} {
+				out := make([]Outcome, 1)
+				v.Do([]Call{{Key: key, P: short, Bit: DistinctBit(fmt.Sprint(i))}}, out)
+				if out[0].Err != nil || out[0].Allowed != want {
+					t.Fatalf("value %d: %+v", i, out[0])
+				}
+			}
+			time.Sleep(1100 * time.Millisecond)
+			out := make([]Outcome, 1)
+			v.Do([]Call{{Key: key, P: short, Bit: DistinctBit("3")}}, out)
+			if out[0].Err != nil || !out[0].Allowed || out[0].Remaining != 1 {
+				t.Fatalf("after the window: %+v", out[0])
+			}
+		})
+	}
+}
+
+// A distinct subject over its limit with a penalty stays refused until the
+// penalty ends, even after its window resets, and the key lives as long as
+// the penalty. A call during the penalty returns early: it changes neither
+// the penalty end nor the TTL.
+func TestDistinctPenaltyOutlivesTheWindow(t *testing.T) {
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			addrs := m.addrs(t)
+			v := connect(t, addrs, time.Second)
+			raw := rawClient(t, addrs)
+			key := uniqueKey(t, "penalty")
+			p := Params{Algo: Distinct, Limit: 1, Period: 300, Penalty: 1500}
+			call := func(value string) Outcome {
+				t.Helper()
+				out := make([]Outcome, 1)
+				v.Do([]Call{{Key: key, P: p, Bit: DistinctBit(value)}}, out)
+				if out[0].Err != nil {
+					t.Fatal(out[0].Err)
+				}
+				return out[0]
+			}
+			pttl := func() int64 {
+				t.Helper()
+				n, err := raw.Do(t.Context(), raw.B().Pttl().Key(key).Build()).AsInt64()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+
+			if first := call("/a"); !first.Allowed {
+				t.Fatalf("first value refused: %+v", first)
+			}
+			over := call("/b")
+			if over.Allowed || over.Blocked != over.Now+p.Penalty || over.Retry != p.Penalty {
+				t.Fatalf("over the limit: %+v", over)
+			}
+			if ttl := pttl(); ttl <= p.Period || ttl > p.Penalty {
+				t.Fatalf("PTTL %d ms, want the %d ms penalty", ttl, p.Penalty)
+			}
+
+			time.Sleep(time.Duration(p.Period+200) * time.Millisecond) // the window has reset
+			before := pttl()
+			during := call("/c")
+			if during.Allowed || during.Blocked != over.Blocked || during.Retry != over.Blocked-during.Now {
+				t.Fatalf("during the penalty after the window reset: %+v", during)
+			}
+			if after := pttl(); after > before {
+				t.Fatalf("PTTL went from %d to %d ms: a blocked call extended the penalty", before, after)
+			}
+
+			time.Sleep(time.Duration(over.Blocked-during.Now+100) * time.Millisecond)
+			if end := call("/d"); !end.Allowed {
+				t.Fatalf("after the penalty: %+v", end)
 			}
 		})
 	}

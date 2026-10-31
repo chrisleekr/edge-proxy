@@ -30,6 +30,10 @@ type Deployment struct {
 	SourceHeaders []string
 	// AllowRegex enables the "matches" operator.
 	AllowRegex bool
+	// VerifiedBots allows client.verified_bot. Admin sets it when
+	// VERIFIED_BOT_SOURCES is set; edges always do, since their ranges come
+	// with the snapshot and an edge must not refuse a config admin accepted.
+	VerifiedBots bool
 }
 
 // Fingerprint identifies d. Edges report theirs, and admin refuses to
@@ -47,6 +51,7 @@ func (d Deployment) Fingerprint() string {
 		slices.Sort(out)
 		return out
 	}
+	// VerifiedBots is left out: edges always set it, so it never differs between edges.
 	b, _ := json.Marshal([]any{sorted(d.ViewerFields, false), sorted(d.SourceHeaders, true), d.AllowRegex}) // strings and a bool
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
@@ -70,6 +75,26 @@ type Compiled struct {
 	Responses    map[string]Template
 	// Locale is nil when no locales are supported.
 	Locale language.Matcher
+	// NeedsSchema is the lowest schema an edge must read to load this
+	// config: its own, or higher when it sets a field added later.
+	NeedsSchema int
+	// Counts[i] holds the statuses rate-limit rule i counts; empty for a
+	// rule that counts requests.
+	Counts []StatusSet
+}
+
+// StatusSet is a set of HTTP statuses from 100 to 499, as bits.
+type StatusSet [7]uint64
+
+func (s *StatusSet) add(lo, hi int) {
+	for c := lo; c <= hi; c++ {
+		s[(c-100)/64] |= 1 << ((c - 100) % 64)
+	}
+}
+
+// Has reports whether code is in the set.
+func (s *StatusSet) Has(code int) bool {
+	return code >= 100 && code < 500 && s[(code-100)/64]&(1<<((code-100)%64)) != 0
 }
 
 // Limits on one config.
@@ -77,12 +102,31 @@ const (
 	// A build reads every config schema from MinSchema to SupportedSchema,
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
-	MinSchema        = 1
-	SupportedSchema  = 2
-	MaxConfigBytes   = 8 << 20
-	MaxRulesPerPhase = 200
-	MaxSiteWide      = 2
-	MaxKeyParts      = 5
+	MinSchema       = 1
+	SupportedSchema = 5
+	// MaxInflightSchema is the first schema whose edges read
+	// global.max_inflight. A config of any schema may set it; admin then
+	// publishes it only once every live edge reads that schema.
+	MaxInflightSchema = 3
+	// BotSchema is the first schema whose edges read the bot detection
+	// fields, settings and rule options. A config of any schema may use
+	// them; admin then waits for edges that read this schema.
+	BotSchema = 4
+	// ExpiresSchema is the first schema whose edges read a rate-limit
+	// rule's expires_at. A config of any schema may set it; admin then
+	// waits for edges that read this schema.
+	ExpiresSchema = 5
+	// MaxDistinct bounds a distinct rule's limit: the 1024-bit estimate
+	// drifts beyond it.
+	MaxDistinct = 1000
+	// MaxBotSources bounds VERIFIED_BOT_SOURCES and MaxBotSetPrefixes each
+	// source's ranges, so the snapshot stays bounded.
+	MaxBotSources     = 16
+	MaxBotSetPrefixes = 2000
+	MaxConfigBytes    = 8 << 20
+	MaxRulesPerPhase  = 200
+	MaxSiteWide       = 2
+	MaxKeyParts       = 5
 	// MaxListLen bounds every other list and map: origins, header names,
 	// issuers, audiences, locales, templates, policies, ops.
 	MaxListLen      = 100
@@ -93,6 +137,7 @@ const (
 	MaxNameLen     = 64
 	MaxCount       = 1_000_000_000
 	MaxBackstopIPs = 10_000_000
+	MaxInflight    = 1_000_000
 	MaxRulePeriod  = 24 * time.Hour
 	// MaxExact bounds burst × period in ms for token and leaky buckets,
 	// leaving headroom under 2^53 for the scripts' intermediate sums.
@@ -110,6 +155,7 @@ var statusOf = map[string]int{
 	"unavailable":       503,
 	"overloaded":        503,
 	"gateway_timeout":   504,
+	"forbidden":         403,
 }
 
 // ContentTypes are the content types a response template may use.
@@ -121,12 +167,12 @@ func ResponseStatuses() map[string]int { return maps.Clone(statusOf) }
 
 // Algorithms are the rate-limit algorithms validation accepts. ratelimit
 // keeps its enum in agreement, checked by its tests.
-var Algorithms = []string{"fixed_window", "sliding_window", "token_bucket", "leaky_bucket"}
+var Algorithms = []string{"fixed_window", "sliding_window", "token_bucket", "leaky_bucket", "distinct"}
 
 // KeyKinds are the rate-limit key characteristics validation accepts.
 // header, cookie, query and jwt_claim take a name; the rest take none.
 // ratelimit keeps its part table in agreement, checked by its tests.
-var KeyKinds = []string{"ip", "header", "cookie", "query", "jwt_claim", "host", "method", "country", "asnum", "locale", "constant"}
+var KeyKinds = []string{"ip", "header", "cookie", "query", "jwt_claim", "host", "method", "country", "asnum", "ja4", "locale", "constant"}
 
 // NamedKeyKinds are the KeyKinds written kind:name.
 var NamedKeyKinds = []string{"header", "cookie", "query", "jwt_claim"}
@@ -135,8 +181,11 @@ var NamedKeyKinds = []string{"header", "cookie", "query", "jwt_claim"}
 // Each consumer's tests check it handles every one, so a name added here
 // can't fall through to some other behavior.
 var (
-	OnMissingKeys    = []string{"skip", "fallback_ip", "reject"}
-	Actions          = []string{"block", "log"}
+	OnMissingKeys = []string{"skip", "fallback_ip", "reject"}
+	Actions       = []string{"block", "log"}
+	BlockModes    = []string{"block", "log"}
+	// DistinctOfKinds are what distinct counts; query takes a name.
+	DistinctOfKinds  = []string{"path", "query", "ip", "asnum", "ja4"}
 	FailModes        = []string{"open", "closed", "local"}
 	AuthModes        = []string{"none", "optional", "required"}
 	ForwardModes     = []string{"all", "allowlist", "denylist"}
@@ -175,12 +224,39 @@ var traceHeaders = map[string]bool{"traceparent": true, "tracestate": true}
 // always keeps these.
 func TraceHeader(name string) bool { return traceHeaders[strings.ToLower(name)] }
 
-// clientControlled fields can be set to anything by the client, so a rate
-// limit must not use them to exclude traffic.
+// clientControlled fields can be set to anything by the client, so rules
+// must not rely on them to exclude traffic or to switch a block off.
 var clientControlled = map[string]bool{
 	"http.request.headers": true, "http.request.cookies": true, "http.cookie": true,
 	"http.request.uri.args": true, "http.request.uri.query": true,
 	"http.x_forwarded_for": true, "http.user_agent": true, "http.referer": true,
+	// A client picks its own ClientHello and request headers, which the
+	// fingerprints and signals are computed from.
+	"tls.client.ja4": true, "tls.client.ja3": true, expr.SignalsField: true,
+}
+
+// botFields came with BotSchema.
+var botFields = []string{"tls.client.ja4", "tls.client.ja3", expr.SignalsField, expr.VerifiedBotField}
+
+// usesBotFeatures reports whether a stored config uses anything added in
+// BotSchema, before upgrade adds its own forbidden template.
+func usesBotFeatures(c *Config) bool {
+	_, forbidden := c.Global.Defaults.Responses["forbidden"]
+	if c.KillSwitch.Block || forbidden {
+		return true
+	}
+	for _, r := range c.ConfigRules {
+		if _, ok := r.Settings.Responses["forbidden"]; ok || r.Settings.Block != nil {
+			return true
+		}
+	}
+	for _, r := range c.RateLimitRules {
+		if len(r.CountStatuses) > 0 || r.Algorithm == "distinct" || r.DistinctOf != "" ||
+			slices.ContainsFunc(r.Key, func(k string) bool { return strings.HasPrefix(k, "ja4") }) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(botFields, func(f string) bool { return ReadsField(c, f) })
 }
 
 // Compile validates c against d and builds the request-path structures. It
@@ -189,10 +265,18 @@ var clientControlled = map[string]bool{
 // error found. Warnings are returned either way.
 func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	schema1 := c.Schema == 1
+	needs := c.Schema
+	if usesBotFeatures(c) {
+		needs = max(needs, BotSchema)
+	}
+	if slices.ContainsFunc(c.RateLimitRules, func(r RateLimitRule) bool { return !r.ExpiresAt.IsZero() }) {
+		needs = max(needs, ExpiresSchema)
+	}
+	templates := len(c.Global.Responses)
 	c = upgrade(c)
 	v := &validator{
-		d: d, c: c, schema1: schema1,
-		out:     &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}},
+		d: d, c: c, schema1: schema1, addedTemplates: len(c.Global.Responses) - templates,
+		out:     &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}, NeedsSchema: needs},
 		viewer:  setOf(d.ViewerFields, caseSensitive),
 		sources: setOf(d.SourceHeaders, foldCase),
 		issuers: map[string]bool{},
@@ -231,6 +315,9 @@ type validator struct {
 	siteWideIP                bool
 	// schema1 is set when the stored config predates schema 2.
 	schema1 bool
+	// addedTemplates is the forbidden template upgrade added, which the
+	// template count allows for: an older config at the cap must still load.
+	addedTemplates int
 }
 
 func (v *validator) err(path, format string, args ...any) {
@@ -241,28 +328,64 @@ func (v *validator) warn(path, format string, args ...any) {
 	v.warns = append(v.warns, expr.Issue{Path: path, Msg: fmt.Sprintf(format, args...)})
 }
 
-// upgrade returns c in schema 2. Schema 1 routed each request to a named
-// upstream and answered 421 "misdirected" when none applied; schema 2
-// forwards everything to the one upstream, so that response kind is gone. A
-// schema 1 rule that set "upstream" fails to decode instead, because its
-// routing can't be kept. c itself is not changed: admin serves stored
-// versions as they were saved, so edges not yet upgraded still read them.
+// upgrade returns c as the current schema reads it. c itself is not
+// changed: admin serves stored versions as they were saved, so edges not yet
+// upgraded still read them.
+//
+// Schema 1 routed each request to a named upstream and answered 421
+// "misdirected" when none applied; schema 2 forwards everything to the one
+// upstream, so that response kind is dropped. A schema 1 rule that set
+// "upstream" fails to decode instead, because its routing can't be kept.
+//
+// Schemas before BotSchema had no forbidden kind, so a forbidden template
+// is added: the one named forbidden if it has status 403, else an HTML
+// template under the first free name.
 func upgrade(c *Config) *Config {
-	if c.Schema != 1 {
+	if c.Schema < MinSchema || c.Schema >= BotSchema {
 		return c
 	}
 	// u shares c's maps and slices; change only the fields cloned here.
 	u := *c
-	u.Schema = 2
 	u.Global.Defaults.Responses = maps.Clone(c.Global.Defaults.Responses)
-	delete(u.Global.Defaults.Responses, "misdirected")
-	u.ConfigRules = slices.Clone(c.ConfigRules)
-	for i := range u.ConfigRules {
-		u.ConfigRules[i].Settings.Responses = maps.Clone(c.ConfigRules[i].Settings.Responses)
-		delete(u.ConfigRules[i].Settings.Responses, "misdirected")
+	if u.Global.Defaults.Responses == nil {
+		u.Global.Defaults.Responses = map[string]string{}
+	}
+	if c.Schema == 1 {
+		u.Schema = 2
+		delete(u.Global.Defaults.Responses, "misdirected")
+		u.ConfigRules = slices.Clone(c.ConfigRules)
+		for i := range u.ConfigRules {
+			u.ConfigRules[i].Settings.Responses = maps.Clone(c.ConfigRules[i].Settings.Responses)
+			delete(u.ConfigRules[i].Settings.Responses, "misdirected")
+		}
+	}
+	if _, ok := u.Global.Defaults.Responses["forbidden"]; !ok {
+		name := "forbidden"
+		if r, ok := c.Global.Responses[name]; !ok || r.Status != 403 {
+			for i := 1; ; i++ {
+				if _, taken := c.Global.Responses[name]; !taken {
+					break
+				}
+				name = "forbidden_html"
+				if i > 1 {
+					name = fmt.Sprintf("forbidden_html_%d", i)
+				}
+			}
+			u.Global.Responses = maps.Clone(c.Global.Responses)
+			if u.Global.Responses == nil {
+				u.Global.Responses = map[string]Response{}
+			}
+			u.Global.Responses[name] = forbiddenHTML
+		}
+		u.Global.Defaults.Responses["forbidden"] = name
 	}
 	return &u
 }
+
+// forbiddenHTML is the default forbidden template: a block usually refuses
+// a page request, and a browser shows HTML.
+var forbiddenHTML = Response{Status: 403, ContentType: "text/html; charset=utf-8",
+	Body: `<!doctype html><html lang="en"><meta charset="utf-8"><title>Forbidden</title><h1>Forbidden</h1><p>This request was refused. Request ID: {{request_id}}</p></html>`}
 
 func (v *validator) config() {
 	c := v.c
@@ -293,6 +416,12 @@ func (v *validator) global() {
 	if b.MaxEntries < 1 || b.MaxEntries > MaxBackstopIPs {
 		v.err("global.backstop.max_entries", "must be 1 to %s", thousands(MaxBackstopIPs))
 	}
+	if g.MaxInflight < 0 || g.MaxInflight > MaxInflight {
+		v.err("global.max_inflight", "must be 1 to %s, or left out to keep each edge's own limit", thousands(MaxInflight))
+	}
+	if g.MaxInflight > 0 {
+		v.out.NeedsSchema = max(v.out.NeedsSchema, MaxInflightSchema)
+	}
 
 	v.templates(g.Responses)
 	d := g.Defaults
@@ -314,7 +443,7 @@ func (v *validator) global() {
 }
 
 func (v *validator) templates(rs map[string]Response) {
-	if len(rs) > MaxListLen {
+	if len(rs) > MaxListLen+v.addedTemplates {
 		v.err("global.responses", "has %d templates; at most %d are allowed", len(rs), MaxListLen)
 	}
 	samples := map[string]string{"retry_after": "1", "request_id": "r1", "status": "429"}
@@ -538,11 +667,20 @@ func (v *validator) configRules() {
 	rs := v.c.ConfigRules
 	v.ruleCount("config_rules", len(rs))
 	v.out.ConfigRules = make([]expr.Matcher, len(rs))
+	blockedEarlier := false
 	for i, r := range rs {
 		p := fmt.Sprintf("config_rules[%d]", i)
 		v.ruleID(p, r.ID)
 		v.out.ConfigRules[i] = v.expression(p, r.Expression, expr.PhaseConfig)
 		v.settings(p+".settings", r.Settings)
+		switch {
+		case r.Settings.Block == nil:
+		case *r.Settings.Block == "block":
+			v.spoofableExclusion(p, r.Expression)
+			blockedEarlier = true
+		case *r.Settings.Block == "log" && blockedEarlier:
+			v.spoofableLogBlock(p, r.Expression)
+		}
 	}
 	// A rule whose every setting a later "true" rule sets again never has an effect.
 	for i, r := range rs {
@@ -619,6 +757,7 @@ func settingNames(s Settings) []string {
 	add(s.BodyLimit != nil, "body_limit")
 	add(s.UpstreamTimeout != nil, "upstream_timeout")
 	add(s.RateLimitHeaders != nil, "ratelimit_headers")
+	add(s.Block != nil, "block")
 	return ns
 }
 
@@ -654,16 +793,22 @@ func (v *validator) settings(p string, s Settings) {
 	if s.UpstreamTimeout != nil {
 		v.timeout(p+".upstream_timeout", *s.UpstreamTimeout)
 	}
+	if s.Block != nil && !slices.Contains(BlockModes, *s.Block) {
+		v.err(p+".block", "must be %s", orList(BlockModes))
+	}
 }
 
 func (v *validator) rateLimitRules() {
 	rs := v.c.RateLimitRules
 	v.ruleCount("rate_limit_rules", len(rs))
 	v.out.RateLimitRules = make([]expr.Matcher, len(rs))
+	v.out.Counts = make([]StatusSet, len(rs))
 	for i, r := range rs {
-		if expr.Normalize(r.Expression).IsTrue() {
+		// Count rules take no Valkey slot, so they are not site-wide rules,
+		// and only a rule counting every request is an ip partner.
+		if expr.Normalize(r.Expression).IsTrue() && len(r.CountStatuses) == 0 {
 			v.out.SiteWide = append(v.out.SiteWide, i)
-			v.siteWideIP = v.siteWideIP || slices.Contains(r.Key, "ip")
+			v.siteWideIP = v.siteWideIP || r.Algorithm != "distinct" && slices.Contains(r.Key, "ip")
 		}
 	}
 	if len(v.out.SiteWide) > MaxSiteWide {
@@ -679,6 +824,10 @@ func (v *validator) rateLimitRules() {
 		}
 		v.count(p+".limit", r.Limit)
 		v.period(p+".period", r.Period, MaxRulePeriod)
+		v.distinct(p, r)
+		if len(r.CountStatuses) > 0 {
+			v.out.Counts[i] = v.countStatuses(p, r)
+		}
 		if r.Algorithm == "token_bucket" || r.Algorithm == "leaky_bucket" {
 			v.count(p+".burst", r.Burst)
 			// Valkey's Lua numbers are doubles; the bucket scripts work in
@@ -715,14 +864,15 @@ func (v *validator) key(p string, parts []string) {
 	v.list(p, parts, caseSensitive, func(k string) string {
 		kind, arg, hasArg := strings.Cut(k, ":")
 		if !slices.Contains(KeyKinds, kind) {
-			return "must be ip, header:<n>, cookie:<n>, query:<n>, jwt_claim:<n>, host, method, country, asnum, locale or constant"
+			return "must be ip, header:<n>, cookie:<n>, query:<n>, jwt_claim:<n>, host, method, country, asnum, ja4, locale or constant"
 		}
 		switch kind {
 		case "ip", "jwt_claim":
 			partner = true
-		case "header", "cookie", "query", "host", "method":
+		case "header", "cookie", "query", "host", "method", "ja4":
 			// Any uppercase token is a valid method, and the edge forwards
-			// any Host to the one upstream, so clients choose both.
+			// any Host to the one upstream, so clients choose both. A client
+			// picks its own ClientHello, and many real users share one JA4.
 			attacker = true
 		}
 		switch kind {
@@ -745,7 +895,7 @@ func (v *validator) key(p string, parts []string) {
 			}
 		}
 		switch {
-		case kind == "country" && !v.viewer["ip.src.country"], kind == "asnum" && !v.viewer["ip.src.asnum"]:
+		case kind == "country" && !v.viewer["ip.src.country"], kind == "asnum" && !v.viewer["ip.src.asnum"], kind == "ja4" && !v.viewer["tls.client.ja4"]:
 			return fmt.Sprintf("%s has no trusted source configured in this deployment", kind)
 		case kind == "locale" && len(v.locales) == 0:
 			return "locale is not configured in global.locale"
@@ -914,7 +1064,8 @@ func (v *validator) placeholderProblem(ph Placeholder) string {
 // locales the edge never produces, and warns on the raw URI fields, which
 // an encoded path slips past.
 func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Matcher {
-	env := expr.Env{Phase: phase, ViewerAvailable: func(f string) bool { return v.viewer[f] }, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1}
+	available := func(f string) bool { return v.viewer[f] || f == expr.VerifiedBotField && v.d.VerifiedBots }
+	env := expr.Env{Phase: phase, ViewerAvailable: available, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1}
 	m, issues := expr.Compile(n, env)
 	for _, is := range issues {
 		v.errs = append(v.errs, expr.Issue{Path: p + "." + is.Path, Msg: is.Msg})
@@ -937,6 +1088,10 @@ func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Mat
 			if msg := v.managedProblem(r.Key); msg != "" {
 				v.err(p+".expression", "%s", msg)
 			}
+		}
+		if r.Field == "http.request.version" {
+			v.httpVersion(p, r)
+			return
 		}
 		if r.Field != "edge.locale" {
 			return
@@ -965,12 +1120,47 @@ func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Mat
 	return m
 }
 
+// httpVersion warns on an exact HTTP version the edge never produces. It
+// is not an error: versions published before the edge normalised the
+// version must still load.
+func (v *validator) httpVersion(p string, r expr.Node) {
+	if r.Operator != "eq" && r.Operator != "ne" && r.Operator != "in" && r.Operator != "not_in" {
+		return
+	}
+	vals := r.Value.List
+	if !r.Value.IsList {
+		vals = []string{r.Value.One}
+	}
+	for _, val := range vals {
+		if !slices.Contains(httpVersions, val) {
+			v.warn(p+".expression", "http.request.version is never %q; the edge writes it as %s", val, strings.Join(httpVersions, ", "))
+		}
+	}
+}
+
+// httpVersions are the values the edge normalises every viewer source to.
+var httpVersions = []string{"1.0", "1.1", "2.0", "3.0"}
+
 func (v *validator) spoofableExclusion(p string, n expr.Node) {
 	warned := false
 	walk(n, false, func(r expr.Node, neg bool) {
 		op, _ := expr.LookupOp(r.Operator)
 		if !warned && clientControlled[r.Field] && neg != (op.Negates != "") {
-			v.warn(p+".expression", "excludes traffic using client-controlled %s; clients can set it to skip this limit. Exclude by ip.src or a verified claim", r.Field)
+			v.warn(p+".expression", "excludes traffic using client-controlled %s; clients can set it to skip this rule. Exclude by ip.src or a verified claim", r.Field)
+			warned = true
+		}
+	})
+}
+
+// spoofableLogBlock warns on a block: log rule, after a block: block rule,
+// that matches on a client-controlled field: a later rule's block setting
+// wins, so a client that sets the value turns the earlier refusal into a log.
+func (v *validator) spoofableLogBlock(p string, n expr.Node) {
+	warned := false
+	walk(n, false, func(r expr.Node, neg bool) {
+		op, _ := expr.LookupOp(r.Operator)
+		if !warned && clientControlled[r.Field] && neg == (op.Negates != "") {
+			v.warn(p+".expression", "sets block to log for requests matching client-controlled %s; clients can set it to turn an earlier block rule off. Match by ip.src or a verified claim", r.Field)
 			warned = true
 		}
 	})
@@ -1112,4 +1302,93 @@ func thousands(n int) string {
 		s = s[:i] + "," + s[i:]
 	}
 	return s
+}
+
+// distinct checks the distinct algorithm's options. Its state is a bitmap
+// per subject in Valkey: a local copy per subject would outgrow the bounded
+// store, so fail_mode local is refused.
+func (v *validator) distinct(p string, r RateLimitRule) {
+	if r.Algorithm != "distinct" {
+		if r.DistinctOf != "" {
+			v.err(p+".distinct_of", "applies only to the distinct algorithm")
+		}
+		return
+	}
+	if r.Limit > MaxDistinct {
+		v.err(p+".limit", "must be at most %s for distinct: the estimate drifts beyond it", thousands(MaxDistinct))
+	}
+	if r.FailMode == "local" {
+		v.err(p+".fail_mode", "local can't be used with distinct; use open or closed")
+	}
+	kind, arg, hasArg := strings.Cut(r.DistinctOf, ":")
+	switch {
+	case !slices.Contains(DistinctOfKinds, kind):
+		v.err(p+".distinct_of", "must be path, query:<name>, ip, asnum or ja4")
+	case kind == "query":
+		if arg == "" || len(arg) > MaxNameArg || expr.HasControl(arg) || !utf8.ValidString(arg) {
+			v.err(p+".distinct_of", "query needs a name of 1 to %d characters, e.g. query:id", MaxNameArg)
+		}
+	case hasArg:
+		v.err(p+".distinct_of", "%s takes no name", kind)
+	case kind == "asnum" && !v.viewer["ip.src.asnum"], kind == "ja4" && !v.viewer["tls.client.ja4"]:
+		v.err(p+".distinct_of", "%s has no trusted source configured in this deployment", kind)
+	}
+}
+
+// countStatuses checks a count rule's statuses. A 5xx is usually the
+// upstream's fault: counting it would block every active client during an
+// outage and lock real users out after recovery.
+func (v *validator) countStatuses(p string, r RateLimitRule) StatusSet {
+	var set StatusSet
+	if r.Algorithm == "distinct" {
+		v.err(p+".count_statuses", "can't be used with the distinct algorithm")
+	}
+	if r.FailMode != "open" {
+		v.warn(p+".fail_mode", "has no effect: a rule with count_statuses counts in each edge's memory and never calls Valkey")
+	}
+	v.list(p+".count_statuses", r.CountStatuses, caseSensitive, func(s string) string {
+		lo, hi, ok := statusRange(s)
+		switch {
+		case !ok:
+			return `must be a status from 100 to 499 or a class from 1xx to 4xx, such as "404" or "4xx"`
+		case lo >= 500:
+			return "5xx can't be counted: a 5xx is usually the upstream's fault, and counting it would lock clients out after an outage"
+		}
+		set.add(lo, hi)
+		return ""
+	})
+	return set
+}
+
+// statusRange reads "404" or "4xx" as the statuses it names.
+func statusRange(s string) (lo, hi int, ok bool) {
+	if len(s) != 3 || s[0] < '1' || s[0] > '5' {
+		return 0, 0, false
+	}
+	if s[1:] == "xx" {
+		lo = int(s[0]-'0') * 100
+		return lo, lo + 99, true
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, 0, false
+	}
+	return n, n, true
+}
+
+// ReadsField reports whether any rule of c reads field. Admin ships the
+// verified crawler ranges only to a snapshot whose configs read them.
+func ReadsField(c *Config, field string) bool {
+	found := false
+	f := func(r expr.Node, _ bool) { found = found || r.Field == field }
+	for _, r := range c.ConfigRules {
+		walk(r.Expression, false, f)
+	}
+	for _, r := range c.RateLimitRules {
+		walk(r.Expression, false, f)
+	}
+	for _, r := range c.RequestHeaderRules {
+		walk(r.Expression, false, f)
+	}
+	return found
 }

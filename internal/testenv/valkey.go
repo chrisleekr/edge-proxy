@@ -127,7 +127,12 @@ func startCluster(ctx context.Context) (*Cluster, error) {
 		fmt.Fprintf(&script, "until valkey-cli -p %d ping; do sleep 0.1; done\n", p)
 	}
 	fmt.Fprintf(&script, "valkey-cli --cluster create 127.0.0.1:%d 127.0.0.1:%d 127.0.0.1:%d --cluster-yes\n", ports[0], ports[1], ports[2])
-	fmt.Fprintf(&script, "until valkey-cli -p %d cluster info | grep -q cluster_state:ok; do sleep 0.1; done\n", ports[0])
+	// Every node must know every slot before tests run: each learns the
+	// assignment by gossip, and with full coverage off cluster_state:ok alone
+	// does not prove it, so a node that is still behind answers CLUSTERDOWN.
+	for _, p := range ports {
+		fmt.Fprintf(&script, "until [ \"$(valkey-cli -p %d cluster info | grep -cE 'cluster_state:ok|cluster_slots_ok:16384')\" = 2 ]; do sleep 0.1; done\n", p)
+	}
 	if err := cl.exec(ctx, script.String()); err != nil {
 		return nil, err
 	}

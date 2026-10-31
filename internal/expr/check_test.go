@@ -3,6 +3,7 @@ package expr
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -240,5 +241,65 @@ func TestOperatorSchemaJSON(t *testing.T) {
 		`{"name":"is_false","label":"is false","negates":"is_true","list":false,"no_value":true,"types":["bool"]}]`
 	if string(b) != want {
 		t.Fatalf("got %s", b)
+	}
+}
+
+// client.signals names come from a fixed list, and some can only fire with
+// a viewer field the deployment may lack. A literal that can never match,
+// whether an unknown signal, a signal without its source, or a fingerprint
+// of the wrong shape, is rejected; everything a rule can really match passes.
+func TestClientSignalsRejectLiteralsThatCanNeverMatch(t *testing.T) {
+	const chromeJA4 = "t13d1516h2_8daaf6152771_02713d6af862"
+	const ja3 = "e7d705a3286e19ea42f587b344ee6865"
+	none := Env{Phase: PhaseConfig}
+	all := Env{Phase: PhaseConfig, ViewerAvailable: allViewer}
+	only := func(fields ...string) Env {
+		return Env{Phase: PhaseConfig, ViewerAvailable: func(f string) bool { return slices.Contains(fields, f) }}
+	}
+	cases := []struct {
+		name string
+		n    Node
+		env  Env
+		msg  []string // empty means accepted
+	}{
+		{"signals that need no viewer field", listRule("client.signals", "in", "ua_tool", "ua_missing", "ua_headless", "browser_no_accept_language"), none, nil},
+		{"verified crawler flag", Node{Field: "client.verified_bot", Operator: "is_false"}, only("client.verified_bot"), nil},
+		{"verified crawler flag without VERIFIED_BOT_SOURCES", Node{Field: "client.verified_bot", Operator: "is_true"}, none, []string{"client.verified_bot needs VERIFIED_BOT_SOURCES"}},
+		{"signal whose sources are configured", rule("client.signals", "eq", "browser_http1"), all, nil},
+		{"negated signal list", listRule("client.signals", "not_in", "browser_tls_mismatch", "client_hints_mismatch"), all, nil},
+		{"full JA4 fingerprint", rule("tls.client.ja4", "eq", chromeJA4), all, nil},
+		{"JA4 prefix", rule("tls.client.ja4", "starts_with", "t13d"), all, nil},
+		{"full JA3 fingerprint", listRule("tls.client.ja3", "in", ja3), all, nil},
+		{"unknown signal", listRule("client.signals", "in", "ua_tool", "ua_robot"), none, []string{`unknown signal "ua_robot"`}},
+		{"HTTP/1 signal without the HTTP version", rule("client.signals", "eq", "browser_http1"), only("ssl", "tls.client.ja4"), []string{`"browser_http1" can never match`, "http.request.version"}},
+		// Browsers negotiate HTTP/2 only over TLS, so HTTP/1 says nothing without it.
+		{"HTTP/1 signal without HTTPS", rule("client.signals", "eq", "browser_http1"), only("http.request.version", "tls.client.ja4"), []string{`"browser_http1" can never match`, "ssl"}},
+		{"TLS signal without the JA4 fingerprint", rule("client.signals", "eq", "browser_tls_mismatch"), only("ssl", "http.request.version"), []string{`"browser_tls_mismatch" can never match`, "tls.client.ja4"}},
+		// Browsers send Sec-Fetch-* and client hints only in secure contexts.
+		{"Sec-Fetch signal without HTTPS", rule("client.signals", "eq", "browser_no_sec_fetch"), only("http.request.version"), []string{`"browser_no_sec_fetch" can never match`, "ssl"}},
+		{"client hints signal without HTTPS", listRule("client.signals", "in", "chromium_no_client_hints"), none, []string{`"chromium_no_client_hints" can never match`, "ssl"}},
+		{"substring match on signal names", rule("client.signals", "contains", "ua_"), none, []string{`operator "contains" can't be used with field "client.signals"`}},
+		{"JA4 of the wrong shape", rule("tls.client.ja4", "eq", "not-a-fingerprint"), all, []string{`"not-a-fingerprint" can never match`, "JA4"}},
+		{"JA4 with an uppercase hash", listRule("tls.client.ja4", "in", "t13d1516h2_8DAAF6152771_02713d6af862"), all, []string{"can never match", "JA4"}},
+		{"JA3 of the wrong shape", rule("tls.client.ja3", "eq", "e7d705a3"), all, []string{`"e7d705a3" can never match`, "JA3"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			is := Issues(Check(tc.n, tc.env))
+			if len(tc.msg) == 0 {
+				if len(is) != 0 {
+					t.Fatalf("Check(%s) = %v, want nil", Render(tc.n), is)
+				}
+				if _, errs := Compile(tc.n, tc.env); errs != nil {
+					t.Fatalf("Compile(%s) = %v", Render(tc.n), Issues(errs))
+				}
+				return
+			}
+			for _, m := range tc.msg {
+				if !strings.Contains(is.Error(), m) {
+					t.Fatalf("issues %q do not mention %q", is.Error(), m)
+				}
+			}
+		})
 	}
 }

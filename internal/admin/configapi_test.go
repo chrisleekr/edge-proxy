@@ -23,7 +23,7 @@ func TestDraftLifecycle(t *testing.T) {
 		Config   snapshot.Config
 		Revision int64
 	}](t, ed.do("GET", "/api/draft", nil))
-	if first.Revision != 0 || len(first.Config.Global.Responses) != 8 || first.Config.RateLimitRules != nil {
+	if first.Revision != 0 || len(first.Config.Global.Responses) != 9 || first.Config.RateLimitRules != nil {
 		t.Fatalf("first draft %+v", first)
 	}
 	status(t, ed.save("", testConfig()), 428)

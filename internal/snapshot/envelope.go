@@ -7,15 +7,42 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/jwks"
 )
 
-// MaxEnvelopeBytes bounds a snapshot: an active and a candidate config plus
-// keys for every issuer of both.
-const MaxEnvelopeBytes = 2*MaxConfigBytes + 2*MaxListLen*jwks.MaxBytes
+// MaxEnvelopeBytes bounds a snapshot: an active and a candidate config,
+// keys for every issuer of both, and the crawler ranges. A range is at most
+// 43 characters as JSON, plus quotes and a comma.
+const MaxEnvelopeBytes = 2*MaxConfigBytes + 2*MaxListLen*jwks.MaxBytes + MaxBotSources*(MaxBotSetPrefixes*46+MaxBotSourceLen+64)
+
+// MaxBotSourceLen bounds a VERIFIED_BOT_SOURCES URL.
+const MaxBotSourceLen = 2048
+
+// BotPrefix parses one verified crawler range of the family want6 names,
+// 4-in-6 refused, and returns it masked. IPv4 wider than /16 and IPv6
+// wider than /32 are refused: crawler lists publish far narrower ranges,
+// and a wide one would exempt whole networks of ordinary clients.
+func BotPrefix(s string, want6 bool) (netip.Prefix, error) {
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("%q is not a CIDR range", s)
+	}
+	a := p.Addr()
+	switch {
+	case want6 && (!a.Is6() || a.Is4In6()):
+		return netip.Prefix{}, fmt.Errorf("%q is not an IPv6 range", s)
+	case !want6 && !a.Is4():
+		return netip.Prefix{}, fmt.Errorf("%q is not an IPv4 range", s)
+	case a.Is4() && p.Bits() < 16 || a.Is6() && p.Bits() < 32:
+		return netip.Prefix{}, fmt.Errorf("%q is wider than /16 for IPv4 or /32 for IPv6", s)
+	}
+	return p.Masked(), nil
+}
 
 // Snapshot is a compiled envelope: what the edge swaps in atomically.
 type Snapshot struct {
@@ -30,6 +57,8 @@ type Snapshot struct {
 	FleetSize         int
 	// Keys are the parsed key sets by issuer and JWKS URL.
 	Keys map[KeySource]Keys
+	// Bots is every verified crawler range in one set; empty without any.
+	Bots expr.IPSet
 }
 
 // KeySource is where a key set came from: one issuer at one JWKS URL.
@@ -136,6 +165,31 @@ func CompileEnvelope(e *Envelope, d Deployment) (*Snapshot, []expr.Issue) {
 		}
 		s.Keys[src] = Keys{FetchedAt: k.FetchedAt, Set: set}
 	}
+
+	if len(e.VerifiedBots) > MaxBotSources {
+		add("verified_bots", "has %d sources; at most %d are allowed", len(e.VerifiedBots), MaxBotSources)
+	}
+	var bots []netip.Prefix
+	sources := map[string]bool{}
+	for i, b := range e.VerifiedBots {
+		p := fmt.Sprintf("verified_bots[%d]", i)
+		if b.Source == "" || len(b.Source) > MaxBotSourceLen || sources[b.Source] {
+			add(p+".source", "must be a unique URL of at most %d characters", MaxBotSourceLen)
+		}
+		sources[b.Source] = true
+		if len(b.Prefixes) < 1 || len(b.Prefixes) > MaxBotSetPrefixes {
+			add(p+".prefixes", "needs 1 to %d prefixes", MaxBotSetPrefixes)
+		}
+		for k, s := range b.Prefixes {
+			pf, err := BotPrefix(s, strings.Contains(s, ":"))
+			if err != nil {
+				add(fmt.Sprintf("%s.prefixes[%d]", p, k), "%s", err.Error())
+				continue
+			}
+			bots = append(bots, pf)
+		}
+	}
+	s.Bots = expr.NewIPSet(bots)
 
 	if errs != nil {
 		return nil, errs

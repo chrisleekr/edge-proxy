@@ -22,6 +22,16 @@ type Envelope struct {
 	CanaryExpiresAt time.Time    `json:"canary_expires_at,omitzero"`
 	FleetSize       int          `json:"fleet_size"`
 	Keys            []IssuerKeys `json:"keys,omitempty"`
+	// VerifiedBots are the crawler ranges admin fetched, present only while
+	// the active or candidate config reads client.verified_bot: schema 3
+	// edges decode strictly and would reject the field.
+	VerifiedBots []BotSet `json:"verified_bots,omitempty"`
+}
+
+// BotSet is the latest good range list from one VERIFIED_BOT_SOURCES URL.
+type BotSet struct {
+	Source   string   `json:"source"`
+	Prefixes []string `json:"prefixes"`
 }
 
 // IssuerKeys is the latest good JWKS admin fetched from one issuer's JWKS
@@ -51,6 +61,8 @@ type Config struct {
 type KillSwitch struct {
 	RateLimit bool `json:"rate_limit"`
 	Auth      bool `json:"auth"`
+	// Block makes every block setting act as log. Added in schema 4.
+	Block bool `json:"block,omitempty"`
 }
 
 // Global holds settings that apply to every request unless a rule overrides them.
@@ -61,6 +73,10 @@ type Global struct {
 	Responses      map[string]Response   `json:"responses"`
 	Locale         Locale                `json:"locale"`
 	RequestHeaders RequestHeaders        `json:"request_headers"`
+	// MaxInflight lowers every edge's cap on concurrent ordinary requests;
+	// 0 leaves each edge's own. It can't raise the cap: that comes from the
+	// edge's memory. Added in schema 3, omitted when unset.
+	MaxInflight int `json:"max_inflight,omitempty"`
 }
 
 // Backstop is the per-replica, per-IP token bucket.
@@ -149,6 +165,8 @@ type Settings struct {
 	BodyLimit        *int64            `json:"body_limit,omitempty"`
 	UpstreamTimeout  *Duration         `json:"upstream_timeout,omitempty"`
 	RateLimitHeaders *bool             `json:"ratelimit_headers,omitempty"`
+	// Block is block or log: answer 403 forbidden, or only log would_block.
+	Block *string `json:"block,omitempty"`
 }
 
 // AuthSetting is a config rule's JWT requirement and the issuers it accepts.
@@ -170,6 +188,15 @@ type RateLimitRule struct {
 	Action       string    `json:"action"`
 	Penalty      Duration  `json:"penalty,omitempty"`
 	FailMode     string    `json:"fail_mode"`
+	// CountStatuses makes the rule count upstream responses with these
+	// statuses or classes, such as "404" or "4xx", in each replica's memory.
+	CountStatuses []string `json:"count_statuses,omitempty"`
+	// DistinctOf is what the distinct algorithm counts distinct values of:
+	// path, query:<name>, ip, asnum or ja4.
+	DistinctOf string `json:"distinct_of,omitempty"`
+	// ExpiresAt is when the rule stops running, in RFC 3339; zero means
+	// never. Edges compare it with their own clock.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
 // HeaderRule edits upstream request headers when its expression matches.

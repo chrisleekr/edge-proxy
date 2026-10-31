@@ -84,32 +84,43 @@ func blocked(a netip.Addr) bool {
 	return !a.IsGlobalUnicast() || a.IsPrivate() || cgnat.Contains(a)
 }
 
-// Fetch GETs url and returns the body, at most MaxBytes.
+// Fetch GETs a JWKS URL and returns the body, at most MaxBytes.
 func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	return c.fetch(ctx, rawURL, MaxBytes, "jwks")
+}
+
+// FetchMax GETs any other URL the SSRF guard covers, such as a crawler
+// range list, and returns the body, at most maxBytes.
+func (c *Client) FetchMax(ctx context.Context, rawURL string, maxBytes int) ([]byte, error) {
+	return c.fetch(ctx, rawURL, maxBytes, "source")
+}
+
+// fetch names what it fetches in its errors, which are logged.
+func (c *Client) fetch(ctx context.Context, rawURL string, maxBytes int, what string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		// The parse error quotes the URL, whose query may hold a secret.
-		return nil, errors.New("jwks url is not a valid URL")
+		return nil, fmt.Errorf("%s url is not a valid URL", what)
 	}
 	if req.URL.Scheme != "https" {
-		return nil, errors.New("jwks url must be https")
+		return nil, fmt.Errorf("%s url must be https", what)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		// Do returns a *url.Error, which quotes the URL; fetch errors are
 		// logged and the query may hold a secret, so keep only the cause.
-		return nil, fmt.Errorf("jwks fetch: %w", errors.Unwrap(err))
+		return nil, fmt.Errorf("%s fetch: %w", what, errors.Unwrap(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jwks fetch: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("%s fetch: status %d", what, resp.StatusCode)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxBytes+1))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > MaxBytes {
-		return nil, fmt.Errorf("jwks is larger than %d bytes", MaxBytes)
+	if len(b) > maxBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", what, maxBytes)
 	}
 	return b, nil
 }

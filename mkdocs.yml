@@ -65,6 +65,7 @@ nav:
   - Use:
       - Policy: use/policy.md
       - Rate limiting: use/rate-limiting.md
+      - Bot detection: use/bots.md
       - Publish and roll back: use/publishing.md
       - Dashboard: use/dashboard.md
   - Deploy:

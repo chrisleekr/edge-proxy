@@ -34,6 +34,8 @@ const (
 type Call struct {
 	Key string
 	P   Params
+	// Bit is the value's DistinctBit, for Distinct.
+	Bit int64
 }
 
 // Outcome is one call's decision, or the error that sends it to the rule's
@@ -53,6 +55,9 @@ type Valkey struct {
 	log     *slog.Logger
 	client  atomic.Pointer[client]
 	topo    atomic.Pointer[topology]
+	// loaded holds nodes that took every script. Only Connect uses it, and
+	// Connect never runs concurrently: warm-up first, then Run.
+	loaded map[string]bool
 }
 
 type client struct{ valkey.Client }
@@ -85,15 +90,22 @@ func (v *Valkey) Connect(ctx context.Context) error {
 	if err := v.refresh(ctx, c); err != nil {
 		return err
 	}
-	// Preloading avoids the NOSCRIPT fallback's second round trip. A node
-	// that misses it (failover, restart, ACL) is handled by the fallback.
-	for _, n := range c.Nodes() {
-		for _, s := range scripts {
-			if err := n.Do(ctx, n.B().ScriptLoad().Script(s.src).Build()).Error(); err != nil {
-				return fmt.Errorf("script load: %w", err)
+	// Preloading avoids the NOSCRIPT fallback's second round trip. Each node
+	// is loaded once: one that loses its scripts later (failover, restart)
+	// gets them back through the fallback, because EVAL caches the script.
+	loaded := make(map[string]bool, len(v.loaded))
+	for addr, n := range c.Nodes() {
+		if !v.loaded[addr] {
+			for _, s := range scripts {
+				if err := n.Do(ctx, n.B().ScriptLoad().Script(s.src).Build()).Error(); err != nil {
+					return fmt.Errorf("script load: %w", err)
+				}
 			}
 		}
+		loaded[addr] = true
 	}
+	// Only current nodes, so it stays bounded.
+	v.loaded = loaded
 	return nil
 }
 
@@ -173,20 +185,25 @@ func (v *Valkey) Do(calls []Call, out []Outcome) {
 }
 
 // args is one call's ARGV. An array, not a slice: Arg copies its arguments,
-// so the array stays on the stack.
-func args(p Params) [4]string {
-	return [4]string{strconv.FormatInt(p.Limit, 10), strconv.FormatInt(p.Period, 10), strconv.FormatInt(p.Burst, 10), strconv.FormatInt(p.Penalty, 10)}
+// so the array stays on the stack. Distinct takes no burst, so its bit goes
+// in that place.
+func args(call Call) [4]string {
+	p, third := call.P, call.P.Burst
+	if p.Algo == Distinct {
+		third = call.Bit
+	}
+	return [4]string{strconv.FormatInt(p.Limit, 10), strconv.FormatInt(p.Period, 10), strconv.FormatInt(third, 10), strconv.FormatInt(p.Penalty, 10)}
 }
 
 func evalsha(c *client, call Call) valkey.Completed {
-	a := args(call.P)
+	a := args(call)
 	return c.B().Evalsha().Sha1(scripts[call.P.Algo].sha).Numkeys(1).Key(call.Key).Arg(a[:]...).Build()
 }
 
 // eval sends the script source after NOSCRIPT. The source is one of the
 // constant scripts above; no request data reaches it except as KEYS/ARGV.
 func eval(c *client, call Call) valkey.Completed {
-	a := args(call.P)
+	a := args(call)
 	return c.B().Eval().Script(scripts[call.P.Algo].src).Numkeys(1).Key(call.Key).Arg(a[:]...).Build()
 }
 

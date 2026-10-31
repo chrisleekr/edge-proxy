@@ -157,3 +157,19 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	a, _ := netip.AddrFromSlice(b)
 	return a
 }
+
+// IPSet is the CIDR matcher expressions use, for address sets that come
+// from elsewhere, such as verified crawler ranges.
+type IPSet struct{ s ipSet }
+
+// NewIPSet builds a set from prefixes.
+func NewIPSet(ps []netip.Prefix) IPSet {
+	items := make([]string, len(ps))
+	for i, p := range ps {
+		items[i] = p.String()
+	}
+	return IPSet{newIPSet(items)}
+}
+
+// Contains reports whether a is in the set. The zero IPSet is empty.
+func (s IPSet) Contains(a netip.Addr) bool { return s.s.contains(a) }

@@ -214,6 +214,7 @@ func (s *Server) internalMux() http.Handler {
 		s.m.ready.Store(s.ready())
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		s.m.writeTo(w)
+		s.poller.reg.writeTo(w)
 	})
 	return mux
 }

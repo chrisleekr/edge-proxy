@@ -8,25 +8,39 @@ These decide whom the edge believes. They come only from the deployment, never f
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLIENT_IP_SOURCE` | required | `cloudfront`, `cloudflare`, `header:<Name>:ip`, `header:<Name>:ip_port`, `xff` or `remote_addr`. See [Client IP presets](#client-ip-presets) |
+| `CLIENT_IP_SOURCE` | required | `cloudfront`, `cloudflare`, `gcp`, `header:<Name>:ip`, `header:<Name>:ip_port`, `xff` or `remote_addr`. See [Client IP presets](#client-ip-presets) |
 | `TRUSTED_PROXIES` | required unless `remote_addr` | IPs or CIDRs of the hop directly in front of the edge, usually your LB. A request from any other peer is rejected; the edge never falls back to the peer address. See [which hop to list](#client-ip-presets) |
-| `VIEWER_HEADERS` | from the preset | `field=Header,...` for country, continent, ASN, scheme, HTTP version and client-certificate verification. A rule can use a viewer field only if a trusted source is configured |
+| `VIEWER_HEADERS` | from the preset | `field=Header,...` for country, continent, ASN, scheme, HTTP version, client-certificate verification and the JA4 and JA3 TLS fingerprints. A rule can use a viewer field only if a trusted source is configured |
 | `INGRESS_SECRET_HEADER`, `INGRESS_SECRET_VALUES` | off | A header your CDN adds with a secret value. Requests without a matching value are rejected, and the header is removed before forwarding. Several values allow rotation |
 | `ALLOW_REGEX` | `false` | Allows the `matches` operator in rules |
 
 ### Client IP presets
 
-`CLIENT_IP_SOURCE` names where the client IP comes from. `cloudfront` and `cloudflare` are presets: they also set `VIEWER_HEADERS`, which you can extend or override field by field. The other sources read no viewer headers unless you set `VIEWER_HEADERS`.
+`CLIENT_IP_SOURCE` names where the client IP comes from. `cloudfront`, `cloudflare` and `gcp` are presets: they also set `VIEWER_HEADERS`, which you can extend or override field by field. The other sources read no viewer headers unless you set `VIEWER_HEADERS`.
 
 | Source | Client IP read from | Viewer headers it sets |
 |---|---|---|
 | `cloudfront` | `CloudFront-Viewer-Address`, as `ip:port` | `ip.src.country=CloudFront-Viewer-Country`, `ip.src.asnum=CloudFront-Viewer-ASN`, `ssl=CloudFront-Forwarded-Proto`, `http.request.version=CloudFront-Viewer-Http-Version` |
 | `cloudflare` | `CF-Connecting-IP`, as `ip` | `ip.src.country=CF-IPCountry`, `ssl=X-Forwarded-Proto` |
+| `gcp` | `X-Gclb-Client-Ip`, as `ip` | `ip.src.country=X-Gclb-Region`, `http.request.version=X-Gclb-Protocol`, `ssl=X-Gclb-Encrypted` |
 | `header:<Name>:ip` or `header:<Name>:ip_port` | The named header, as `ip` or `ip:port` | none |
 | `xff` | `X-Forwarded-For`, the rightmost entry not in `TRUSTED_PROXIES`, or the leftmost if every entry is trusted | none |
 | `remote_addr` | The TCP peer. Use it only when nothing sits in front of the edge | none; `VIEWER_HEADERS` is refused |
 
-The viewer fields are `ip.src.country`, `ip.src.continent`, `ip.src.asnum`, `ssl`, `http.request.version` and `client_cert.verified`. `ssl` is true when its header is `https`; `client_cert.verified` when its header is `true`.
+The viewer fields are `ip.src.country`, `ip.src.continent`, `ip.src.asnum`, `ssl`, `http.request.version`, `client_cert.verified`, `tls.client.ja4` and `tls.client.ja3`. `ssl` is true when its header is `https` or `true`; `client_cert.verified` when its header is `true`. The HTTP version is read as `1.0`, `1.1`, `2.0` or `3.0` from either CloudFront's form or the `HTTP/2` form, for every source; any other value is absent. A rule comparing it with any other literal gets a validation warning, since it can never match. A fingerprint header that is empty or not a well-formed JA4 or JA3 is absent. With an `ssl` source, a fingerprint on a request that wasn't HTTPS is absent too: TLS fingerprints exist only for TLS, so any such value came from the client. On those requests no `X-Edge-TLS-JA4` is sent and `browser_tls_mismatch` can't fire. Map `ssl` whenever you map a fingerprint.
+
+**`gcp`:** a Google Cloud external Application Load Balancer has no fixed viewer headers, so add these [custom request headers](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers-global) to the backend service: `X-Gclb-Client-Ip: {client_ip_address}`, `X-Gclb-Region: {client_region}`, `X-Gclb-Protocol: {client_protocol}` and `X-Gclb-Encrypted: {client_encrypted}`. The load balancer overwrites only the headers it adds: any other header reaches the edge exactly as the client sent it. So every header the edge reads must be a custom header on the load balancer, including any you add to `VIEWER_HEADERS`. Send `INGRESS_SECRET_HEADER` as a custom header too. It is required when the edge can be reached through an internet NEG, or by any path not limited to your own VPC; see the [production checklist](index.md#production-checklist).
+
+ASN and the TLS fingerprints are opt-in. Add `X-Gclb-Asn: {asn}`, `X-Gclb-Ja4: {tls_ja4_fingerprint}` and `X-Gclb-Ja3: {tls_ja3_fingerprint}` as custom headers first, and only then set `VIEWER_HEADERS=ip.src.asnum=X-Gclb-Asn,tls.client.ja4=X-Gclb-Ja4,tls.client.ja3=X-Gclb-Ja3`. Use only the variables Google documents for your load balancer type: the global external and [classic](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers) Application Load Balancers have all three, and the [regional external Application Load Balancer](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers-regional) has the fingerprints but no `{asn}`.
+
+**Fingerprints on other CDNs** are opt-in through `VIEWER_HEADERS`, so a preset's deployment doesn't change:
+
+| CDN | Add to `VIEWER_HEADERS` | Also needed |
+|---|---|---|
+| CloudFront | `tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint,tls.client.ja3=CloudFront-Viewer-JA3-Fingerprint` | Add both headers to the cache behavior's [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html#tls-related-versions); a cache policy can't carry them. They are present only for HTTPS requests, and the edge ignores them on a request whose `ssl` is false. The preset's viewer headers need the same policy |
+| Cloudflare | `tls.client.ja4=<Header>` | [JA4 fingerprints](https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/) are available only with Enterprise Bot Management. Have Cloudflare set a request header from the fingerprint and name that header here |
+
+A preset can be extended this way, such as `VIEWER_HEADERS=tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint`, which keeps the preset's other headers.
 
 **Which hop goes in `TRUSTED_PROXIES`:** the edge matches it against its own TCP peer, the hop directly in front of it. With CDN → load balancer → edge that is the load balancer (its subnets or addresses), not the CDN. A request from any other peer gets 400. A request from a trusted peer whose client-IP header is missing or unparseable, or, for the single-header sources, sent more than once, also gets 400: the edge never falls back to the peer address, which would count every client as the load balancer.
 
@@ -71,7 +85,7 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 |---|---|---|
 | `LISTEN_ADDR` | `:8080` | Traffic |
 | `INTERNAL_ADDR` | `:9090` | `/livez`, `/readyz`, `/metrics` |
-| `MAX_INFLIGHT` | `10000` | Concurrent ordinary requests per replica; more get `503 overloaded` |
+| `MAX_INFLIGHT` | `GOMEMLIMIT` ÷ 256 KiB, at most `10000`; `10000` without `GOMEMLIMIT` | Concurrent ordinary requests per replica; more get `503 overloaded`. Each in-flight proxied request holds memory, about 100 KiB in a load test on Kubernetes, kernel socket buffers included, which `GOMEMLIMIT` doesn't cap. The default keeps that, plus streams and headroom, under `GOMEMLIMIT`, so set `GOMEMLIMIT` to about 90% of the container's memory limit. Past what memory holds, a slow upstream gets the edge OOM-killed instead of answering 503. **Settings → Requests in progress** in admin can lower it for every edge, never raise it |
 | `MAX_STREAMS` | `1000` | Concurrent WebSocket and SSE requests per replica |
 | `TOKEN_CACHE_SIZE` | `10000` | Verified tokens kept per replica so repeat requests skip the signature check. When full, new tokens are verified on every request but not stored. Raise it when `edge_auth_total{result="verified"}` stays high next to `cached` |
 | `MAX_HEADER_BYTES` | `65536` | |

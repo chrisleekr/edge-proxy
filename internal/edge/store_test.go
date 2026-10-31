@@ -159,6 +159,31 @@ func TestBootstrapAge(t *testing.T) {
 	}
 }
 
+// A bootstrap file exported while an autopilot rule was live keeps it until
+// it expires. Loaded after that, the snapshot is still valid: the edge
+// becomes ready and skips the expired rule.
+func TestBootstrapWithExpiredRule(t *testing.T) {
+	boot := filepath.Join(t.TempDir(), "boot.json")
+	c := testConfig(1)
+	r := rlRule("ap-scraper", "true", "sliding_window", 1, "ip")
+	r.FailMode = "local"
+	c.RateLimitRules = []snapshot.RateLimitRule{r}
+	expireRule(t, c, 0, time.Now().Add(-time.Minute))
+	writeEnvelope(t, boot, envelope(c))
+
+	h := pollerHarness(t, map[string]string{"BOOTSTRAP_PATH": boot})
+	h.srv.poller.loadInitial(t.Context())
+	if !h.srv.ready() || activeVersion(h) != 1 {
+		t.Fatalf("ready %v, version %d", h.srv.ready(), activeVersion(h))
+	}
+	if got := h.statuses(2, "GET", "/"); !eqInts(got, 200, 200) {
+		t.Fatalf("got %v, want the expired rule skipped", got)
+	}
+	if n := h.ruleOutcome("ap-scraper", "expired"); n != 2 {
+		t.Fatalf("expired %v, want 2", n)
+	}
+}
+
 // With no usable source the edge stays not-ready and says so.
 func TestStartupWithNothing(t *testing.T) {
 	h := pollerHarness(t, map[string]string{"BOOTSTRAP_PATH": filepath.Join(t.TempDir(), "missing.json")})

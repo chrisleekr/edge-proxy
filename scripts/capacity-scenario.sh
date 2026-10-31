@@ -5,9 +5,11 @@
 # Valkey bytes per key. These per-unit figures feed capacity sizing.
 # STREAMS=N first opens N streams (half SSE, half WebSocket), reports the
 # edge's memory per stream, and keeps them open while the steps run.
+# SENSORS=N adds N log-only rules shaped like the autopilot's sensors, so
+# two runs (SENSORS=0 and SENSORS=10) give the cost of a sensor.
 # Not a CI gate: the edge shares the Docker VM with k6 and Valkey.
 #
-#   STEPS="500 1000 2000" BUDGET_MS=10 IPS=100000 DURATION=30s STREAMS=2000 scripts/capacity-scenario.sh
+#   STEPS="500 1000 2000" BUDGET_MS=10 IPS=100000 DURATION=30s STREAMS=2000 SENSORS=10 scripts/capacity-scenario.sh
 set -eu
 cd "$(dirname "$0")/../loadtest"
 
@@ -16,6 +18,7 @@ BUDGET_MS="${BUDGET_MS:-10}"
 IPS="${IPS:-100000}"
 DURATION="${DURATION:-30s}"
 STREAMS="${STREAMS:-0}"
+SENSORS="${SENSORS:-0}"
 
 project="edge-scenario"
 compose() { docker compose -p "${project}" "$@"; }
@@ -27,7 +30,7 @@ k6() { compose run --rm --no-deps k6 run --quiet -e BUDGET_MS="${BUDGET_MS}" -e 
 vk() { compose exec -T valkey valkey-cli "$@" | tr -d '\r'; }
 evalsha() { vk INFO commandstats | sed -n 's/^cmdstat_evalsha:calls=\([0-9]*\),.*/\1/p'; }
 
-k6 -e PUBLISH=1 -e RATE=20 -e DURATION=5s >/dev/null
+k6 -e PUBLISH=1 -e SENSORS="${SENSORS}" -e RATE=20 -e DURATION=5s >/dev/null
 # Warm connections and pools before measuring; the result is discarded.
 k6 -e RATE=500 -e DURATION=20s >/dev/null 2>&1 || true
 edge="$(compose ps -q edge-1)"
@@ -47,6 +50,7 @@ if [ "${STREAMS}" -gt 0 ]; then
   echo "Streams: $(metric edge_streams) of ${STREAMS} open, edge memory ${before} -> ${after} MiB, $(( (after - before) * 1024 / STREAMS )) KiB per stream"
 fi
 
+echo "Sensors: ${SENSORS} ($(( (SENSORS + 1) / 2 )) count, $(( SENSORS / 2 )) distinct)"
 echo "Budget p99 ${BUDGET_MS} ms, ${IPS} client IPs, ${DURATION} per step, Docker VM ${cores} vCPUs"
 echo "  target  achieved   p50 ms   p99 ms  errors  dropped  verdict  edge CPU  Valkey calls/req"
 for rate in ${STEPS}; do

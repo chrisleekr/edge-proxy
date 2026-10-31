@@ -46,6 +46,7 @@ if x > now then blocked = x end
 return {allowed, rem, reset, retry, now, blocked}
 `
 
+// luaBody has no Distinct entry: luaDistinct is a whole script.
 var luaBody = [numAlgos]string{ //nolint:gosec // G101 matches "token" in Lua source; there are no credentials
 	FixedWindow: `
 local ws = now - now % period
@@ -102,11 +103,58 @@ ttl = reset
 `,
 }
 
+// luaDistinct counts distinct values per subject in a fixed window. The
+// value is a string: a 1024-bit bitmap in bytes 0 to 127, then the window
+// start and blocked-until in ms as 15 digits each, read with GETRANGE and
+// written with SETRANGE. ARGV is limit, period ms, the value's bit and
+// penalty ms. The count is a linear-counting estimate, -m*ln(zeros/m),
+// rounded; a full bitmap counts as over any limit. It returns the fields of
+// Result like the other scripts.
+const luaDistinct = `
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local limit, period, bit, penalty = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local meta = redis.call('GETRANGE', KEYS[1], 128, 157)
+local ws, x = 0, 0
+local set = string.len(meta) == 30
+if set then ws = tonumber(string.sub(meta, 1, 15)); x = tonumber(string.sub(meta, 16, 30)) end
+if x > now then
+  return {0, 0, x - now, x - now, now, x}
+end
+x = 0
+if not set or now >= ws + period then
+  ws = now
+  redis.call('SET', KEYS[1], string.rep('\0', 128) .. string.format('%015d%015d', ws, 0))
+end
+redis.call('SETBIT', KEYS[1], bit, 1)
+local zeros = 1024 - redis.call('BITCOUNT', KEYS[1], 0, 127)
+local est = limit + 1
+if zeros > 0 then est = math.floor(-1024 * math.log(zeros / 1024) + 0.5) end
+local allowed, rem, retry = 0, 0, 0
+local reset = ws + period - now
+if est <= limit then allowed = 1; rem = limit - est else retry = reset end
+local ttl = reset
+if allowed == 0 and penalty > 0 then
+  x = now + penalty
+  retry = math.max(retry, penalty)
+  reset = math.max(reset, penalty)
+  ttl = math.max(ttl, penalty)
+end
+redis.call('SETRANGE', KEYS[1], 128, string.format('%015d%015d', ws, x))
+redis.call('PEXPIRE', KEYS[1], math.max(ttl, 1))
+local blocked = 0
+if x > now then blocked = x end
+return {allowed, rem, reset, retry, now, blocked}
+`
+
 type script struct{ src, sha string }
 
 var scripts = func() (out [numAlgos]script) {
 	for i, body := range luaBody {
 		src := luaHead + body + luaTail
+		if Algo(i) == Distinct {
+			src = luaDistinct
+		}
 		sum := sha1.Sum([]byte(src)) //nolint:gosec // script name, see import
 		out[i] = script{src: src, sha: hex.EncodeToString(sum[:])}
 	}

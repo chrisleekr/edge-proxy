@@ -144,7 +144,7 @@ func TestDocsListEveryField(t *testing.T) {
 	for _, f := range expr.Fields {
 		code = append(code, f.Name)
 	}
-	field := regexp.MustCompile(`^[a-z_]+(\.[a-z_]+)*(\[.*\])?$`)
+	field := regexp.MustCompile(`^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)*(\[.*\])?$`)
 	var documented []string
 	for _, row := range docRows(t, "reference/expressions.md", "Fields") {
 		for _, f := range spans(row[0], field) {

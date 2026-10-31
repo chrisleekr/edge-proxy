@@ -1,0 +1,902 @@
+{
+  "exported_at": "2026-10-01T00:00:00Z",
+  "active": {
+    "schema": 4,
+    "version": 7,
+    "kill_switch": {
+      "rate_limit": false,
+      "auth": false,
+      "block": true
+    },
+    "global": {
+      "backstop": {
+        "limit": 100,
+        "period": "1s",
+        "burst": 200,
+        "max_entries": 100000
+      },
+      "defaults": {
+        "locale": false,
+        "body_limit": 10485760,
+        "body_read_timeout": "1m0s",
+        "upstream_timeout": "30s",
+        "responses": {
+          "bad_gateway": "bad_gateway_json",
+          "bad_request": "bad_request_json",
+          "forbidden": "forbidden_json",
+          "gateway_timeout": "gateway_timeout_json",
+          "overloaded": "overloaded_json",
+          "payload_too_large": "payload_too_large_json",
+          "rate_limited": "rate_limited_json",
+          "unauthorized": "unauthorized_json",
+          "unavailable": "unavailable_json"
+        }
+      },
+      "cors_policies": {
+        "app": {
+          "origins": [
+            "https://app.example.com",
+            "http://localhost:3000"
+          ],
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "request_headers": [
+            "Authorization",
+            "Content-Type"
+          ],
+          "exposed_headers": [
+            "RateLimit"
+          ],
+          "credentials": true,
+          "max_age": "10m0s"
+        },
+        "public": {
+          "origins": [
+            "*"
+          ],
+          "methods": [
+            "GET"
+          ],
+          "request_headers": [
+            "*"
+          ],
+          "exposed_headers": null,
+          "credentials": false,
+          "max_age": "0s"
+        }
+      },
+      "responses": {
+        "bad_gateway_json": {
+          "status": 502,
+          "content_type": "application/json",
+          "body": "{\"error\":\"bad_gateway\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "bad_request_json": {
+          "status": 400,
+          "content_type": "application/json",
+          "body": "{\"error\":\"bad_request\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "forbidden_json": {
+          "status": 403,
+          "content_type": "application/json",
+          "body": "{\"error\":\"forbidden\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "gateway_timeout_json": {
+          "status": 504,
+          "content_type": "application/json",
+          "body": "{\"error\":\"gateway_timeout\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "overloaded_json": {
+          "status": 503,
+          "content_type": "application/json",
+          "body": "{\"error\":\"overloaded\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "payload_too_large_json": {
+          "status": 413,
+          "content_type": "application/json",
+          "body": "{\"error\":\"payload_too_large\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "rate_limited_html": {
+          "status": 429,
+          "content_type": "text/html; charset=utf-8",
+          "body": "\u003c!doctype html\u003e\u003ctitle\u003eToo many requests\u003c/title\u003e\u003cp\u003eTry again in {{retry_after}} seconds.\u003c/p\u003e"
+        },
+        "rate_limited_json": {
+          "status": 429,
+          "content_type": "application/json",
+          "body": "{\"error\":\"rate_limited\",\"retry_after\":{{retry_after}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "unauthorized_json": {
+          "status": 401,
+          "content_type": "application/json",
+          "body": "{\"error\":\"unauthorized\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "unavailable_json": {
+          "status": 503,
+          "content_type": "application/json",
+          "body": "{\"error\":\"unavailable\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        }
+      },
+      "locale": {
+        "supported": [
+          "en",
+          "ko",
+          "zh-Hant"
+        ],
+        "default": "en",
+        "output_header": "X-Edge-Locale"
+      },
+      "request_headers": {
+        "forward": {
+          "mode": "denylist",
+          "names": [
+            "X-Debug"
+          ]
+        }
+      },
+      "max_inflight": 500
+    },
+    "auth": {
+      "issuers": [
+        {
+          "id": "corp",
+          "issuer": "https://auth.example.com/",
+          "audiences": [
+            "api"
+          ],
+          "jwks_url": "https://auth.example.com/.well-known/jwks.json",
+          "algorithm": "RS256"
+        },
+        {
+          "id": "corp-new",
+          "issuer": "https://id.example.com/",
+          "audiences": [
+            "api",
+            "API"
+          ],
+          "jwks_url": "https://id.example.com/jwks",
+          "algorithm": "ES256"
+        }
+      ],
+      "default_accepted": [
+        "corp"
+      ]
+    },
+    "config_rules": [
+      {
+        "id": "orders-auth",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/orders"
+            }
+          ]
+        },
+        "settings": {
+          "auth": {
+            "mode": "required",
+            "accepted": [
+              "corp",
+              "corp-new"
+            ]
+          },
+          "cors_policy": "app",
+          "upstream_timeout": "10s",
+          "block": "log"
+        }
+      },
+      {
+        "id": "pages",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "not_starts_with",
+              "value": "/v1/"
+            }
+          ]
+        },
+        "settings": {
+          "auth": {
+            "mode": "optional"
+          },
+          "cors_policy": "",
+          "locale": true,
+          "responses": {
+            "rate_limited": "rate_limited_html"
+          },
+          "body_limit": 1048576,
+          "ratelimit_headers": true
+        }
+      },
+      {
+        "id": "public-feed",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/public/"
+            }
+          ]
+        },
+        "settings": {
+          "cors_policy": "public"
+        }
+      }
+    ],
+    "rate_limit_rules": [
+      {
+        "id": "site-per-ip",
+        "expression": {
+          "combinator": "and"
+        },
+        "algorithm": "token_bucket",
+        "limit": 300,
+        "period": "1m0s",
+        "burst": 600,
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "fail_mode": "local"
+      },
+      {
+        "id": "login-per-ip",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.method",
+              "operator": "eq",
+              "value": "POST"
+            },
+            {
+              "field": "http.request.uri.path",
+              "operator": "eq",
+              "value": "/v1/login"
+            }
+          ]
+        },
+        "algorithm": "sliding_window",
+        "limit": 5,
+        "period": "1m0s",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "penalty": "5m0s",
+        "fail_mode": "open",
+        "count_statuses": [
+          "4xx"
+        ]
+      },
+      {
+        "id": "api-key",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/"
+            }
+          ]
+        },
+        "algorithm": "fixed_window",
+        "limit": 1000,
+        "period": "1h0m0s",
+        "key": [
+          "header:x-api-key"
+        ],
+        "on_missing_key": "skip",
+        "action": "log",
+        "fail_mode": "closed"
+      },
+      {
+        "id": "tenant",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "ip.src.country",
+              "operator": "in",
+              "value": [
+                "AU",
+                "NZ"
+              ]
+            },
+            {
+              "field": "edge.locale",
+              "operator": "ne",
+              "value": "ko"
+            },
+            {
+              "field": "edge.locale",
+              "operator": "not_starts_with",
+              "value": "zh"
+            }
+          ]
+        },
+        "algorithm": "leaky_bucket",
+        "limit": 50,
+        "period": "1s",
+        "burst": 10,
+        "key": [
+          "jwt_claim:tenant",
+          "country",
+          "asnum",
+          "locale",
+          "query:page"
+        ],
+        "on_missing_key": "reject",
+        "action": "block",
+        "fail_mode": "open"
+      },
+      {
+        "id": "crawl",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/products/"
+            }
+          ]
+        },
+        "algorithm": "distinct",
+        "limit": 100,
+        "period": "1m0s",
+        "key": [
+          "ja4",
+          "ip"
+        ],
+        "on_missing_key": "skip",
+        "action": "block",
+        "fail_mode": "open",
+        "distinct_of": "query:id"
+      }
+    ],
+    "request_header_rules": [
+      {
+        "id": "keep-original-ua",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.user_agent",
+              "operator": "ne"
+            }
+          ]
+        },
+        "ops": [
+          {
+            "op": "copy",
+            "from": "User-Agent",
+            "to": "X-Original-User-Agent"
+          }
+        ]
+      },
+      {
+        "id": "tenant-header",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.jwt.claims",
+              "key": "tenant",
+              "operator": "ne"
+            }
+          ]
+        },
+        "ops": [
+          {
+            "op": "set",
+            "name": "X-Tenant",
+            "value": "{{jwt_claim:tenant}}"
+          },
+          {
+            "op": "append",
+            "name": "X-Trace",
+            "value": "edge {{request_id}} {{client_ip}} {{country}} {{locale}} {{header:user-agent}}"
+          },
+          {
+            "op": "remove",
+            "name": "X-Debug-Token"
+          },
+          {
+            "op": "rename",
+            "from": "X-Old",
+            "to": "X-New"
+          }
+        ]
+      },
+      {
+        "id": "orders-allowlist",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/orders"
+            }
+          ]
+        },
+        "ops": [
+          {
+            "op": "forward",
+            "mode": "allowlist",
+            "names": [
+              "Authorization",
+              "Content-Type",
+              "Accept",
+              "Cookie",
+              "User-Agent",
+              "X-Old"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "candidate": {
+    "schema": 4,
+    "version": 8,
+    "kill_switch": {
+      "rate_limit": false,
+      "auth": false
+    },
+    "global": {
+      "backstop": {
+        "limit": 100,
+        "period": "1s",
+        "burst": 200,
+        "max_entries": 100000
+      },
+      "defaults": {
+        "locale": false,
+        "body_limit": 10485760,
+        "body_read_timeout": "1m0s",
+        "upstream_timeout": "30s",
+        "responses": {
+          "bad_gateway": "bad_gateway_json",
+          "bad_request": "bad_request_json",
+          "forbidden": "forbidden_json",
+          "gateway_timeout": "gateway_timeout_json",
+          "overloaded": "overloaded_json",
+          "payload_too_large": "payload_too_large_json",
+          "rate_limited": "rate_limited_json",
+          "unauthorized": "unauthorized_json",
+          "unavailable": "unavailable_json"
+        }
+      },
+      "cors_policies": {
+        "app": {
+          "origins": [
+            "https://app.example.com",
+            "http://localhost:3000"
+          ],
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "request_headers": [
+            "Authorization",
+            "Content-Type"
+          ],
+          "exposed_headers": [
+            "RateLimit"
+          ],
+          "credentials": true,
+          "max_age": "10m0s"
+        },
+        "public": {
+          "origins": [
+            "*"
+          ],
+          "methods": [
+            "GET"
+          ],
+          "request_headers": [
+            "*"
+          ],
+          "exposed_headers": null,
+          "credentials": false,
+          "max_age": "0s"
+        }
+      },
+      "responses": {
+        "bad_gateway_json": {
+          "status": 502,
+          "content_type": "application/json",
+          "body": "{\"error\":\"bad_gateway\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "bad_request_json": {
+          "status": 400,
+          "content_type": "application/json",
+          "body": "{\"error\":\"bad_request\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "forbidden_json": {
+          "status": 403,
+          "content_type": "application/json",
+          "body": "{\"error\":\"forbidden\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "gateway_timeout_json": {
+          "status": 504,
+          "content_type": "application/json",
+          "body": "{\"error\":\"gateway_timeout\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "overloaded_json": {
+          "status": 503,
+          "content_type": "application/json",
+          "body": "{\"error\":\"overloaded\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "payload_too_large_json": {
+          "status": 413,
+          "content_type": "application/json",
+          "body": "{\"error\":\"payload_too_large\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "rate_limited_html": {
+          "status": 429,
+          "content_type": "text/html; charset=utf-8",
+          "body": "\u003c!doctype html\u003e\u003ctitle\u003eToo many requests\u003c/title\u003e\u003cp\u003eTry again in {{retry_after}} seconds.\u003c/p\u003e"
+        },
+        "rate_limited_json": {
+          "status": 429,
+          "content_type": "application/json",
+          "body": "{\"error\":\"rate_limited\",\"retry_after\":{{retry_after}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "unauthorized_json": {
+          "status": 401,
+          "content_type": "application/json",
+          "body": "{\"error\":\"unauthorized\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        },
+        "unavailable_json": {
+          "status": 503,
+          "content_type": "application/json",
+          "body": "{\"error\":\"unavailable\",\"status\":{{status}},\"request_id\":\"{{request_id}}\"}"
+        }
+      },
+      "locale": {
+        "supported": [
+          "en",
+          "ko",
+          "zh-Hant"
+        ],
+        "default": "en",
+        "output_header": "X-Edge-Locale"
+      },
+      "request_headers": {
+        "forward": {
+          "mode": "denylist",
+          "names": [
+            "X-Debug"
+          ]
+        }
+      }
+    },
+    "auth": {
+      "issuers": [
+        {
+          "id": "corp",
+          "issuer": "https://auth.example.com/",
+          "audiences": [
+            "api"
+          ],
+          "jwks_url": "https://auth.example.com/.well-known/jwks.json",
+          "algorithm": "RS256"
+        },
+        {
+          "id": "corp-new",
+          "issuer": "https://id.example.com/",
+          "audiences": [
+            "api",
+            "API"
+          ],
+          "jwks_url": "https://id.example.com/jwks",
+          "algorithm": "ES256"
+        }
+      ],
+      "default_accepted": [
+        "corp"
+      ]
+    },
+    "config_rules": [
+      {
+        "id": "orders-auth",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/orders"
+            }
+          ]
+        },
+        "settings": {
+          "auth": {
+            "mode": "required",
+            "accepted": [
+              "corp",
+              "corp-new"
+            ]
+          },
+          "cors_policy": "app",
+          "upstream_timeout": "10s"
+        }
+      },
+      {
+        "id": "pages",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "not_starts_with",
+              "value": "/v1/"
+            }
+          ]
+        },
+        "settings": {
+          "auth": {
+            "mode": "optional"
+          },
+          "cors_policy": "",
+          "locale": true,
+          "responses": {
+            "rate_limited": "rate_limited_html"
+          },
+          "body_limit": 1048576,
+          "ratelimit_headers": true
+        }
+      },
+      {
+        "id": "public-feed",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/public/"
+            }
+          ]
+        },
+        "settings": {
+          "cors_policy": "public"
+        }
+      }
+    ],
+    "rate_limit_rules": [
+      {
+        "id": "site-per-ip",
+        "expression": {
+          "combinator": "and"
+        },
+        "algorithm": "token_bucket",
+        "limit": 300,
+        "period": "1m0s",
+        "burst": 600,
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "fail_mode": "local"
+      },
+      {
+        "id": "login-per-ip",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.method",
+              "operator": "eq",
+              "value": "POST"
+            },
+            {
+              "field": "http.request.uri.path",
+              "operator": "eq",
+              "value": "/v1/login"
+            }
+          ]
+        },
+        "algorithm": "sliding_window",
+        "limit": 5,
+        "period": "1m0s",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "penalty": "5m0s",
+        "fail_mode": "open"
+      },
+      {
+        "id": "api-key",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/"
+            }
+          ]
+        },
+        "algorithm": "fixed_window",
+        "limit": 1000,
+        "period": "1h0m0s",
+        "key": [
+          "header:x-api-key"
+        ],
+        "on_missing_key": "skip",
+        "action": "log",
+        "fail_mode": "closed"
+      },
+      {
+        "id": "tenant",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "ip.src.country",
+              "operator": "in",
+              "value": [
+                "AU",
+                "NZ"
+              ]
+            },
+            {
+              "field": "edge.locale",
+              "operator": "ne",
+              "value": "ko"
+            },
+            {
+              "field": "edge.locale",
+              "operator": "not_starts_with",
+              "value": "zh"
+            }
+          ]
+        },
+        "algorithm": "leaky_bucket",
+        "limit": 50,
+        "period": "1s",
+        "burst": 10,
+        "key": [
+          "jwt_claim:tenant",
+          "country",
+          "asnum",
+          "locale",
+          "query:page"
+        ],
+        "on_missing_key": "reject",
+        "action": "block",
+        "fail_mode": "open"
+      }
+    ],
+    "request_header_rules": [
+      {
+        "id": "keep-original-ua",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.user_agent",
+              "operator": "ne"
+            }
+          ]
+        },
+        "ops": [
+          {
+            "op": "copy",
+            "from": "User-Agent",
+            "to": "X-Original-User-Agent"
+          }
+        ]
+      },
+      {
+        "id": "tenant-header",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.jwt.claims",
+              "key": "tenant",
+              "operator": "ne"
+            }
+          ]
+        },
+        "ops": [
+          {
+            "op": "set",
+            "name": "X-Tenant",
+            "value": "{{jwt_claim:tenant}}"
+          },
+          {
+            "op": "append",
+            "name": "X-Trace",
+            "value": "edge {{request_id}} {{client_ip}} {{country}} {{locale}} {{header:user-agent}}"
+          },
+          {
+            "op": "remove",
+            "name": "X-Debug-Token"
+          },
+          {
+            "op": "rename",
+            "from": "X-Old",
+            "to": "X-New"
+          }
+        ]
+      },
+      {
+        "id": "orders-allowlist",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.request.uri.path",
+              "operator": "starts_with",
+              "value": "/v1/orders"
+            }
+          ]
+        },
+        "ops": [
+          {
+            "op": "forward",
+            "mode": "allowlist",
+            "names": [
+              "Authorization",
+              "Content-Type",
+              "Accept",
+              "Cookie",
+              "User-Agent",
+              "X-Old"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "canary_percent": 0.07,
+  "canary_expires_at": "2026-10-01T01:00:00Z",
+  "fleet_size": 6,
+  "keys": [
+    {
+      "issuer_id": "corp",
+      "jwks_url": "https://idp.example.com/jwks",
+      "fetched_at": "2026-10-01T00:00:00Z",
+      "jwks": {
+        "keys": [
+          {
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "kid": "k1",
+            "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+          }
+        ]
+      }
+    }
+  ],
+  "verified_bots": [
+    {
+      "source": "https://bots.example.com/googlebot.json",
+      "prefixes": [
+        "66.249.64.0/27",
+        "2001:4860:4801:10::/64"
+      ]
+    }
+  ]
+}

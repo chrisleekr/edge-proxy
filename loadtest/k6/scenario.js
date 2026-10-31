@@ -1,7 +1,8 @@
 // Capacity scenario: one edge at a fixed rate with traffic shaped
 // like a public API, checked against a p99 budget. loadtest/scenario.sh runs
 // it once per step and adds CPU and Valkey figures. PUBLISH=1 installs the
-// scenario policy first.
+// scenario policy first; SENSORS=N adds N log-only rules shaped like the
+// autopilot's sensors, to measure what each costs.
 //
 // Mix: 50% /api/ (site-wide + api rule), 45% pages (site-wide only),
 // 5% /login (site-wide + login rule): 1.55 rate-limit rules per request.
@@ -16,6 +17,7 @@ const rate = Number(__ENV.RATE || 500);
 const budget = Number(__ENV.BUDGET_MS || 10);
 const ips = Number(__ENV.IPS || 100000);
 const seconds = parseInt(__ENV.DURATION || '30s', 10);
+const paths = ['/api/items', '/pages/home', '/login'];
 
 export const options = {
   setupTimeout: '120s',
@@ -33,6 +35,19 @@ export const options = {
   },
 };
 
+// The sensor-<i> rules alternate an in-memory 404 count and a distinct-paths
+// count, both per IP, over the three paths. A person can't use the
+// autopilot's ap- prefix; the edge runs both the same. With 10 sensors a
+// path has at most 2 count rules and every request stays within the edge's
+// per-request rule limits.
+const sensors = Array.from({ length: Number(__ENV.SENSORS || 0) }, (_, i) =>
+  rule(`sensor-${i}`, path('eq', paths[i % 3]), {
+    action: 'log',
+    period: '1m',
+    ...(i % 2 === 0 ? { algorithm: 'sliding_window', limit: 1000, count_statuses: ['404'] } : { algorithm: 'distinct', distinct_of: 'path', limit: 1000 }),
+  }),
+);
+
 export function setup() {
   if (__ENV.PUBLISH !== '1') return;
   const cookie = session();
@@ -42,12 +57,12 @@ export function setup() {
       rule('all-per-ip', { combinator: 'and', rules: [] }, { algorithm: 'sliding_window', limit: 6000, period: '1m' }),
       rule('api-per-ip', path('starts_with', '/api/'), { algorithm: 'token_bucket', limit: 100, period: '1s', burst: 200 }),
       rule('login', path('eq', '/login'), { algorithm: 'sliding_window', limit: 100, period: '1m' }),
+      ...sensors,
     ],
   }), { message: 'capacity scenario', tests: [] });
   converged(cookie, v);
 }
 
-const paths = ['/api/items', '/pages/home', '/login'];
 export function hit() {
   const r = Math.random();
   const p = r < 0.5 ? paths[0] : r < 0.95 ? paths[1] : paths[2];

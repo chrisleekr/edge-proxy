@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -627,7 +628,8 @@ func TestRateLimitHeaders(t *testing.T) {
 }
 
 // At most 5 non-site-wide rules run per request; the rest are skipped and
-// counted, so a request never costs more than 7 Valkey calls.
+// counted, so a request never costs more than 7 Valkey calls. /metrics
+// names each skipped rule, so an operator sees which rules lose out.
 func TestRulesCapped(t *testing.T) {
 	h := valkeyHarness(t, nil)
 	c := testConfig(1)
@@ -639,6 +641,229 @@ func TestRulesCapped(t *testing.T) {
 	if h.srv.m.rulesCapped.Load() != 1 || h.ruleStats(4).evaluated.Load() != 1 || h.ruleStats(5).evaluated.Load() != 0 {
 		t.Fatalf("capped=%d rule4=%d rule5=%d", h.srv.m.rulesCapped.Load(), h.ruleStats(4).evaluated.Load(), h.ruleStats(5).evaluated.Load())
 	}
+	m := h.metrics()
+	for i, r := range c.RateLimitRules {
+		want := 0.0
+		if i >= 5 {
+			want = 1
+		}
+		if n, ok := m[`edge_ratelimit_rule_total{rule="`+r.ID+`",outcome="capped"}`]; !ok || n != want {
+			t.Errorf("rule %d capped %v (present %v), want %v", i, n, ok, want)
+		}
+	}
+	// The stats report carries each rule's capped count too, so admin can
+	// show a rule pushed past the cap; a rule never capped leaves it out.
+	b, err := json.Marshal(h.srv.store.load().active.stats.counts().RateLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported []map[string]any
+	if err := json.Unmarshal(b, &reported); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range reported {
+		i := slices.IndexFunc(c.RateLimitRules, func(rule snapshot.RateLimitRule) bool { return rule.ID == r["id"] })
+		capped, ok := r["capped"]
+		switch {
+		case i >= 5 && capped != float64(1):
+			t.Errorf("report for rule %d has capped %v, want 1", i, capped)
+		case i < 5 && ok:
+			t.Errorf("report for rule %d has capped %v, want it left out", i, capped)
+		}
+	}
+}
+
+// A request capped and then rejected for a missing key counts capped in
+// both the total and the skipped rule, so the two never disagree.
+func TestRulesCappedThenRejectedCountsCappedInBoth(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	c := testConfig(1)
+	for i := range 6 {
+		c.RateLimitRules = append(c.RateLimitRules, rlRule(uniq(fmt.Sprint("cap", i)), `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip"))
+	}
+	tenant := rlRule(uniq("tenant"), `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip", "header:x-tenant")
+	tenant.OnMissingKey = "reject"
+	c.RateLimitRules = append(c.RateLimitRules, tenant)
+	h.loadJSON(envelope(c), countStatuses(6, "404"))
+	if got := h.statuses(1, "GET", "/x"); !eqInts(got, 400) {
+		t.Fatalf("got %v, want [400]", got)
+	}
+	m := h.metrics()
+	if n := m["edge_ratelimit_rules_capped_total"]; n != 1 {
+		t.Errorf("rules_capped_total %v, want 1", n)
+	}
+	if n := m[`edge_ratelimit_rule_total{rule="`+c.RateLimitRules[5].ID+`",outcome="capped"}`]; n != 1 {
+		t.Errorf("skipped rule capped %v, want 1", n)
+	}
+}
+
+// A rate-limit rule stops at its expires_at: from that instant it is
+// skipped and counted as expired on /metrics, so a temporary rule needs no
+// second publish to end.
+func TestExpiresAt(t *testing.T) {
+	exp := time.Now().Truncate(time.Second).Add(time.Minute)
+	cases := []struct {
+		name      string
+		now       time.Time
+		want      []int
+		expired   float64
+		evaluated float64
+	}{
+		{"a rule before its expiry still limits", exp.Add(-time.Millisecond), []int{200, 429}, 0, 2},
+		{"a rule at its expiry is skipped", exp, []int{200, 200}, 2, 0},
+		{"a rule after its expiry is skipped", exp.Add(time.Hour), []int{200, 200}, 2, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, nil) // no Valkey: the local fail mode limits in memory
+			h.fakeClock(tc.now)
+			c := testConfig(1)
+			r := rlRule("temporary", "true", "sliding_window", 1, "ip")
+			r.FailMode = "local"
+			c.RateLimitRules = []snapshot.RateLimitRule{r}
+			expireRule(t, c, 0, exp)
+			h.load(envelope(c))
+			if got := h.statuses(2, "GET", "/"); !eqInts(got, tc.want...) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			if n := h.ruleOutcome("temporary", "expired"); n != tc.expired {
+				t.Errorf("expired %v, want %v", n, tc.expired)
+			}
+			if n := h.ruleOutcome("temporary", "evaluated"); n != tc.evaluated {
+				t.Errorf("evaluated %v, want %v", n, tc.evaluated)
+			}
+		})
+	}
+}
+
+// An expired rule is skipped before it takes one of the 5 slots, so the
+// rules after it still run instead of being capped.
+func TestExpiredRuleTakesNoSlot(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	c := testConfig(1)
+	for i := range 6 {
+		c.RateLimitRules = append(c.RateLimitRules, rlRule(uniq(fmt.Sprint("slot", i)), `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip"))
+	}
+	expireRule(t, c, 0, time.Now().Add(-time.Minute))
+	h.load(envelope(c))
+	h.statuses(1, "GET", "/x")
+	if n := h.srv.m.rulesCapped.Load(); n != 0 {
+		t.Errorf("rules capped %d, want 0", n)
+	}
+	if n := h.ruleStats(5).evaluated.Load(); n != 1 {
+		t.Errorf("the sixth rule evaluated %d times, want 1", n)
+	}
+	if n := h.ruleOutcome(c.RateLimitRules[0].ID, "expired"); n != 1 {
+		t.Errorf("expired %v, want 1", n)
+	}
+}
+
+// A client serving a penalty from a rule is let through once the rule
+// expires: the penalty belongs to the rule, which no longer runs.
+func TestExpiredRuleLiftsPenalty(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	exp := time.Now().Truncate(time.Second).Add(time.Minute)
+	clock := h.fakeClock(exp.Add(-time.Minute))
+	c := testConfig(1)
+	r := rlRule(uniq("penalty"), "true", "sliding_window", 1, "ip")
+	r.Penalty = dur(10 * time.Minute)
+	c.RateLimitRules = []snapshot.RateLimitRule{r}
+	expireRule(t, c, 0, exp)
+	h.load(envelope(c))
+	if got := h.statuses(3, "GET", "/"); !eqInts(got, 200, 429, 429) {
+		t.Fatalf("before expiry: %v, want the penalty to block", got)
+	}
+	clock.Store(exp.UnixMilli())
+	if got := h.statuses(1, "GET", "/"); !eqInts(got, 200) {
+		t.Fatalf("at expiry: %v, want the client let through", got)
+	}
+}
+
+// /metrics counts each rate-limit rule's outcomes, so a dashboard shows
+// what a rule does on this replica without waiting for admin's minutes.
+func TestMetricsCountRateLimitRuleOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		valkey   bool
+		action   string
+		requests int
+		want     map[string]float64
+	}{
+		{"a blocking rule over its limit counts evaluated and limited", true, "block", 3,
+			map[string]float64{"evaluated": 3, "limited": 2, "would_limit": 0, "failed": 0, "capped": 0}},
+		{"a log-only rule over its limit counts would_limit, not limited", true, "log", 3,
+			map[string]float64{"evaluated": 3, "limited": 0, "would_limit": 2, "failed": 0, "capped": 0}},
+		{"a fail_mode open rule with Valkey down counts failed", false, "block", 2,
+			map[string]float64{"evaluated": 2, "limited": 0, "would_limit": 0, "failed": 2, "capped": 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h *harness
+			if tc.valkey {
+				h = valkeyHarness(t, nil)
+			} else {
+				h = newHarness(t, nil)
+			}
+			c := testConfig(1)
+			r := rlRule(uniq("outcomes"), "true", "sliding_window", 1, "ip")
+			r.Action = tc.action
+			c.RateLimitRules = []snapshot.RateLimitRule{r}
+			h.load(envelope(c))
+			h.statuses(tc.requests, "GET", "/")
+			m := h.metrics()
+			for outcome, want := range tc.want {
+				if n, ok := m[`edge_ratelimit_rule_total{rule="`+r.ID+`",outcome="`+outcome+`"}`]; !ok || n != want {
+					t.Errorf("%s %v (present %v), want %v", outcome, n, ok, want)
+				}
+			}
+		})
+	}
+
+	t.Run("a rule past its expiry counts expired, not evaluated", func(t *testing.T) {
+		h := newHarness(t, nil)
+		c := testConfig(1)
+		r := rlRule(uniq("outcomes"), "true", "sliding_window", 1, "ip")
+		r.FailMode = "local"
+		c.RateLimitRules = []snapshot.RateLimitRule{r}
+		expireRule(t, c, 0, time.Now().Add(-time.Minute))
+		h.load(envelope(c))
+		h.statuses(2, "GET", "/")
+		m := h.metrics()
+		for outcome, want := range map[string]float64{"evaluated": 0, "limited": 0, "would_limit": 0, "failed": 0, "capped": 0, "expired": 2} {
+			if n, ok := m[`edge_ratelimit_rule_total{rule="`+r.ID+`",outcome="`+outcome+`"}`]; !ok || n != want {
+				t.Errorf("%s %v (present %v), want %v", outcome, n, ok, want)
+			}
+		}
+	})
+
+	t.Run("a rule in the active version and the canary sums both and keeps its count when the canary ends", func(t *testing.T) {
+		h := newHarness(t, nil)
+		active, cand := testConfig(1), testConfig(2)
+		r := rlRule("per-ip", "true", "sliding_window", 100, "ip")
+		active.RateLimitRules, cand.RateLimitRules = []snapshot.RateLimitRule{r}, []snapshot.RateLimitRule{r}
+		e := envelope(active)
+		e.Candidate, e.CanaryPercent, e.CanaryExpiresAt = cand, 50, time.Now().Add(time.Hour)
+		h.load(e)
+		in, out := ipWithCohort(t, true, 5000), ipWithCohort(t, false, 5000)
+		h.statuses(2, "GET", "/", "CloudFront-Viewer-Address", in+":1")
+		h.statuses(2, "GET", "/", "CloudFront-Viewer-Address", out+":1")
+		ld := h.srv.store.load()
+		if a, c := ld.active.stats.counts().Requests, ld.candidate.stats.counts().Requests; a != 2 || c != 2 {
+			t.Fatalf("active served %d, candidate %d, want 2 each", a, c)
+		}
+		evaluated := `edge_ratelimit_rule_total{rule="per-ip",outcome="evaluated"}`
+		if n := h.metrics()[evaluated]; n != 4 {
+			t.Fatalf("%s %v during the canary, want 4", evaluated, n)
+		}
+		e.CanaryExpiresAt = time.Now().Add(-time.Second)
+		h.load(e)
+		if n := h.metrics()[evaluated]; n != 4 {
+			t.Fatalf("%s %v after the canary ended, want 4", evaluated, n)
+		}
+		h.srv.poller.reg.deltas()
+		if n := h.metrics()[evaluated]; n != 4 {
+			t.Fatalf("%s %v after the candidate was reported and retired, want 4", evaluated, n)
+		}
+	})
 }
 
 // Per-rule counts reach admin as deltas, so the guard and the UI see what
@@ -674,7 +899,9 @@ func TestServerRateLimitLoops(t *testing.T) {
 
 	active, cand := testConfig(1), testConfig(2)
 	cand.Global.Backstop.Limit = 50 // its own backstop
-	cand.RateLimitRules = []snapshot.RateLimitRule{rlRule("loop", "true", "sliding_window", 1, "ip")}
+	loop := rlRule("loop", "true", "sliding_window", 1, "ip")
+	loop.FailMode = "local" // only a local rule has state in this replica to sweep
+	cand.RateLimitRules = []snapshot.RateLimitRule{loop}
 	e := envelope(active)
 	e.Candidate, e.CanaryPercent, e.CanaryExpiresAt = cand, 50, time.Now().Add(time.Hour)
 	admin := newFakeAdmin(t, e)
@@ -759,4 +986,259 @@ func TestLimitedSubjectDisplay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countStatuses makes rate-limit rule i of the active config count only
+// upstream responses with these statuses.
+func countStatuses(i int, statuses ...any) func(env map[string]any) {
+	return func(env map[string]any) {
+		ruleJSON(activeJSON(env), "rate_limit_rules", i)["count_statuses"] = statuses
+	}
+}
+
+// A 404 sweep is counted after each upstream answer, in this replica's
+// memory. Found pages never count. The response that goes over the limit
+// has already reached the client, so the block starts with the next
+// request, whatever its path, and lasts to the window's end.
+func TestNotFoundSweepIsLimitedAfterUpstream404s(t *testing.T) {
+	h := newHarness(t, nil) // no Valkey: response counts never use it
+	c := testConfig(1)
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule("not-found-sweep", `http.request.method in {"GET" "HEAD"}`, "sliding_window", 3, "ip")}
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/missing/") {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	h.loadJSON(envelope(c), countStatuses(0, "404", "410"))
+	if got := h.statuses(5, "GET", "/ok"); !eqInts(got, 200, 200, 200, 200, 200) {
+		t.Fatalf("found pages: %v", got)
+	}
+	if got := h.statuses(4, "GET", "/missing/a"); !eqInts(got, 404, 404, 404, 404) {
+		t.Fatalf("sweep up to the limit: %v", got)
+	}
+	resp := h.do("GET", "/ok", nil)
+	if ra, _ := strconv.Atoi(resp.Header.Get("Retry-After")); ra < 1 || ra > 60 {
+		t.Fatalf("Retry-After %d inside a 1m window", ra)
+	}
+	edgeError(t, resp, 429, "rate_limited")
+	if got := h.statuses(1, "GET", "/missing/b", "CloudFront-Viewer-Address", "198.51.100.8:1"); !eqInts(got, 404) {
+		t.Fatalf("another client was limited: %v", got)
+	}
+	if s := h.ruleStats(0); s.limited.Load() != 1 {
+		t.Fatalf("limited %d", s.limited.Load())
+	}
+}
+
+// Only upstream responses count. The edge's own 401s come before the rule
+// is checked; counting them would let a refused client keep its own block
+// alive. The upstream's 401s are failed logins and do count.
+func TestEdgeResponsesNeverCount(t *testing.T) {
+	idp := newFakeIdP(t)
+	h := newHarness(t, map[string]string{"JWKS_ALLOWED_HOSTS": "127.0.0.1"})
+	c := authConfig(idp)
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule("failed-logins", `starts_with(http.request.uri.path, "/private")`, "sliding_window", 1, "ip")}
+	h.loadJSON(authEnvelope(c), countStatuses(0, "401"))
+	for range 3 {
+		unauthorized(t, h.do("GET", "/private/orders", nil), "Bearer")
+	}
+	tok := corpToken()
+	if body := readBody(t, h.do("GET", "/private/orders", nil, bearerOf(tok)...)); body != "upstream ok" {
+		t.Fatalf("the edge's own 401s were counted: %s", body)
+	}
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }
+	if got := h.statuses(3, "GET", "/private/orders", bearerOf(tok)...); !eqInts(got, 401, 401, 429) {
+		t.Fatalf("upstream 401s: %v", got)
+	}
+}
+
+// A count rule's state lives in each replica's memory: it blocks with
+// Valkey connected and writes nothing there, so it never adds a round trip.
+func TestCountRulesUseNoValkey(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	c := testConfig(1)
+	id := uniq("not-found")
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule(id, `http.request.method eq "GET"`, "sliding_window", 1, "ip")}
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	h.loadJSON(envelope(c), countStatuses(0, "404"))
+	if got := h.statuses(3, "GET", "/missing"); !eqInts(got, 404, 404, 429) {
+		t.Fatalf("got %v", got)
+	}
+	raw, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{testenv.Valkey(t)}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	keys, err := raw.Do(t.Context(), raw.B().Keys().Pattern("*"+id+"*").Build()).AsStrSlice()
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("Valkey keys for a count rule: %v %v", keys, err)
+	}
+}
+
+// Count rules take no Valkey slot and have their own cap: five run per
+// request, a sixth is skipped and counted, and five Valkey rules still run.
+func TestCountRulesCappedAtFive(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	c := testConfig(1)
+	for i := range 6 {
+		c.RateLimitRules = append(c.RateLimitRules, rlRule(uniq(fmt.Sprint("count", i)), `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip"))
+	}
+	for i := range 5 {
+		c.RateLimitRules = append(c.RateLimitRules, rlRule(uniq(fmt.Sprint("valkey", i)), `http.request.uri.path eq "/x"`, "sliding_window", 100, "ip"))
+	}
+	h.loadJSON(envelope(c), func(env map[string]any) {
+		for i := range 6 {
+			countStatuses(i, "404")(env)
+		}
+	})
+	h.statuses(1, "GET", "/x")
+	var evaluated []uint64
+	for i := range 11 {
+		evaluated = append(evaluated, h.ruleStats(i).evaluated.Load())
+	}
+	if h.srv.m.rulesCapped.Load() != 1 || fmt.Sprint(evaluated) != "[1 1 1 1 1 0 1 1 1 1 1]" {
+		t.Fatalf("capped %d, evaluated %v", h.srv.m.rulesCapped.Load(), evaluated)
+	}
+}
+
+// distinct counts how many different paths one client asks for in a window.
+// Revisiting a page adds nothing; the request that makes one distinct path
+// too many is refused, and other clients are unaffected.
+func TestDistinctPathsLimitACrawler(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	c := testConfig(1)
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule(uniq("crawl-breadth"), `starts_with(http.request.uri.path, "/products/")`, "sliding_window", 3, "ip")}
+	h.loadJSON(envelope(c), func(env map[string]any) {
+		r := ruleJSON(activeJSON(env), "rate_limit_rules", 0)
+		r["algorithm"], r["distinct_of"] = "distinct", "path"
+	})
+	if got := h.statuses(5, "GET", "/products/1"); !eqInts(got, 200, 200, 200, 200, 200) {
+		t.Fatalf("one path revisited: %v", got)
+	}
+	got := append(h.statuses(1, "GET", "/products/2"), h.statuses(1, "GET", "/products/3")...)
+	if !eqInts(got, 200, 200) {
+		t.Fatalf("up to the limit: %v", got)
+	}
+	edgeError(t, h.do("GET", "/products/4", nil), 429, "rate_limited")
+	if got := h.statuses(1, "GET", "/products/4", "CloudFront-Viewer-Address", "198.51.100.8:1"); !eqInts(got, 200) {
+		t.Fatalf("another client was limited: %v", got)
+	}
+}
+
+// distinct counts any of its fields per subject. A request without the
+// counted value adds nothing and is never refused by the rule.
+func TestDistinctCountsEachField(t *testing.T) {
+	h := valkeyHarness(t, map[string]string{"VIEWER_HEADERS": ja4Viewer})
+	const otherJA4 = "t13d1715h2_5b57614c22b0_3d5424432f57"
+	cases := []struct {
+		name, of string
+		key      []string
+		first    []string // headers of the request that sets the first value
+		second   []string // headers of the request with a second value
+		missing  []string // headers of a request without the value
+		target   [3]string
+	}{
+		{"query argument", "query:id", []string{"ip"}, nil, nil, []string{}, [3]string{"/item?id=1", "/item?id=2", "/item"}},
+		{"client IP within one network", "ip", []string{"asnum"},
+			[]string{"CloudFront-Viewer-Address", "203.0.113.1:1", "CloudFront-Viewer-ASN", "64500"},
+			[]string{"CloudFront-Viewer-Address", "203.0.113.2:1", "CloudFront-Viewer-ASN", "64500"},
+			nil, [3]string{"/", "/", ""}},
+		{"AS number", "asnum", []string{"ip"},
+			[]string{"CloudFront-Viewer-ASN", "64500"}, []string{"CloudFront-Viewer-ASN", "64501"}, []string{}, [3]string{"/", "/", "/"}},
+		{"JA4 fingerprint", "ja4", []string{"ip"},
+			[]string{"CloudFront-Forwarded-Proto", "https", "CloudFront-Viewer-JA4-Fingerprint", chromeJA4},
+			[]string{"CloudFront-Forwarded-Proto", "https", "CloudFront-Viewer-JA4-Fingerprint", otherJA4},
+			[]string{"CloudFront-Forwarded-Proto", "https"}, [3]string{"/", "/", "/"}},
+	}
+	for v, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testConfig(int64(v + 1))
+			c.RateLimitRules = []snapshot.RateLimitRule{rlRule(uniq("distinct"), "true", "sliding_window", 1, tc.key...)}
+			c.RateLimitRules[0].OnMissingKey = "skip"
+			h.loadJSON(envelope(c), func(env map[string]any) {
+				r := ruleJSON(activeJSON(env), "rate_limit_rules", 0)
+				r["algorithm"], r["distinct_of"] = "distinct", tc.of
+			})
+			if got := append(h.statuses(1, "GET", tc.target[0], tc.first...), h.statuses(1, "GET", tc.target[0], tc.first...)...); !eqInts(got, 200, 200) {
+				t.Fatalf("one value twice: %v", got)
+			}
+			edgeError(t, h.do("GET", tc.target[1], nil, tc.second...), 429, "rate_limited")
+			if tc.missing != nil {
+				if got := h.statuses(1, "GET", tc.target[2], tc.missing...); !eqInts(got, 200) {
+					t.Fatalf("a request without the value was refused: %v", got)
+				}
+			}
+		})
+	}
+}
+
+// A log-only count rule records what it would refuse and never refuses; a
+// blocking one with a penalty refuses for the penalty. When this replica's
+// state or penalty cache is full, counting still lets traffic through.
+func TestCountRuleOutcomes(t *testing.T) {
+	notFound := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	t.Run("log only", func(t *testing.T) {
+		old := sampleTop
+		sampleTop = func() bool { return true }
+		t.Cleanup(func() { sampleTop = old })
+		h := newHarness(t, nil)
+		c := testConfig(1)
+		r := rlRule("sweep-watch", `http.request.method eq "GET"`, "sliding_window", 1, "ip")
+		r.Action = "log"
+		c.RateLimitRules = []snapshot.RateLimitRule{r}
+		h.appHandler = notFound
+		h.loadJSON(envelope(c), countStatuses(0, "404"))
+		if got := h.statuses(3, "GET", "/missing"); !eqInts(got, 404, 404, 404) {
+			t.Fatalf("log-only count rule refused: %v", got)
+		}
+		top := h.srv.poller.reg.deltas()[0].TopLimited
+		if h.ruleStats(0).wouldLimit.Load() != 2 || len(top) != 1 || top[0].Display != "198.51.100.7" || top[0].WouldLimit != 2*TopSample {
+			t.Fatalf("would limit %d, top %+v", h.ruleStats(0).wouldLimit.Load(), top)
+		}
+	})
+	t.Run("penalty", func(t *testing.T) {
+		h := newHarness(t, nil)
+		c := testConfig(1)
+		r := rlRule("sweep", `http.request.method eq "GET"`, "sliding_window", 1, "ip")
+		r.Penalty = dur(10 * time.Minute)
+		c.RateLimitRules = []snapshot.RateLimitRule{r}
+		h.appHandler = notFound
+		h.loadJSON(envelope(c), countStatuses(0, "404"))
+		h.statuses(2, "GET", "/missing")
+		resp := h.do("GET", "/missing", nil)
+		if ra, _ := strconv.Atoi(resp.Header.Get("Retry-After")); ra < 590 {
+			t.Fatalf("Retry-After %d during a 10m penalty", ra)
+		}
+		edgeError(t, resp, 429, "rate_limited")
+	})
+	t.Run("full state", func(t *testing.T) {
+		old := maxLocalState
+		maxLocalState = 1
+		t.Cleanup(func() { maxLocalState = old })
+		h := newHarness(t, nil)
+		c := testConfig(1)
+		c.RateLimitRules = []snapshot.RateLimitRule{rlRule("sweep", `http.request.method eq "GET"`, "sliding_window", 1, "ip")}
+		h.appHandler = notFound
+		h.loadJSON(envelope(c), countStatuses(0, "404"))
+		local := h.srv.store.load().active.local[0]
+		for i := range 1000 {
+			local.Take(fmt.Sprint("other", i), ratelimit.Params{Algo: ratelimit.FixedWindow, Limit: 1, Period: 3_600_000}, time.Now().UnixMilli())
+		}
+		if got := h.statuses(3, "GET", "/missing"); !eqInts(got, 404, 404, 404) || h.srv.m.localUntracked.Load() == 0 {
+			t.Fatalf("full state: %v, untracked %d", got, h.srv.m.localUntracked.Load())
+		}
+	})
+	t.Run("full penalty cache", func(t *testing.T) {
+		h := newHarness(t, nil)
+		c := testConfig(1)
+		c.RateLimitRules = []snapshot.RateLimitRule{rlRule("sweep", `http.request.method eq "GET"`, "sliding_window", 1, "ip")}
+		h.appHandler = notFound
+		h.loadJSON(envelope(c), countStatuses(0, "404"))
+		h.srv.edge.penalties = ratelimit.NewPenalties(1)
+		for i := range 1000 {
+			h.srv.edge.penalties.Block(fmt.Sprint("other", i), time.Now().Add(time.Hour).UnixMilli())
+		}
+		if got := h.statuses(3, "GET", "/missing"); !eqInts(got, 404, 404, 404) || h.srv.m.penaltyDropped.Load() == 0 {
+			t.Fatal("dropped count-rule block not counted")
+		}
+	})
 }
