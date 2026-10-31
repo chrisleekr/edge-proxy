@@ -225,7 +225,7 @@ While admin is unreachable, the shipper keeps up to 10,000 lines in memory and d
 
 ## Autopilot runner
 
-Chart 0.7.0 and later can run the autopilot runner beside admin: set `autopilot.enabled` and `autopilot.existingSecret`; `autopilot.tokenSecret` is optional.
+Chart 0.7.0 and later can run the [autopilot runner](autopilot.md) beside admin: set `autopilot.enabled` and `autopilot.existingSecret`; `autopilot.tokenSecret` is optional.
 
 ## Reach admin from outside the cluster
 

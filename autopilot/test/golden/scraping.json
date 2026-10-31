@@ -1,0 +1,922 @@
+{
+  "case": {
+    "id": 4,
+    "kind": "anomaly",
+    "brief": {
+      "kind": "anomaly",
+      "rule": "ap-catalog-per-user-2",
+      "signal": "rule_would_block",
+      "summary": {
+        "untrusted": "Would have blocked 390 requests in the last 5 minutes: it is set to log only, or the kill switch is on"
+      }
+    },
+    "run_id": 4,
+    "verdict": "attack",
+    "rule": "ap-catalog-per-user-2",
+    "route_id": null,
+    "anomaly_id": 2,
+    "question": "",
+    "state": "done",
+    "attempts": 1,
+    "lease_until": null,
+    "summary": "Answered by the load-test plan",
+    "opened_by": "system:autopilot",
+    "created_at": "2026-10-28T22:49:26.339315Z",
+    "closed_at": "2026-10-28T22:49:27.150154Z",
+    "ablation_of": null
+  },
+  "run": {
+    "id": 4,
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "prompt_sha256": "ae9524d749d5d15fd4b45539d35dfa8dd8a8367f4c66aa596e81513bf246661d",
+    "tools_sha256": "2ae0b43cf930c740e142a38c403a6ff15b3d6108d3a5c57433a0e94ed76f3ae6",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "configured_cost_usd_micros": null,
+    "provider_cost_usd_micros": null,
+    "attempt": 1,
+    "error_category": "",
+    "finished_at": "2026-10-28T22:49:27.150154Z",
+    "runner": "tools-agent",
+    "started_at": "2026-10-28T22:49:27.103115Z",
+    "status": "ok",
+    "telemetry_complete": true,
+    "tool_calls": 5,
+    "turns": 6
+  },
+  "calls": [
+    {
+      "seq": 1,
+      "tool": "get_case",
+      "arguments": {},
+      "result": {
+        "anomaly_id": 2,
+        "attempt": 1,
+        "brief": {
+          "kind": "anomaly",
+          "rule": "ap-catalog-per-user-2",
+          "signal": "rule_would_block",
+          "summary": {
+            "untrusted": "Would have blocked 390 requests in the last 5 minutes: it is set to log only, or the kill switch is on"
+          }
+        },
+        "case_id": 4,
+        "kind": "anomaly",
+        "prior_cases": [],
+        "question": "",
+        "route_id": null,
+        "rule": "ap-catalog-per-user-2"
+      }
+    },
+    {
+      "seq": 2,
+      "tool": "get_autopilot_state",
+      "arguments": {},
+      "result": {
+        "agent_connected": true,
+        "budgets": {
+          "cases_hour": {
+            "max": 60,
+            "used": 5
+          },
+          "enforcing": {
+            "max": 10,
+            "used": 0
+          },
+          "sensors": {
+            "max": 10,
+            "used": 5
+          }
+        },
+        "cases_open": 4,
+        "credentials": {
+          "claude": true,
+          "openai": false
+        },
+        "mode": "auto",
+        "rules": [
+          {
+            "case_id": 1,
+            "enforcing_since": null,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "starts_with(http.request.uri.path, \"/api/catalog/\")"
+            },
+            "id": "ap-catalog-per-user-2",
+            "key": [
+              "jwt_claim:sub"
+            ],
+            "kind": "sensor",
+            "limit": 100,
+            "live_since": "2026-10-28T22:47:26.331732Z",
+            "outcome": null,
+            "period": "1m0s",
+            "shadow_ratio": null,
+            "state": "observing"
+          },
+          {
+            "case_id": 1,
+            "enforcing_since": null,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "starts_with(http.request.uri.path, \"/api/orders/\")"
+            },
+            "id": "ap-idor-paths-1",
+            "key": [
+              "ip"
+            ],
+            "kind": "sensor",
+            "limit": 30,
+            "live_since": "2026-10-28T22:47:26.331732Z",
+            "outcome": null,
+            "period": "1m0s",
+            "shadow_ratio": null,
+            "state": "observing"
+          },
+          {
+            "case_id": 1,
+            "enforcing_since": null,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "http.request.uri.path eq \"/login\" and http.request.method eq \"POST\""
+            },
+            "id": "ap-login-401-3",
+            "key": [
+              "ip"
+            ],
+            "kind": "sensor",
+            "limit": 10,
+            "live_since": "2026-10-28T22:47:26.331732Z",
+            "outcome": null,
+            "period": "1m0s",
+            "shadow_ratio": null,
+            "state": "observing"
+          },
+          {
+            "case_id": 1,
+            "enforcing_since": null,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "http.request.method eq \"GET\""
+            },
+            "id": "ap-notfound-per-ip-4",
+            "key": [
+              "ip"
+            ],
+            "kind": "sensor",
+            "limit": 20,
+            "live_since": "2026-10-28T22:47:26.331732Z",
+            "outcome": null,
+            "period": "1m0s",
+            "shadow_ratio": null,
+            "state": "observing"
+          },
+          {
+            "case_id": 1,
+            "enforcing_since": null,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "http.request.uri.path eq \"/api/search\" and http.request.method eq \"POST\""
+            },
+            "id": "ap-search-per-ip-5",
+            "key": [
+              "ip"
+            ],
+            "kind": "sensor",
+            "limit": 30,
+            "live_since": "2026-10-28T22:47:26.331732Z",
+            "outcome": null,
+            "period": "1m0s",
+            "shadow_ratio": null,
+            "state": "observing"
+          }
+        ],
+        "runners": [
+          {
+            "id": "tools-agent",
+            "last_seen": "2026-10-28T22:49:17.120665Z",
+            "providers": [
+              "claude"
+            ],
+            "sdk_version": "go-sdk",
+            "version": "1"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "seq": 3,
+      "tool": "get_rule_stats",
+      "arguments": {
+        "rule": "ap-catalog-per-user-2"
+      },
+      "result": {
+        "minutes": 60,
+        "rule": "ap-catalog-per-user-2",
+        "series": [
+          {
+            "counts": {
+              "evaluated": 490,
+              "failed": 0,
+              "id": "ap-catalog-per-user-2",
+              "limited": 0,
+              "would_limit": 390
+            },
+            "fleet_requests": 21544,
+            "minute": "2026-10-28T22:47:00Z"
+          },
+          {
+            "counts": {
+              "evaluated": 1200,
+              "failed": 0,
+              "id": "ap-catalog-per-user-2",
+              "limited": 0,
+              "would_limit": 1099
+            },
+            "fleet_requests": 53020,
+            "minute": "2026-10-28T22:48:00Z"
+          },
+          {
+            "counts": {
+              "evaluated": 500,
+              "failed": 0,
+              "id": "ap-catalog-per-user-2",
+              "limited": 0,
+              "would_limit": 500
+            },
+            "fleet_requests": 22127,
+            "minute": "2026-10-28T22:49:00Z"
+          }
+        ],
+        "step_minutes": 1,
+        "top_subjects": {
+          "untrusted": [
+            {
+              "display": "sub=scr…",
+              "key": "rl:distinct:60000:ap-catalog-per-user-2:3c52d0debd70676:{2yqc26INzfBml5pYN_Dkjw}",
+              "limited": 0,
+              "rule": "ap-catalog-per-user-2",
+              "would_limit": 1920
+            }
+          ]
+        }
+      }
+    },
+    {
+      "seq": 4,
+      "tool": "list_rules",
+      "arguments": {},
+      "result": {
+        "config_rules": [
+          {
+            "expression": {
+              "untrusted": "starts_with(http.request.uri.path, \"/private/\")"
+            },
+            "id": "private-needs-auth",
+            "settings": {
+              "auth": {
+                "mode": "required"
+              }
+            }
+          },
+          {
+            "expression": {
+              "untrusted": "starts_with(http.request.uri.path, \"/api/catalog/\")"
+            },
+            "id": "catalog-auth",
+            "settings": {
+              "auth": {
+                "mode": "optional"
+              }
+            }
+          }
+        ],
+        "rate_limit_rules": [
+          {
+            "action": "log",
+            "algorithm": "distinct",
+            "autopilot": true,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "starts_with(http.request.uri.path, \"/api/catalog/\")"
+            },
+            "id": "ap-catalog-per-user-2",
+            "key": [
+              "jwt_claim:sub"
+            ],
+            "limit": 100,
+            "period": "1m0s"
+          },
+          {
+            "action": "log",
+            "algorithm": "distinct",
+            "autopilot": true,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "starts_with(http.request.uri.path, \"/api/orders/\")"
+            },
+            "id": "ap-idor-paths-1",
+            "key": [
+              "ip"
+            ],
+            "limit": 30,
+            "period": "1m0s"
+          },
+          {
+            "action": "log",
+            "algorithm": "sliding_window",
+            "autopilot": true,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "http.request.uri.path eq \"/login\" and http.request.method eq \"POST\""
+            },
+            "id": "ap-login-401-3",
+            "key": [
+              "ip"
+            ],
+            "limit": 10,
+            "period": "1m0s"
+          },
+          {
+            "action": "log",
+            "algorithm": "sliding_window",
+            "autopilot": true,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "http.request.method eq \"GET\""
+            },
+            "id": "ap-notfound-per-ip-4",
+            "key": [
+              "ip"
+            ],
+            "limit": 20,
+            "period": "1m0s"
+          },
+          {
+            "action": "log",
+            "algorithm": "sliding_window",
+            "autopilot": true,
+            "expires_at": "2026-10-28T22:52:26Z",
+            "expression": {
+              "untrusted": "http.request.uri.path eq \"/api/search\" and http.request.method eq \"POST\""
+            },
+            "id": "ap-search-per-ip-5",
+            "key": [
+              "ip"
+            ],
+            "limit": 30,
+            "period": "1m0s"
+          }
+        ],
+        "version": 3
+      }
+    },
+    {
+      "seq": 5,
+      "tool": "propose",
+      "arguments": {
+        "action": "enforce",
+        "cites": "ap-catalog-per-user-2",
+        "evidence": {
+          "evidence_ids": [
+            3
+          ]
+        },
+        "name": "catalog-per-user-block",
+        "rationale": "The sensor's anomaly is the load-test attack it watches",
+        "rule": {
+          "algorithm": "distinct",
+          "distinct_of": "path",
+          "expression": "starts_with(http.request.uri.path, \"/api/catalog/\") and http.host eq \"api.example.com\"",
+          "key": [
+            "jwt_claim:sub"
+          ],
+          "limit": 100,
+          "on_missing_key": "skip",
+          "period": "1m"
+        },
+        "ttl": "5m"
+      },
+      "result": {
+        "accepted": true,
+        "checks": [
+          {
+            "detail": "action add_sensor or enforce, a name of 1 to 40 of a-z, 0-9 and -, a rule, a ttl of at least 4m0s and cites naming an observing sensor",
+            "name": "not_overlay_shape",
+            "ok": true
+          },
+          {
+            "detail": "an autopilot rule never matches every request",
+            "name": "site_wide",
+            "ok": true
+          },
+          {
+            "detail": "fail_mode is open: a Valkey outage never blocks traffic for an autopilot rule",
+            "name": "fail_mode",
+            "ok": true
+          },
+          {
+            "detail": "the key includes ip or a jwt_claim, values a client can't choose",
+            "name": "key_needs_ip_or_jwt",
+            "ok": true
+          },
+          {
+            "detail": "the key is not constant or host only",
+            "name": "constant_or_host_key",
+            "ok": true
+          },
+          {
+            "detail": "a request without the key is never refused",
+            "name": "missing_key_rejects",
+            "ok": true
+          },
+          {
+            "detail": "ttl is at most max_ttl 24h0m0s",
+            "name": "ttl_over_max",
+            "ok": true
+          },
+          {
+            "detail": "the rule and the sensor it cites end by 2026-11-04T22:47:26Z, max_lifetime after the sensor went live",
+            "name": "lifetime_over_max",
+            "ok": true
+          },
+          {
+            "detail": "the penalty ends by the rule's expiry",
+            "name": "penalty_past_expiry",
+            "ok": true
+          },
+          {
+            "detail": "the rule names no IP, AS number, X-Forwarded-For or JWT claim value",
+            "name": "named_subjects",
+            "ok": true
+          },
+          {
+            "detail": "no live rule has the same expression and key",
+            "name": "duplicate",
+            "ok": true
+          },
+          {
+            "detail": "the same rule was not rolled back or marked a false positive within max_lifetime",
+            "name": "suppressed",
+            "ok": true
+          },
+          {
+            "name": "compile",
+            "ok": true
+          },
+          {
+            "detail": "0 of max_enforcing 10 are in use",
+            "name": "budget_enforcing",
+            "ok": true
+          }
+        ],
+        "proposal_id": 6,
+        "reasons": [],
+        "rule_id": "ap-catalog-per-user-block-6"
+      }
+    }
+  ],
+  "contract": {
+    "prompt_sha256": "ae9524d749d5d15fd4b45539d35dfa8dd8a8367f4c66aa596e81513bf246661d",
+    "tools": [
+      {
+        "name": "get_autopilot_state",
+        "permission": "autopilot.read",
+        "description": "Mode, budgets and what they use, connected runners, and the live autopilot rules with state and expiry.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": null,
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "list_cases",
+        "permission": "autopilot.read",
+        "description": "Past cases and their verdicts, newest first, on one rule when rule is set.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "rule": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "list_rules",
+        "permission": "config.read",
+        "description": "The active version's rules, people's and the autopilot's, with expressions as text.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": null,
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "describe_fields",
+        "permission": "config.read",
+        "description": "Expression fields, rate-limit key kinds and algorithms the edge accepts.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": null,
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "get_stats",
+        "permission": "stats.read",
+        "description": "Per-minute fleet, rule, status code and upstream cause counts. Windows over 360 minutes come in hourly steps.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "minutes": {
+              "description": "how far back, in minutes; default 60",
+              "maximum": 20160,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "evidence": true
+      },
+      {
+        "name": "get_rule_stats",
+        "permission": "stats.read",
+        "description": "Evaluated, limited, would_limit, failed and capped per minute for one rate-limit rule, in hourly steps past 360 minutes, and its 50 most-limited subjects.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "minutes": {
+              "description": "how far back, in minutes; default 60",
+              "maximum": 20160,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "rule": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rule"
+          ],
+          "type": "object"
+        },
+        "evidence": true
+      },
+      {
+        "name": "list_anomalies",
+        "permission": "stats.read",
+        "description": "Open and recent anomalies the notification checks found.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": null,
+          "type": "object"
+        },
+        "evidence": true
+      },
+      {
+        "name": "list_routes",
+        "permission": "stats.read",
+        "description": "Routes observed in access logs, with requests, status classes, decisions and rules.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": null,
+          "type": "object"
+        },
+        "evidence": true
+      },
+      {
+        "name": "get_route",
+        "permission": "stats.read",
+        "description": "One observed route with its hourly series.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "evidence": true
+      },
+      {
+        "name": "check_subject",
+        "permission": "stats.read",
+        "description": "Whether an IP is in a verified crawler range or a protected subject.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "ip": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ip"
+          ],
+          "type": "object"
+        },
+        "evidence": true
+      },
+      {
+        "name": "list_versions",
+        "permission": "config.read",
+        "description": "Recent versions with source, author and change summary.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "get_case",
+        "permission": "autopilot.agent",
+        "description": "The case this run answers: its trigger, evidence and prior cases on the same rule.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": null,
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "validate_rule",
+        "permission": "autopilot.agent",
+        "description": "Runs the policy and compiles a rule with the live rules, without proposing it.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "add_sensor",
+                "enforce"
+              ],
+              "type": "string"
+            },
+            "cites": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "notes": {
+              "description": "ids of notes search_notes served this run that the proposal relies on",
+              "items": {
+                "type": "integer"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "rule": {
+              "description": "a rate-limit rule: expression (text), algorithm, limit, period, key, on_missing_key, and optional burst, penalty, distinct_of, count_statuses (upstream statuses to count instead of requests, 1xx to 4xx), fail_mode",
+              "type": "object"
+            },
+            "ttl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rule"
+          ],
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "simulate_rule",
+        "permission": "autopilot.agent",
+        "description": "Which rules, the candidate included, match up to 20 test requests.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "requests": {
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "rule": {
+              "description": "a rate-limit rule: expression (text), algorithm, limit, period, key, on_missing_key, and optional burst, penalty, distinct_of, count_statuses (upstream statuses to count instead of requests, 1xx to 4xx), fail_mode",
+              "type": "object"
+            }
+          },
+          "required": [
+            "rule",
+            "requests"
+          ],
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "propose",
+        "permission": "autopilot.agent",
+        "description": "Proposes add_sensor, enforce or retire. retire ends a proposed or observing sensor; enforcing rules end by expiry or a person. Admin checks the policy and budgets and answers whether it accepted the proposal and why not.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "add_sensor",
+                "enforce",
+                "retire"
+              ],
+              "type": "string"
+            },
+            "cites": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "notes": {
+              "description": "ids of notes search_notes served this run that the proposal relies on",
+              "items": {
+                "type": "integer"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "rule": {
+              "description": "a rate-limit rule: expression (text), algorithm, limit, period, key, on_missing_key, and optional burst, penalty, distinct_of, count_statuses (upstream statuses to count instead of requests, 1xx to 4xx), fail_mode",
+              "type": "object"
+            },
+            "rule_id": {
+              "type": "string"
+            },
+            "ttl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "record_learning",
+        "permission": "autopilot.agent",
+        "description": "Records what this case taught for later cases: a note of kind context, expected_pattern, attack_signature, collateral_risk or key_preference on a scope (global, an observed host or route, or a live rule). An observed note has a claim admin recomputes on its own data and cites evidence ids of stats reads of this run; a hypothesis is a context note whose statement says it is one. At most 3 a run. Admin answers the note with the statistics it attached, or why it refused.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "basis": {
+              "enum": [
+                "observed",
+                "hypothesis"
+              ],
+              "type": "string"
+            },
+            "claim": {
+              "description": "metric, window ({last_minutes} or {daily_utc: [from, to]}), op (>= or <=), value, and subject for subject_limited",
+              "type": "object"
+            },
+            "effect": {
+              "description": "key_preference: key; collateral_risk: max_block_share or require_jwt_claim; none for the other kinds",
+              "type": "object"
+            },
+            "evidence": {
+              "items": {
+                "type": "integer"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "kind": {
+              "enum": [
+                "context",
+                "expected_pattern",
+                "attack_signature",
+                "collateral_risk",
+                "key_preference"
+              ],
+              "type": "string"
+            },
+            "merges": {
+              "items": {
+                "type": "integer"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "rationale": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "scope": {
+              "description": "kind global; host with host; route with host, method and template; or rule with rule",
+              "type": "object"
+            },
+            "statement": {
+              "maxLength": 500,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "basis",
+            "scope",
+            "statement"
+          ],
+          "type": "object"
+        },
+        "evidence": false
+      },
+      {
+        "name": "search_notes",
+        "permission": "autopilot.read",
+        "description": "Notes earlier cases recorded, newest first, at most 20. A run is served the ones whose claim matches its data now, and hypotheses; cite them in propose notes.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "context",
+                "expected_pattern",
+                "attack_signature",
+                "collateral_risk",
+                "key_preference"
+              ],
+              "type": "string"
+            },
+            "scope": {
+              "description": "kind global; host with host; route with host, method and template; or rule with rule",
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "evidence": false
+      }
+    ],
+    "tools_sha256": "2ae0b43cf930c740e142a38c403a6ff15b3d6108d3a5c57433a0e94ed76f3ae6",
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "summary",
+        "proposals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "attack",
+            "benign",
+            "unsure"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 50
+        }
+      }
+    }
+  },
+  "expect": {
+    "verdict": "attack"
+  }
+}
