@@ -108,6 +108,12 @@ func (s *Server) expireCases(ctx context.Context) error {
 	var failed, cancelled []string
 	err := dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		now := s.now()
+		// Every case row this changes is locked before the first audit row
+		// takes the audit lock, the order a claim and a result use; the
+		// stale queued cases cancelled below included.
+		if _, err := tx.Exec(ctx, "SELECT id FROM autopilot_cases WHERE state = 'queued' AND queued_at < $1 FOR NO KEY UPDATE", now.Add(-queuedMax)); err != nil {
+			return err
+		}
 		// FOR NO KEY UPDATE: a search holding the audit lock still records a
 		// use that references the case.
 		rows, err := tx.Query(ctx, "SELECT id, kind, attempts, run_id FROM autopilot_cases WHERE state = 'running' AND lease_until < $1 FOR NO KEY UPDATE", now)

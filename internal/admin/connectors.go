@@ -114,10 +114,17 @@ func (s *Server) connectorDo(ctx context.Context, connector, method, target stri
 	case resp.StatusCode/100 != 2:
 		s.met.connected(connector, "error")
 		// Redacted before it is cut, so a cut can't leave part of a secret.
-		return nil, fail(http.StatusBadGateway, fmt.Sprintf("%s answered %d: %s", connector, resp.StatusCode, cut(redact(string(body)), 200)))
+		return nil, fail(http.StatusBadGateway, fmt.Sprintf("%s answered %d: %s", connector, resp.StatusCode, untrustedText(cut(redact(string(body)), 200))))
 	}
 	s.met.connected(connector, "ok")
 	return body, nil
+}
+
+// untrustedText is s in the untrusted wrapper as JSON, for a refusal's text:
+// an upstream's error can quote label values and queries clients wrote.
+func untrustedText(s string) string {
+	b, _ := json.Marshal(untrusted(s)) // a string always marshals
+	return string(b)
 }
 
 // cut is s cut to at most n bytes on a rune boundary.
@@ -274,7 +281,7 @@ func (s *Server) prom(ctx context.Context, path string, q url.Values) (*promAnsw
 	}
 	var a promAnswer
 	if err := json.Unmarshal(b, &a); err != nil || a.Status != "success" {
-		return nil, fail(http.StatusBadGateway, "prometheus answered something other than a successful query: "+cut(redact(a.Error), 200))
+		return nil, fail(http.StatusBadGateway, "prometheus answered something other than a successful query: "+untrustedText(cut(redact(a.Error), 200)))
 	}
 	return &a, nil
 }
@@ -529,7 +536,7 @@ func (s *Server) ddQueryMetrics(ctx context.Context, args json.RawMessage) (map[
 		} `json:"series"`
 	}
 	if err := json.Unmarshal(b, &a); err != nil || a.Status == "error" {
-		return nil, fail(http.StatusBadGateway, "datadog answered something other than a successful query: "+cut(redact(a.Error), 200))
+		return nil, fail(http.StatusBadGateway, "datadog answered something other than a successful query: "+untrustedText(cut(redact(a.Error), 200)))
 	}
 	items := make([]map[string]any, 0, min(len(a.Series), 10))
 	for _, ser := range a.Series[:min(len(a.Series), 10)] {

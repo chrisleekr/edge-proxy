@@ -509,7 +509,17 @@ type statsRow struct {
 // statsWhere returns per-minute totals for the rows cond selects. cond is
 // always a constant in this package; values go in args.
 func (s *Server) statsWhere(ctx context.Context, q querier, cond string, args ...any) ([]statsRow, error) {
-	rows, err := s.queryStats(ctx, q, cond, args...)
+	return s.statsOf(ctx, q, "top_limited", cond, args...)
+}
+
+// statsWithoutTop is statsWhere without each minute's top subjects, which
+// are most of a row's size, for a reader that never looks at them.
+func (s *Server) statsWithoutTop(ctx context.Context, q querier, cond string, args ...any) ([]statsRow, error) {
+	return s.statsOf(ctx, q, "'[]'::jsonb", cond, args...)
+}
+
+func (s *Server) statsOf(ctx context.Context, q querier, top, cond string, args ...any) ([]statsRow, error) {
+	rows, err := s.queryStats(ctx, q, top, cond, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -520,9 +530,10 @@ func (s *Server) statsWhere(ctx context.Context, q querier, cond string, args ..
 	return mergeReplicas(parts), nil
 }
 
-// queryStats selects stored rows in minute, version and replica order.
-func (s *Server) queryStats(ctx context.Context, q querier, cond string, args ...any) (pgx.Rows, error) {
-	return q.Query(ctx, `SELECT minute, version, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited, rules, status_codes, upstream_errors
+// queryStats selects stored rows in minute, version and replica order. top
+// is the top subjects column or a constant standing in for it.
+func (s *Server) queryStats(ctx context.Context, q querier, top, cond string, args ...any) (pgx.Rows, error) {
+	return q.Query(ctx, `SELECT minute, version, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, `+top+`, rules, status_codes, upstream_errors
 		FROM edge_stats_minute WHERE `+cond+` ORDER BY minute, version, replica`, args...)
 }
 
@@ -633,7 +644,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request, _ *principal) err
 // one bucket in progress, not every stored minute. Steps divide a day, so
 // buckets start at UTC midnight and line up across requests.
 func (s *Server) statsByStep(ctx context.Context, since time.Time, step time.Duration) ([]statsRow, error) {
-	rows, err := s.queryStats(ctx, s.db, "minute >= $1", since)
+	rows, err := s.queryStats(ctx, s.db, "top_limited", "minute >= $1", since)
 	if err != nil {
 		return nil, err
 	}

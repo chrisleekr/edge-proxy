@@ -758,7 +758,7 @@ func TestConnectorFailures(t *testing.T) {
 		want       []string
 	}{
 		{"a connector that hangs is a tool error once the timeout passes", "hang", nil},
-		{"a non-2xx answer is a tool error naming the status, credentials redacted", "unavailable", []string{"503", "[redacted]"}},
+		{"a non-2xx answer is a tool error naming the status, its body untrusted and credentials redacted", "unavailable", []string{"503", `{"untrusted":"`, "[redacted]"}},
 		{"a redirect is a tool error", "redirect", []string{"302"}},
 		{"an answer over 256 KiB is a tool error", "large", []string{"256 KiB"}},
 	} {

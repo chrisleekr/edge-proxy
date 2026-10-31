@@ -68,7 +68,8 @@ func TestAutopilotExclusions(t *testing.T) {
 	})
 	t.Run("an exclusion on another path leaves the client counted here", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
-		exclude(t, pub, map[string]any{"subject": ci, "host": "api.example.com", "path_prefix": "/api/uploads/", "reason": "Our CI"})
+		// 300 characters, 900 bytes: the limit counts characters.
+		exclude(t, pub, map[string]any{"subject": ci, "host": "api.example.com", "path_prefix": "/api/uploads/", "reason": strings.Repeat("가", 300)})
 		id := liveRule(t, h, pub, agent, proposal("add_sensor", "orders-watch", ordersRule()))
 		if got := matches(t, pub, ci, "/api/orders/1"); !slices.Contains(got, id) {
 			t.Fatalf("the client matched %v", got)
@@ -127,6 +128,7 @@ func TestAutopilotExclusions(t *testing.T) {
 			{"a path prefix not starting with /", with("path_prefix", "api"), "path_prefix"},
 			{"no reason", with("reason", " "), "reason"},
 			{"a reason over 500 characters", with("reason", strings.Repeat("a", 501)), "reason"},
+			{"a reason over 500 characters in a multi-byte script", with("reason", strings.Repeat("가", 501)), "reason"},
 			{"a ttl under an hour", with("ttl", "30m"), "ttl"},
 			{"an enforce rule to promote from", with("rule_id", enforce), "rule_id"},
 		} {

@@ -137,7 +137,7 @@ Find opens one of the latest 100 cases by `Case N`, and one of the newest 500 no
 
 `GET` and `PUT /api/settings/autopilot` (`settings.manage` to change). `PUT` replaces every setting: send the whole object from `GET`, since a setting left out is saved as zero or empty where its range allows it, such as `max_enforcing: 0`. Every change is audited (`settings.autopilot`) and takes effect on the next run.
 
-A rule is renewed only in the last quarter of its TTL, on a 30 second run that publishes at most once every `min_publish_interval`, so `default_ttl` and `max_ttl` must be at least 4 times (30s plus `min_publish_interval`): 6m at the default `min_publish_interval` of 1m. A `PUT` below that is refused with `422`. Stored settings below it are raised to it when read, as is `max_lifetime`.
+A rule is renewed only in the last quarter of its TTL, on a 30 second run that publishes at most once every `min_publish_interval`, so `default_ttl` and `max_ttl` must be at least 4 times (30s plus `min_publish_interval`): 6m at the default `min_publish_interval` of 1m. A `PUT` below that is refused with `422`. Stored settings below it are raised to it when read, as is `max_lifetime`. An enforce rule logs only for `observe_for` first, so `default_ttl`, and an enforce proposal's own `ttl`, must also be over `observe_for` plus `min_publish_interval` and 30s (6m30s at the defaults); a shorter one would expire before it blocks.
 
 | Setting | Default | Range | What it does |
 |---|---|---|---|
@@ -145,14 +145,14 @@ A rule is renewed only in the last quarter of its TTL, on a 30 second run that p
 | `max_enforcing` | 10 | 0 to 50 | Enforce rules proposed, observing or enforcing at once |
 | `max_sensors` | 10 | 0 to 50 | Sensors proposed or observing at once |
 | `observe_for` | 5m | 1m to 1h | How long an enforce rule logs before it may block |
-| `default_ttl` | 1h | 4 × (30s + `min_publish_interval`) to `max_ttl` | A rule's TTL when the proposal sets none, and an enforcing rule's renewal |
+| `default_ttl` | 1h | 4 × (30s + `min_publish_interval`) to `max_ttl`, and over `observe_for` + `min_publish_interval` + 30s | A rule's TTL when the proposal sets none, and an enforcing rule's renewal |
 | `max_ttl` | 24h | 4 × (30s + `min_publish_interval`) to 24h | The longest TTL; a sensor is renewed by this much |
 | `max_lifetime` | 168h | `max_ttl` to 720h | How long a rule, and the sensor it cites, may keep being renewed; also how long a rolled back or false positive rule is not proposed again |
 | `max_block_share` | 0.02 | 0.001 to 0.2 | The most of the fleet's requests one autopilot rule may block besides its heavy subjects, each at least 5% of a minute's blocks: the collateral. See [Rule states](#rule-states) |
 | `cases_per_hour` | 20 | 1 to 200 | Runs started in the last hour |
 | `min_publish_interval` | 1m | 30s to 15m | Least time from the last autopilot publish of any kind to one that adds or renews rules. Removals don't wait |
 | `model`, `sweep_model` | `claude-opus-5-5` | a model id | The model for cases, and for sweeps and reviews. A model id containing `claude` runs on a runner's `claude` credential; any other on `openai` |
-| `protected_subjects` | none | up to 200 IPs, CIDRs or AS numbers | Subjects no autopilot rule may block. Each autopilot rule leaves the networks out of its expression on the edges; your own rules still apply to them. Together, as `not ip.src in {...}`, they must fit in half of an expression (2,000 characters). An AS number is accepted but not yet matched: the stats name subjects by address. Subjects are checked only for a rule whose key includes `ip`, which admin puts first in the key; a rule keyed on a JWT claim alone is not checked |
+| `protected_subjects` | none | up to 200 IPs, CIDRs or AS numbers | Subjects no autopilot rule may block. Each autopilot rule leaves the networks out of its expression on the edges; your own rules still apply to them. Together with the active exclusions, as `not ip.src in {...}`, they must fit in half of an expression (2,000 characters). An AS number is accepted but not yet matched: the stats name subjects by address. Subjects are checked only for a rule whose key includes `ip`, which admin puts first in the key; a rule keyed on a JWT claim alone is not checked |
 
 ## Cases
 

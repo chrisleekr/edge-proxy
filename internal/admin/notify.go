@@ -565,17 +565,22 @@ func (s *Server) checkAnomalies(ctx context.Context) error {
 func (s *Server) findAnomalies(ctx context.Context, n NotifySettings) ([]finding, error) {
 	end := s.now().Add(-notifyLag).UTC().Truncate(time.Minute)
 	from := end.Add(-time.Duration(n.Window))
-	rows, err := s.statsWhere(ctx, s.db, "minute >= $1 AND minute < $2", from.Add(-time.Duration(n.Baseline)), end)
+	w, b := newSpan(int(time.Duration(n.Window)/time.Minute)), newSpan(int(time.Duration(n.Baseline)/time.Minute))
+	rows, err := s.statsWhere(ctx, s.db, "minute >= $1 AND minute < $2", from, end)
 	if err != nil {
 		return nil, err
 	}
-	w, b := newSpan(int(time.Duration(n.Window)/time.Minute)), newSpan(int(time.Duration(n.Baseline)/time.Minute))
 	for _, r := range rows {
-		if r.Minute.Before(from) {
-			b.add(r)
-		} else {
-			w.add(r)
-		}
+		w.add(r)
+	}
+	// Only the window's subjects are read, and a baseline of up to a day of
+	// them would be decoded every minute.
+	rows, err = s.statsWithoutTop(ctx, s.db, "minute >= $1 AND minute < $2", from.Add(-time.Duration(n.Baseline)), from)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		b.add(r)
 	}
 	rules, err := s.liveRules(ctx)
 	if err != nil {
@@ -657,13 +662,15 @@ func (s *Server) autopilotFindings(ctx context.Context, n NotifySettings) ([]fin
 	// accepted, or one was but observe mode waits for approval. A case on an
 	// autopilot rule that already enforces does not: that rule blocks it, and
 	// the duplicate check refuses a second one. Nor does a case whose own
-	// enforce rule a person approved or that enforces now. No LIMIT: a case
+	// enforce rule a person approved or that enforces now. Nor does an
+	// ablation, which proposes nothing: autopilot_note_contested reports a
+	// verdict that differs. No LIMIT: a case
 	// that dropped out would resolve while it still needs a person, and the
 	// hour bounds the rows, since cases close after runs and cases_per_hour
 	// allows at most 200 runs an hour.
 	rows, err = s.db.Query(ctx, `SELECT c.id, c.state, c.verdict, p.accepted FROM autopilot_cases c
 		CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM autopilot_proposals p WHERE p.case_id = c.id AND p.action = 'enforce' AND p.accepted) AS accepted) p
-		WHERE c.closed_at > $1 AND (c.state = 'failed' OR c.verdict = 'unsure'
+		WHERE c.closed_at > $1 AND c.kind <> 'ablation' AND (c.state = 'failed' OR c.verdict = 'unsure'
 			OR c.verdict = 'attack' AND (NOT p.accepted OR $2 <> 'auto')
 				AND NOT EXISTS (SELECT 1 FROM autopilot_rules r WHERE (r.id = c.rule OR r.case_id = c.id)
 					AND (r.enforcing_since IS NOT NULL OR r.approved_by IS NOT NULL) AND r.ended_at IS NULL))

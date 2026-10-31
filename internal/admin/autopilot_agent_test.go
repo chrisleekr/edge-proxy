@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -608,7 +609,8 @@ func TestAutopilotRuleLifecycle(t *testing.T) {
 	t.Run("a person retires a rule and the overlay drops it", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
-		status(t, pub.do("POST", "/api/autopilot/rules/"+id+"/retire", map[string]any{"reason": "Our load test"}), 204)
+		// 300 characters, 900 bytes: the limit counts characters.
+		status(t, pub.do("POST", "/api/autopilot/rules/"+id+"/retire", map[string]any{"reason": strings.Repeat("가", 300)}), 204)
 		h.tick()
 		if _, live := liveRuleIn(pub.active().Config, id); live || ruleState(t, h, id) != "retired" {
 			t.Fatalf("rule %s, live %v", ruleState(t, h, id), live)
@@ -1152,6 +1154,39 @@ func TestAutopilotLease(t *testing.T) {
 		h.tick()
 		if st, _ := caseState(t, h, id); st != "cancelled" {
 			t.Fatalf("case %s an hour after it was requeued, want cancelled", st)
+		}
+	})
+	t.Run("a proposal whose lease lapses while it waits on a publish is refused", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		c, cs := agentCase(t, h, pub, agent)
+		// A person's publish holds the draft while the proposal waits on it.
+		tx, err := h.owner.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(context.Background()) }() //nolint:usetesting // t.Context may be cancelled
+		if _, err := tx.Exec(t.Context(), "SELECT 1 FROM config_draft FOR UPDATE"); err != nil {
+			t.Fatal(err)
+		}
+		refused := make(chan string)
+		go func() {
+			_, why := callTool(t, cs, "propose", proposal("add_sensor", "login-watch", loginRule()))
+			refused <- why
+		}()
+		waitingOnLocks(t, h, 1)
+		h.advance(11 * time.Minute)
+		if err := h.s.expireCases(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Rollback(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if why := <-refused; !strings.Contains(why, "lease") {
+			t.Fatalf("refusal %q, want the lease lapsed", why)
+		}
+		var rules int
+		if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM autopilot_rules WHERE case_id = $1", c.CaseID).Scan(&rules); err != nil || rules != 0 {
+			t.Fatalf("%d rules from a run that lost its case, err %v", rules, err)
 		}
 	})
 	t.Run("a result after the lease lapsed is refused and still recorded", func(t *testing.T) {

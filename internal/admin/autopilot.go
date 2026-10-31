@@ -792,7 +792,7 @@ func (s *Server) retireRule(w http.ResponseWriter, r *http.Request, p *principal
 	if err := readJSON(w, r, &in); err != nil {
 		return err
 	}
-	if in.Reason = strings.TrimSpace(in.Reason); in.Reason == "" || len(in.Reason) > 500 {
+	if in.Reason = strings.TrimSpace(in.Reason); in.Reason == "" || utf8.RuneCountInString(in.Reason) > 500 {
 		return &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid retire", Errors: []expr.Issue{{Path: "reason", Msg: "is required, at most 500 characters"}}}
 	}
 	ctx := r.Context()

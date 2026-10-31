@@ -30,7 +30,7 @@ In the admin UI, latency is on **Routes**: p95 and p50 per route, from the acces
 
 ## Admin metrics
 
-Prometheus text at `GET :9091/metrics` (`ADMIN_INTERNAL_ADDR`), per replica, with no authentication. Every series below except the leader gauges is present from the start, at 0.
+Prometheus text at `GET :9091/metrics` (`ADMIN_INTERNAL_ADDR`), per replica, with no authentication. Every series below except the leader gauges and the model-labelled `admin_autopilot_llm_runs_total`, `admin_autopilot_llm_tokens_total` and `admin_autopilot_llm_cost_usd_total` is present from the start, at 0. Those three appear with a model's first run, so `rate()` and `increase()` miss that run.
 
 | Metric | Meaning |
 |---|---|

@@ -913,6 +913,17 @@ func (s *Server) propose(ctx context.Context, call *mcpCall, in proposeIn) (*pro
 		if err := lockRun(ctx, tx, call.run); err != nil {
 			return err
 		}
+		// The lease was checked before the draft and publish locks, and can
+		// lapse while waiting on them, the case going to another run. FOR
+		// SHARE holds off a requeue until this commits.
+		var held bool
+		if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM autopilot_cases WHERE id = $1 AND run_id = $2 AND state = 'running' AND lease_until >= $3 FOR SHARE)",
+			call.caseID, call.run, s.now()).Scan(&held); err != nil {
+			return err
+		}
+		if !held {
+			return errLeaseLost
+		}
 		err := tx.QueryRow(ctx, "SELECT id, accepted, coalesce(rule_id, ''), checks FROM autopilot_proposals WHERE case_id = $1 AND rule_sha256 = $2", call.caseID, ruleSHA[:]).
 			Scan(&out.ProposalID, &out.Accepted, &out.RuleID, &out.Checks)
 		if err == nil {

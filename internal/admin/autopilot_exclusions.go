@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -146,7 +147,7 @@ func (s *Server) addExclusion(w http.ResponseWriter, r *http.Request, p *princip
 			add("path_prefix", "must start with /")
 		}
 		in.Reason = strings.TrimSpace(in.Reason)
-		if in.Reason == "" || len(in.Reason) > 500 {
+		if in.Reason == "" || utf8.RuneCountInString(in.Reason) > 500 {
 			add("reason", "is required, at most 500 characters")
 		}
 		if in.TTL != nil && (time.Duration(*in.TTL) < time.Hour || time.Duration(*in.TTL) > 365*24*time.Hour) {
@@ -225,7 +226,7 @@ func (s *Server) revokeExclusion(w http.ResponseWriter, r *http.Request, p *prin
 	if err := readJSON(w, r, &in); err != nil {
 		return err
 	}
-	if in.Reason = strings.TrimSpace(in.Reason); in.Reason == "" || len(in.Reason) > 500 {
+	if in.Reason = strings.TrimSpace(in.Reason); in.Reason == "" || utf8.RuneCountInString(in.Reason) > 500 {
 		return &problem{Status: http.StatusUnprocessableEntity, Title: "Invalid revoke", Errors: []expr.Issue{{Path: "reason", Msg: "is required, at most 500 characters"}}}
 	}
 	ctx := r.Context()
