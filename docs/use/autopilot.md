@@ -90,7 +90,7 @@ The same rule with `and ip.src in {"203.0.113.0/24"}` added is refused. Autopilo
 ## What runs where
 
 - **Admin** holds the cases, the rules, the checks and the publish. The leader runs autopilot every 30 seconds and publishes at most once a run.
-- **A runner** is a separate process holding the model provider credentials. It long-polls admin for a case (`POST /v1/autopilot/claim` with the `AUTOPILOT_TOKEN_FILE` token, see [admin settings](../deploy/admin.md)), runs the model with the system prompt and tools admin sends, and reports the verdict, token use and its transcript. Autopilot runner covers its image and settings. Credentials never reach admin, Postgres or the UI: the runner only names the providers it holds one for (`claude`, `openai`).
+- **A runner** is a separate process holding the model provider credentials. It long-polls admin for a case (`POST /v1/autopilot/claim` with the `AUTOPILOT_TOKEN_FILE` token, see [admin settings](../deploy/admin.md)), runs the model with the system prompt and tools admin sends, and reports the verdict, token use and its transcript. [Autopilot runner](../deploy/autopilot.md) covers its image and settings. Credentials never reach admin, Postgres or the UI: the runner only names the providers it holds one for (`claude`, `openai`).
 - **Without a runner,** nothing new is investigated. Rules already live keep their expiry and run out on the edges, and rules already observing still enforce or are rejected on their measurements.
 
 ## The Autopilot page
@@ -339,7 +339,7 @@ Where the deployment sets them, the autopilot reads its own Prometheus, Grafana 
 
 ## Replay and evaluation
 
-**Replay** runs a recorded case against another model or prompt without admin opening a run. It reads the case and `GET /api/autopilot/contract` from admin, or a bundle of both saved earlier, then serves the run's recorded tool calls to the model from a local MCP server: a call the run made gets admin's recorded answer, and any other call gets an error saying it was not recorded. A replay never reaches admin's MCP server, so it never proposes or records anything. **Replay with another model** on a case's page shows its command; Development covers the flags and the golden cases.
+**Replay** runs a recorded case against another model or prompt without admin opening a run. It reads the case and `GET /api/autopilot/contract` from admin, or a bundle of both saved earlier, then serves the run's recorded tool calls to the model from a local MCP server: a call the run made gets admin's recorded answer, and any other call gets an error saying it was not recorded. A replay never reaches admin's MCP server, so it never proposes or records anything. **Replay with another model** on a case's page shows its command; [Development](../build/development.md#replay-and-golden-cases) covers the flags and the golden cases.
 
 It prints a report: the recorded run's provider, model, verdict, tokens and costs, the replay's verdict, turns, tool calls, tokens, the provider's cost estimate and seconds, and the differences: whether the verdict changed, whether the prompt or tool list differs from the recorded run's, the calls the model made that the run didn't, and the recorded calls it didn't make. The prompt text is not recorded, so a replay uses the current prompt, or one given with `--prompt`, and says when its hash differs. The replay's own cost is only the provider's estimate: your prices apply to recorded runs.
 

@@ -87,7 +87,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # Keep in step with node_version in scripts/ci/ui.sh.
+      # Keep in step with node_version in scripts/ci/node.sh.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.12.1
@@ -99,6 +99,25 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('web/admin/package-lock.json') }}
       - run: ./scripts/ci/ui.sh
+
+  autopilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Keep in step with node_version in scripts/ci/node.sh.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          cache: npm
+          cache-dependency-path: autopilot/package-lock.json
+      # testcontainers uses the runner's Docker daemon.
+      - run: ./scripts/ci/autopilot.sh
 
   # The image build and smoke, then the load smoke, in one job: compose
   # reuses the layers image.sh just built instead of building them again.

@@ -3,6 +3,7 @@ cover.out
 /coverage/
 /bin/
 web/admin/node_modules/
+autopilot/node_modules/
 web/admin/dist/app/
 .env
 /site/

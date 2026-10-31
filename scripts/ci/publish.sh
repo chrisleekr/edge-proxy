@@ -1,7 +1,7 @@
 #!/bin/sh
-# Release images: builds the edge and admin images for PLATFORMS (default amd64
-# and arm64) and pushes them as <prefix> (the proxy) and <prefix>-admin with
-# every given tag.
+# Release images: builds the edge, admin and autopilot runner images for
+# PLATFORMS (default amd64 and arm64) and pushes them as <prefix> (the proxy),
+# <prefix>-admin and <prefix>-autopilot with every given tag.
 # A leading v is dropped, so release-please's v1.2.3 becomes 1.2.3.
 # Needs docker buildx with a multi-platform builder and a registry login.
 # POSIX sh for the docker image GitLab uses.
@@ -17,9 +17,9 @@ shift
 version=${1#v}
 platforms=${PLATFORMS:-linux/amd64,linux/arm64}
 
-for app in edge admin; do
+for app in edge admin autopilot; do
   repo=${prefix}
-  [ "${app}" = admin ] && repo=${prefix}-admin
+  [ "${app}" != edge ] && repo=${prefix}-${app}
   tags=""
   for tag in "$@"; do
     tags="${tags} --tag ${repo}:${tag#v}"

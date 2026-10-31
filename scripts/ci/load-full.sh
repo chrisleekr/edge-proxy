@@ -2,8 +2,9 @@
 # Full load profile, nightly and before a release: dependency
 # outages, algorithm accuracy across many IPs, 200 rules per phase, a hot
 # key, penalties, JWT and locale, publishing and canaries under load, an
-# over-blocking canary, long-lived streams and drain, rolling restarts,
-# losing an edge, and a Valkey cluster. PROFILE=release uses 1M IPs and
+# over-blocking canary, five attacks the autopilot must enforce against,
+# long-lived streams and drain, rolling restarts, losing an edge, and a
+# Valkey cluster. PROFILE=release uses 1M IPs and
 # holds 10k streams for an hour. ONLY=<regex> runs just the scenarios whose
 # names match it. The report lands in loadtest/results/full-report.txt.
 # POSIX sh, as load.sh.
@@ -147,6 +148,17 @@ lose_edge() {
   restart_edge edge-2
 }
 
+# autopilot_attacks runs the five attacks with the scripted agent answering
+# the autopilot's cases, then stops the agent.
+autopilot_attacks() {
+  compose --profile autopilot-load up -d agent
+  k6 k6 run --quiet /scripts/full/autopilot.js
+  status=$(cat results/.status)
+  compose logs --no-color agent | tail -40
+  compose --profile autopilot-load stop agent
+  echo "${status}" > results/.status
+}
+
 cleanup() { compose down -v >/dev/null 2>&1 || true; }
 trap 'compose logs --no-color > "results/${project}.log" 2>&1 || true; cleanup' EXIT
 
@@ -164,6 +176,7 @@ step "Hot key" k6 k6 run --quiet /scripts/full/hotkey.js
 step "One client over its limit with a penalty" penalty
 step "Publish every 10s and a canary" k6 k6 run --quiet /scripts/full/publish.js
 step "Over-blocking canary" k6 k6 run --quiet /scripts/full/overblock.js
+step "Autopilot: five attacks" autopilot_attacks
 step "$((STREAMS * 2)) streams for ${STREAM_FOR}" streams_hold
 step "Drain with streams open" drain
 step "Rolling restart" rolling
