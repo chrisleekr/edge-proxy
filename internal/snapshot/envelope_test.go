@@ -64,6 +64,12 @@ func TestCompileWarns(t *testing.T) {
 		{"HTTP version list with a version that doesn't exist", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.version in {"1.1" "HTTP/2.1"}`)
 		}, "rate_limit_rules[1].expression", `http.request.version is never "HTTP/2.1"`},
+		{"HTTP version pattern written as the CDN sends it", func(c *Config) {
+			c.ConfigRules[0].Expression = mustParse(`starts_with(http.request.version, "HTTP/1")`)
+		}, "config_rules[0].expression", `"HTTP/1" can't match`},
+		{"negated HTTP version wildcard written as the CDN sends it", func(c *Config) {
+			c.RateLimitRules[1].Expression = mustParse(`not http.request.version wildcard "http/1.*"`)
+		}, "rate_limit_rules[1].expression", `"http/1.*" can't match`},
 		{"limit skipped through a negated group", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and not (http.user_agent contains "monitor" or ssl)`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.user_agent"},

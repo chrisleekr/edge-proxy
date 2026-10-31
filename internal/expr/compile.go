@@ -85,7 +85,8 @@ func compileRule(r Node) Matcher {
 		return func(req Request) bool { return !inner(req) }
 	}
 	f, _ := LookupField(r.Field)
-	if f.Name == "http.request.version" {
+	// Only whole values map; a pattern keeps its literal.
+	if f.Name == "http.request.version" && (op.Name == "eq" || op.Name == "in") {
 		r.Value = versionLiterals(r.Value)
 	}
 	switch f.Type {
