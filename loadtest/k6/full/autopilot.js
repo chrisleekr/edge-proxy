@@ -70,10 +70,12 @@ export function setup() {
   const cookie = session();
   // No base rate-limit rules, so only the autopilot's limit the attacks. The
   // catalog verifies a token when one is sent, so the scraper's sub is a key.
+  // Config rules are replaced too: an earlier scenario can leave the phase
+  // full, and none of its rules apply to these routes.
   const catalog = { id: 'catalog-auth', expression: path('starts_with', '/api/catalog/'), settings: { auth: { mode: 'optional' } } };
   converged(
     cookie,
-    publish(cookie, (c) => ({ ...c, rate_limit_rules: [], config_rules: [...c.config_rules.filter((r) => r.id !== catalog.id), catalog] }), { message: 'autopilot attacks: no base rate limits', tests: [] }),
+    publish(cookie, (c) => ({ ...c, rate_limit_rules: [], config_rules: [catalog] }), { message: 'autopilot attacks: no base rate limits', tests: [] }),
   );
   // A sensor's anomaly fires on the first check that sees it: checks run
   // every minute over whole minutes 30s old, and the autopilot ticks every
