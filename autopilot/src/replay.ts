@@ -18,7 +18,6 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Usage } from './admin.ts';
@@ -222,8 +221,7 @@ async function serve(b: Bundle, rec: Recorded): Promise<{ url: string; headers: 
       void transport.close();
       void server.close();
     });
-    // The SDK's own types differ only in sessionId's optionality under exactOptionalPropertyTypes.
-    await server.connect(transport as Transport);
+    await server.connect(transport);
     await transport.handleRequest(req, res);
   };
   const srv = createServer((req, res) => {
