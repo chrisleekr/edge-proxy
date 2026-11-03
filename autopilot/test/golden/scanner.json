@@ -691,7 +691,7 @@
         "description": "Mode, budgets and what they use, connected runners, and the live autopilot rules with state and expiry.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": null,
+          "properties": {},
           "type": "object"
         },
         "evidence": false
@@ -722,7 +722,7 @@
         "description": "The active version's rules, people's and the autopilot's, with expressions as text.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": null,
+          "properties": {},
           "type": "object"
         },
         "evidence": false
@@ -733,7 +733,7 @@
         "description": "Expression fields, rate-limit key kinds and algorithms the edge accepts.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": null,
+          "properties": {},
           "type": "object"
         },
         "evidence": false
@@ -786,7 +786,7 @@
         "description": "Open and recent anomalies the notification checks found.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": null,
+          "properties": {},
           "type": "object"
         },
         "evidence": true
@@ -797,7 +797,7 @@
         "description": "Routes observed in access logs, with requests, status classes, decisions and rules.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": null,
+          "properties": {},
           "type": "object"
         },
         "evidence": true
@@ -861,7 +861,7 @@
         "description": "The case this run answers: its trigger, evidence and prior cases on the same rule.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": null,
+          "properties": {},
           "type": "object"
         },
         "evidence": false

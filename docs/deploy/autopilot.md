@@ -24,7 +24,7 @@ The runner is never on the request path: edges don't talk to it, and admin and t
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTOPILOT_ADMIN_URL` | required | Admin's base URL, `http` or `https`, with no user, query or fragment, such as `http://admin:8081`. The runner calls `/v1/autopilot/*` and the model reaches `/v1/mcp` here |
+| `AUTOPILOT_ADMIN_URL` | required | Admin's base URL, `http` or `https`, with no user, query or fragment, such as `http://admin:8081`. The runner calls `/v1/autopilot/*` and the model reaches `/v1/mcp` here. The runner token goes as a bearer token over this scheme, so use https, or plain http only on a network path with equivalent protection, such as a private container network or mesh mTLS ([RFC 6750 section 5.3](https://www.rfc-editor.org/rfc/rfc6750#section-5.3)) |
 | `AUTOPILOT_TOKEN_FILE` | required | File holding the runner token: the same token as admin's [`AUTOPILOT_TOKEN_FILE`](admin.md#variables), at least 32 characters |
 | `CLAUDE_CODE_OAUTH_TOKEN` | none | Claude credential from `claude setup-token`. It draws on the Claude subscription of whoever made it, under that plan's terms: check they allow this use before you set it |
 | `ANTHROPIC_API_KEY` | none | Claude API key from the Claude Console, billed to its organization |
@@ -82,10 +82,10 @@ On SIGTERM or SIGINT the runner stops claiming, aborts every run in progress and
 
 ## Run it
 
-With Docker, beside an admin that has `AUTOPILOT_TOKEN_FILE` set:
+With Docker, beside an admin container named `admin` that has `AUTOPILOT_TOKEN_FILE` set, on a [user-defined network](https://docs.docker.com/engine/network/drivers/bridge/) `edge-proxy` (the default bridge network doesn't resolve container names). Plain http is fine here because the token stays on that network:
 
 ```bash
-docker run -d --read-only --tmpfs /tmp \
+docker run -d --read-only --tmpfs /tmp --network edge-proxy \
   -e AUTOPILOT_ADMIN_URL=http://admin:8081 \
   -e AUTOPILOT_TOKEN_FILE=/run/secrets/autopilot-token \
   -e ANTHROPIC_API_KEY \

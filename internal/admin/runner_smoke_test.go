@@ -417,6 +417,18 @@ func TestAutopilotRunner(t *testing.T) {
 		}
 	})
 
+	t.Run("a run whose directory can't be made reports exception and the case fails after its second attempt", func(t *testing.T) {
+		h, pub, _ := autopilotHarness(t)
+		startRunner(t, h, runnerPlan{Verdict: "benign"}, "TMPDIR="+filepath.Join(t.TempDir(), "missing"))
+		connected(t, pub)
+		id := pub.investigate("login", "Is someone guessing passwords?")
+		within(t, 30*time.Second, "the case fails", func() bool { s, _ := caseIs(t, h, id); return s == "failed" })
+		runs := runsOf(t, h, id)
+		if len(runs) != 2 || runs[0].Category != "exception" || runs[1].Category != "exception" {
+			t.Fatalf("runs %+v", runs)
+		}
+	})
+
 	t.Run("with AUTOPILOT_CONCURRENCY=2 two cases run at once", func(t *testing.T) {
 		h, pub, _ := autopilotHarness(t)
 		// Hung runs hold their loops, so one loop could never run both.

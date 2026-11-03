@@ -143,7 +143,7 @@ async function runCase(ctx: Ctx, claim: Claim): Promise<void> {
   const { cfg, admin } = ctx;
   const ids = { case_id: claim.case_id, run_id: claim.run_id, attempt: claim.attempt, model: claim.model };
   log('info', 'run started', ids);
-  const workDir = await mkdtemp(join(tmpdir(), 'autopilot-run-'));
+  let workDir = '';
   // A second abort is a no-op, so the first reason is the one reported.
   const ac = new AbortController();
   const abort = (why: string) => ac.abort(why);
@@ -189,6 +189,8 @@ async function runCase(ctx: Ctx, claim: Claim): Promise<void> {
     if (!adapter) {
       throw new Error(`no adapter for ${claim.provider}`);
     }
+    // Inside the try, so a full or missing /tmp reports exception to admin.
+    workDir = await mkdtemp(join(tmpdir(), 'autopilot-run-'));
     const input: RunInput = {
       claim,
       mcpURL: `${cfg.adminURL}/v1/mcp`,
@@ -210,9 +212,11 @@ async function runCase(ctx: Ctx, claim: Claim): Promise<void> {
     clearTimeout(timer);
     ctx.stop.removeEventListener('abort', onStop);
     // A leftover directory only takes /tmp space, so the result still goes.
-    await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch((e: unknown) => {
-      log('warn', 'run directory not removed', { ...ids, error: message(e) });
-    });
+    if (workDir) {
+      await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch((e: unknown) => {
+        log('warn', 'run directory not removed', { ...ids, error: message(e) });
+      });
+    }
   }
 
   const why = ac.signal.aborted ? String(ac.signal.reason) : '';
