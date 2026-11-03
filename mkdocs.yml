@@ -65,6 +65,7 @@ nav:
   - Use:
       - Policy: use/policy.md
       - Rate limiting: use/rate-limiting.md
+      - Autopilot: use/autopilot.md
       - Bot detection: use/bots.md
       - Publish and roll back: use/publishing.md
       - Dashboard: use/dashboard.md
@@ -76,6 +77,7 @@ nav:
       - Capacity planning: deploy/capacity.md
   - Operate:
       - Monitoring: operate/monitoring.md
+      - Notifications: operate/notifications.md
       - Runbooks: operate/runbooks.md
   - Reference:
       - Expressions: reference/expressions.md

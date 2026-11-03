@@ -13,22 +13,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/chrisleekr/edge-proxy/internal/edge"
 )
 
-// runServer runs s.Serve on a fresh listener until the returned stop is called.
-func runServer(t *testing.T, s *Server) (addr string, stop func() error) {
+// runServer runs s.Serve on fresh API and internal listeners until the
+// returned stop is called.
+func runServer(t *testing.T, s *Server) (addr, internal string, stop func() error) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	in, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- s.Serve(ctx, l) }()
-	return l.Addr().String(), func() error {
+	go func() { done <- s.Serve(ctx, l, in) }()
+	return l.Addr().String(), in.Addr().String(), func() error {
 		cancel()
 		select {
 		case err := <-done:
@@ -44,7 +50,7 @@ func runServer(t *testing.T, s *Server) (addr string, stop func() error) {
 // counts are written, not dropped with the replica.
 func TestReportDuringShutdownIsFlushed(t *testing.T) {
 	h, pub := published(t)
-	addr, stop := runServer(t, h.s)
+	addr, _, stop := runServer(t, h.s)
 	b, _ := json.Marshal(edge.StatsReport{Instance: "edge-a", ConfigSource: "admin", Versions: []edge.StatsCounts{{Version: 1, Requests: 7, LatencyMS: []uint64{7}}}})
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -74,6 +80,51 @@ func TestReportDuringShutdownIsFlushed(t *testing.T) {
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
+	}
+	var requests int64
+	if err := h.db.QueryRow(t.Context(), "SELECT coalesce(sum(requests), 0) FROM edge_stats_minute WHERE version = 1").Scan(&requests); err != nil || requests != 7 {
+		t.Fatalf("flushed %d requests, %v", requests, err)
+	}
+}
+
+// When one of admin's listeners fails, admin stops the other server and
+// still writes the stats it holds, instead of losing up to a minute of
+// edge reports.
+func TestListenerFailureStillFlushesStats(t *testing.T) {
+	h, pub := published(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.s.Serve(t.Context(), l, in) }()
+	addr := l.Addr().String()
+	b, _ := json.Marshal(edge.StatsReport{Instance: "edge-a", ConfigSource: "admin", Versions: []edge.StatsCounts{{Version: 1, Requests: 7, LatencyMS: []uint64{7}}}})
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/edge/report", strings.NewReader(string(b)))
+	req.Header.Set("Authorization", "Bearer "+h.edgeToken(pub))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status(t, resp, 200)
+
+	_ = in.Close() // the internal server's accept loop fails
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve returned nil after a listener failed")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Serve kept running after a listener failed")
+	}
+	if c, err := net.Dial("tcp", addr); err == nil {
+		_ = c.Close()
+		t.Fatal("API address still accepts connections")
 	}
 	var requests int64
 	if err := h.db.QueryRow(t.Context(), "SELECT coalesce(sum(requests), 0) FROM edge_stats_minute WHERE version = 1").Scan(&requests); err != nil || requests != 7 {
@@ -115,7 +166,7 @@ func TestShutdownWithPostgresHungFinishes(t *testing.T) {
 	defer func(d time.Duration) { flushTimeout = d }(flushTimeout)
 	flushTimeout = 200 * time.Millisecond
 
-	_, stop := runServer(t, s)
+	_, _, stop := runServer(t, s)
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +178,7 @@ func TestSlowAndIdleClientsAreDisconnected(t *testing.T) {
 	h := newHarness(t)
 	defer func(r, i time.Duration) { readTimeout, idleTimeout = r, i }(readTimeout, idleTimeout)
 	readTimeout, idleTimeout = 300*time.Millisecond, 300*time.Millisecond
-	addr, stop := runServer(t, h.s)
+	addr, _, stop := runServer(t, h.s)
 	defer func() { _ = stop() }()
 	closed := func(c net.Conn, r *bufio.Reader) bool {
 		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -216,5 +267,73 @@ func TestAuditRowTakesTheChangeTime(t *testing.T) {
 	}](t, pub.do("GET", "/api/versions", nil))
 	if len(rows) != 1 || len(versions) != 1 || !rows[0].OccurredAt.Equal(versions[0].PublishedAt) || !rows[0].OccurredAt.Equal(h.now().UTC().Truncate(time.Microsecond)) {
 		t.Fatalf("publish audited at %+v, version published at %+v, clock %s", rows, versions, h.now())
+	}
+}
+
+// Admin serves its metrics on the internal address only, apart from the API
+// and UI, so a scraper needs no session and the API never exposes them.
+// Every fixed series is there from the start, at 0, so rate() sees the
+// first event. A replica that isn't leading exports no fleet gauges. The
+// internal address closes with the rest of admin.
+func TestAdminMetricsEndpoint(t *testing.T) {
+	h := newHarness(t)
+	// Another replica leads.
+	holder, err := pgx.Connect(t.Context(), h.s.cfg.DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close(t.Context()) }()
+	if _, err := holder.Exec(t.Context(), "SELECT pg_advisory_lock($1)", leaderLock); err != nil {
+		t.Fatal(err)
+	}
+	addr, internal, stop := runServer(t, h.s)
+
+	resp, err := http.Get("http://" + internal + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "text/plain; version=0.0.4" {
+		t.Fatalf("internal /metrics: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	text := body(resp)
+	for _, want := range []string{
+		"admin_leader 0",
+		`admin_publishes_total{source="manual"} 0`, `admin_publishes_total{source="revert"} 0`,
+		`admin_publishes_total{source="guard_rollback"} 0`, `admin_publishes_total{source="import"} 0`,
+		`admin_guard_actions_total{action="rollback"} 0`, `admin_guard_actions_total{action="canary_abort"} 0`, `admin_guard_actions_total{action="alert"} 0`,
+		`admin_notifications_total{result="sent"} 0`, `admin_notifications_total{result="failed"} 0`,
+		`admin_edge_reports_total{result="accepted"} 0`, `admin_edge_reports_total{result="invalid"} 0`, `admin_edge_reports_total{result="error"} 0`,
+		`admin_log_lines_total{result="accepted"} 0`, `admin_log_lines_total{result="rejected"} 0`,
+		"admin_log_batches_busy_total 0",
+		`admin_background_job_failures_total{job="jwks"} 0`, `admin_background_job_failures_total{job="verified_bots"} 0`, `admin_background_job_failures_total{job="audit"} 0`,
+		`admin_background_job_failures_total{job="audit_full"} 0`, `admin_background_job_failures_total{job="guard"} 0`, `admin_background_job_failures_total{job="notifications"} 0`,
+		`admin_background_job_failures_total{job="retention"} 0`,
+		"admin_audit_verify_failures_total 0",
+		"admin_trace_export_errors_total 0",
+	} {
+		if !strings.Contains(text, want+"\n") {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	for _, leaderOnly := range []string{"admin_edges_live", "admin_anomalies_firing"} {
+		if strings.Contains(text, leaderOnly) {
+			t.Errorf("a replica not leading exports %s", leaderOnly)
+		}
+	}
+
+	resp, err = http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := body(resp); strings.Contains(text, "admin_leader") {
+		t.Fatal("the API address serves the metrics")
+	}
+
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := net.Dial("tcp", internal); err == nil {
+		_ = c.Close()
+		t.Fatal("internal address still accepts connections after shutdown")
 	}
 }

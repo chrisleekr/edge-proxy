@@ -201,7 +201,12 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request, p *principal) error 
 		perms = append(perms, k)
 	}
 	slices.Sort(perms)
-	return writeJSON(w, http.StatusOK, map[string]any{"username": p.username, "permissions": perms})
+	me := map[string]any{"username": p.username, "permissions": perms}
+	// Only stats pages link to the log store.
+	if s.cfg.LogSearchURL != "" && p.can("stats.read") {
+		me["log_search_url"] = s.cfg.LogSearchURL
+	}
+	return writeJSON(w, http.StatusOK, me)
 }
 
 // changePassword needs the current password and rotates the session.

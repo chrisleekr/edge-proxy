@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ var testAuditKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef012
 func baseEnv(dsn string) map[string]string {
 	return map[string]string{
 		"DATABASE_URL": dsn, "AUDIT_HMAC_KEY_ID": "k1", "AUDIT_HMAC_KEY": testAuditKey,
-		"CLIENT_IP_SOURCE": "cloudfront",
+		"CLIENT_IP_SOURCE": "cloudfront", "ADMIN_INTERNAL_ADDR": "127.0.0.1:0",
 	}
 }
 
@@ -80,14 +81,19 @@ func newHarnessWith(t *testing.T, set map[string]string) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{t: t, owner: owner, clock: time.Now()}
+	// Postgres keeps microseconds. A finer clock, as on Linux, reads back
+	// earlier than it was written and shifts every boundary comparison.
+	h := &harness{t: t, owner: owner, clock: time.Now().Truncate(time.Microsecond)}
 	log := slog.New(slog.NewJSONHandler(&h.logs, nil))
 	tp, err := tracing.New(cfg.Tracing, cfg.Replica, log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) }) //nolint:usetesting // t.Context is already cancelled when Cleanup runs
-	pool, err := openPool(ctx, db.App, tp)
+	// pgxpool's default is max(4, CPUs). A fixed size keeps tests that hold
+	// connections, such as four MCP calls waiting on a lock, independent of
+	// the host's CPU count.
+	pool, err := openPool(ctx, db.App+"&pool_max_conns=16", tp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +105,35 @@ func newHarnessWith(t *testing.T, set map[string]string) *harness {
 	h.srv = httptest.NewTLSServer(h.s.Handler())
 	t.Cleanup(h.srv.Close)
 	return h
+}
+
+// mcpInFlight is how many MCP calls admin is serving now.
+func (h *harness) mcpInFlight() int {
+	h.s.mcpCalls.mu.Lock()
+	defer h.s.mcpCalls.mu.Unlock()
+	n := 0
+	for _, c := range h.s.mcpCalls.n {
+		n += c
+	}
+	return n
+}
+
+// metrics is what admin's internal /metrics serves now.
+func (h *harness) metrics() string {
+	var b strings.Builder
+	h.s.writeMetrics(&b)
+	return b.String()
+}
+
+// wantMetrics checks /metrics has each series line.
+func (h *harness) wantMetrics(lines ...string) {
+	h.t.Helper()
+	m := h.metrics()
+	for _, l := range lines {
+		if !strings.Contains(m, l+"\n") {
+			h.t.Errorf("metrics missing %q", l)
+		}
+	}
 }
 
 func (h *harness) now() time.Time {

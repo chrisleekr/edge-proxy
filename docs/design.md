@@ -80,16 +80,17 @@ cmd/admin/           thin main: calls admin.Main
 internal/expr/       expression parser, renderer, type checker, compiler. Shared
 internal/snapshot/   config types, strict decode, Compile() (validates and compiles). Shared
 internal/ratelimit/  algorithms (Lua + local), backstop, penalty cache. Shared
-internal/jwks/       JWKS fetch/parse, SSRF guard. Shared
+internal/jwks/       JWKS fetch/parse, SSRF guard (also used for crawler range lists). Shared
 internal/envparse/   deployment config from env vars. Shared
 internal/tracing/    OpenTelemetry tracer provider: OTLP/HTTP export, capped sampler, export counters
 internal/edge/       wiring, http.Server, shutdown, and the request pipeline: clientip, viewer, cors, jwt, locale, headers, respond, proxy, stats
-internal/admin/      admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS refresh, canary, guard, observed routes, first-start bootstrap
+internal/admin/      admin API, identity, sessions, RBAC, publish, snapshot endpoint, stats ingest, JWKS and crawler range refresh, canary, guard, observed routes, first-start bootstrap
 internal/admindb/    Postgres queries, migrations, audit log
 internal/testenv/    testcontainers helpers (Valkey, Postgres, OpenTelemetry Collector) and the Playwright browser server, for tests
 web/admin/           admin UI: React + Vite + TypeScript + Tailwind, embedded into the admin binary
+autopilot/           autopilot runner: TypeScript on Node, its own image, outside the Go module
 loadtest/            k6 scripts, mock upstream, IdP, LB, gateway, services and stream holder, compose environment
-build/               Dockerfiles for the edge, admin and load-test images
+build/               Dockerfiles for the edge, admin, autopilot runner and load-test images
 docs/                MkDocs site
 scripts/             CI scripts and capacity runs
 ```
@@ -103,13 +104,15 @@ flowchart LR
     S1["1. Guards"] --> S2["2. Client IP<br/>+ viewer fields"]
     S2 --> S3["3. Pin snapshot"]
     S3 --> S4["4. Config phase"]
-    S4 --> S5["5. Local backstop"]
+    S4 --> S4b["4b. Block setting"]
+    S4b --> S5["5. Local backstop"]
     S5 --> S6["6. CORS"]
     S6 --> S7["7. JWT"]
     S7 --> S8["8. Rate-limit phase"]
     S8 --> S9["9. Header phase"]
     S9 --> S10["10. Proxy"]
-    S5 -->|"over"| R["Templated<br/>response"]
+    S4b -->|"block"| R["Templated<br/>response"]
+    S5 -->|"over"| R
     S7 -->|"invalid"| R
     S8 -->|"limited"| R
 ```
@@ -120,10 +123,11 @@ Steps 8 and 10 do network I/O. The rest run in memory.
 
 | # | Step | What it does | Why here |
 |---|---|---|---|
-| 1 | **Guards** | Rejects with a fast 503 when concurrent **ordinary** requests exceed the in-flight cap. Long-lived streams (SSE, WebSocket) have a separate cap, so they can't starve ordinary traffic. `http.Server.MaxHeaderBytes` already capped header size | Shed overload before spending any work on it |
+| 1 | **Guards** | Rejects with a fast 503 when concurrent **ordinary** requests exceed the in-flight cap: `MAX_INFLIGHT`, which defaults to `GOMEMLIMIT` ÷ 256 KiB (at most 10,000), lowered by the active policy's `global.max_inflight` when that is smaller. The policy is read with the same `atomic.Pointer.Load` that step 3 pins. Long-lived streams (SSE, WebSocket) have a separate cap, so they can't starve ordinary traffic. `http.Server.MaxHeaderBytes` already capped header size | Shed overload before spending any work on it |
 | 2 | **Client IP + viewer fields** | Checks the ingress secret header if configured. Reads the client IP and trusted viewer metadata (country, ASN, scheme, HTTP version) from the configured CDN headers, **only** if the TCP peer is a trusted proxy ([§10](#10-client-identity-and-viewer-metadata)). Rejects ambiguous path encodings ([§3.2](#32-fields)) | Everything later keys on the real client. Spoofed values must be rejected first |
 | 3 | **Pin snapshot** | One `atomic.Pointer.Load` of the compiled config, which a background poller keeps current. During a canary, picks the active or candidate config by client hash ([§12.5](#125-before-going-live)). No I/O | Keeps one request on one config version even if the poller swaps it mid-request |
 | 4 | **Config phase** | Evaluates config rules ([§3](#3-rules-engine)). Resolves this request's settings: auth, accepted issuers, CORS policy, locale, response templates, body limit, upstream timeout, rate-limit headers. From here on, every edge-generated response carries the request's CORS headers and `Cache-Control: no-store` | Everything after depends on these settings |
+| 4b | **Block setting** | When the resolved `block` setting is `block`, answers 403 with the `forbidden` template; `log` marks the request `would_block` and goes on. `kill_switch.block` turns `block` into `log` | A refused bot costs no backstop slot, JWT check or Valkey call. The config phase already ran, so the 403 has the request's template and CORS headers |
 | 5 | **Local backstop** | In-memory per-IP token bucket | Cheap flood protection before CPU-heavy JWT and network-bound Valkey; works when Valkey is down. It comes after the config phase so its 429 uses the request's template and CORS headers. The cost: a flood still pays for the config rules, about 70 µs per request on a laptop at the limit of 200 rules of 32 conditions (`BenchmarkMatch200Rules`) and under 1 µs for a realistic config |
 | 6 | **CORS** | Answers preflight when a CORS policy applies. With no policy, preflight is forwarded to the upstream like any request | Preflight needs no auth or quota. Browser JS can read edge 429/401 only with CORS headers (set from step 4) |
 | 7 | **JWT** | Verifies the token if the config phase requires auth. A verified-token cache means most requests skip signature checks | Rate-limit and header rules may use verified claims |
@@ -188,8 +192,13 @@ Every field, its type and its source are listed in the [Expressions reference](r
 
 **Viewer fields:**
 - "Viewer" fields (country, continent, AS number, scheme, HTTP version, client certificate) describe the client's connection to the CDN, which the edge can't observe itself because it sits behind a TLS-terminating proxy. They come only from trusted headers.
-- The deployment setting `VIEWER_HEADERS` maps each viewer field to a header. The `cloudfront` and `cloudflare` presets fill it in ([Client IP presets](deploy/edge.md#client-ip-presets)).
+- The deployment setting `VIEWER_HEADERS` maps each viewer field to a header. The `cloudfront`, `cloudflare` and `gcp` presets fill it in ([Client IP presets](deploy/edge.md#client-ip-presets)).
 - A field with no configured source is **unavailable**: hidden in the UI and rejected by validation, never silently empty.
+- `tls.client.ja4` and `tls.client.ja3` are viewer fields too: the CDN computes the fingerprint from the client's TLS hello. A header value that isn't a well-formed fingerprint is absent, and `eq` or `in` with a literal of another shape is rejected, sharing one shape check (`expr.ValidJA4`, `expr.ValidJA3`).
+
+**Edge-computed fields** read only the request and the snapshot, so they exist in every phase and every deployment:
+- `client.signals` is a list of automation hints from the headers and viewer fields, computed lazily as a bitmask the first time anything reads it, and as names from a table built once, so a request allocates nothing for it. It takes only `eq`, `ne`, `in` and `not_in` with known names. A signal needs the viewer field it reads (`ssl`, HTTP version or JA4): validation rejects a rule naming one the deployment can't compute. Browser thresholds come from MDN's compatibility data; the tool list includes the OWASP Core Rule Set's scanners. Signals are hints for log-first rules, not a score.
+- `client.verified_bot` is true when the client IP is in a crawler range list admin fetched from `VERIFIED_BOT_SOURCES` ([§5.4](#54-ssrf-guard)). The ranges travel in the snapshot envelope, only while the active or canary version reads `client.verified_bot`, and the edge compiles them into an IP set off the request path. Admin validation refuses a rule that reads the field when `VERIFIED_BOT_SOURCES` is empty (`Deployment.VerifiedBots`); edges always accept it, since their ranges arrive with the snapshot. The field is false until the first fetch succeeds.
 
 **Path normalization (security):**
 - Matching uses a copy of the path that has been percent-decoded once, except `%2F`, with path parameters (`;x`) dropped from each segment, `//` collapsed and `.` removed.
@@ -266,7 +275,9 @@ Every operator, the types it takes and its text form are in the [Expressions ref
 - **Warnings:**
   - Trivially unsatisfiable expressions (`http.host eq "a" and http.host eq "b"`).
   - A config rule fully overwritten by a later `true` rule.
-  - **Spoofable exclusions:** a rate-limit rule whose expression *excludes* traffic using a client-controlled field (header, cookie, query, X-Forwarded-For, User Agent, Referer). Exclude by `ip.src` or a verified claim instead.
+  - **Spoofable exclusions:** a rate-limit rule or a config rule with `block: block` that *excludes* traffic using a client-controlled field (header, cookie, query, X-Forwarded-For, User Agent, Referer, client signals, JA4, JA3). Exclude by `ip.src` or a verified claim instead.
+  - A config rule with `block: log` that matches a client-controlled field after an earlier rule sets `block: block`, since the last matching `block` wins.
+  - An `http.request.version` literal outside `1.0`, `1.1`, `2.0`, `3.0`.
 
 ## 4. Rate limiting
 
@@ -276,7 +287,7 @@ Every operator, the types it takes and its text form are in the [Expressions ref
 rate_limit_rules:
   - id: login-per-ip
     expression: 'http.request.method eq "POST" and http.request.uri.path eq "/v1/login" and not ip.src in {10.0.0.0/8}'
-    algorithm: sliding_window     # fixed_window | sliding_window | token_bucket | leaky_bucket
+    algorithm: sliding_window     # fixed_window | sliding_window | token_bucket | leaky_bucket | distinct
     limit: 5
     period: 1m
     burst: 5                      # token_bucket / leaky_bucket only
@@ -285,6 +296,9 @@ rate_limit_rules:
     action: block                 # block | log (shadow)
     penalty: 5m                   # optional
     fail_mode: local              # open | closed | local
+    distinct_of: path             # distinct only: path | query:<n> | ip | asnum | ja4
+    count_statuses: ["404"]       # optional: count upstream responses, in each edge's memory
+    expires_at: 2026-11-01T00:00:00Z  # optional: the rule stops running at this time
 ```
 
 **Evaluation:**
@@ -294,6 +308,13 @@ rate_limit_rules:
 - So a request costs at most 7 commands, all in one pipelined batch.
 - **Rules are independent counters, not atomic with each other.** A request blocked by one rule still consumes quota in the others it matched. Checking before consuming would need a second round trip, which P2 rules out.
 - **A penalty applies only to `action: block` rules.** Shadow rules record that the penalty *would* start, but never block.
+- **A rule past its `expires_at` is skipped** before it takes a slot, and counted as `expired` on `/metrics`. Each edge compares it with the request's start time on its own clock, so clock skew between edges moves the end by that much; run NTP. A penalty from the rule ends with it, since the penalty cache is only read for rules that run. Validation checks only the format: an expired rule is valid, so a bootstrap file exported while it ran still loads. A draft save or check warns when one of the draft's rules has already expired, since it will not run.
+
+**Count rules** (`count_statuses`) count the upstream's answers, such as 404s from a scanner or 401s from a password guesser, not requests:
+- **Per edge, in memory.** Counting happens in `ModifyResponse`, after the answer, so a shared count would need a second Valkey call per request (P2). Each replica counts against the full limit in its bounded local store; a client spread over N edges gets up to N × limit before every edge blocks it. That is accepted for signals that need many answers to mean anything.
+- **Over the limit, the key goes into the penalty cache** until the penalty ends or the count resets, so later requests are refused at step 8 without a Valkey call or an upstream request. The answer that went over is already sent.
+- **5xx can't be counted:** it is usually the upstream's fault, and counting it would lock clients out after an outage.
+- **Own cap of 5 per request,** apart from the Valkey rules' cap, because they cost no Valkey command. They are never site-wide rules nor the `ip` partner, and send no `RateLimit` headers.
 
 ### 4.2 Algorithms
 
@@ -308,12 +329,14 @@ Every algorithm keeps its state in **one Valkey key** and reads time from Valkey
 | `sliding_window` | Hash `{a: window start, b: current, c: previous}`; estimate = `prev × overlap + cur` | Smooths the boundary burst | Window end, plus `period/limit` when the current window is full (an upper bound) |
 | `token_bucket` | Hash `{a: tokens × period, b: last update}` | Bursts to `burst`, refills at `limit/period` | Time to next token |
 | `leaky_bucket` | Hash `{a: level × period, b: last update}`: the leaky bucket as a meter, which is equivalent to GCRA (ITU-T I.371) | Steady drain with burst tolerance. **Rejects, never queues** (queueing holds connections, against P1/P2) | Time until one request fits |
+| `distinct` | String: a 1024-bit map, then the window start and blocked-until as 15 digits each (158 bytes). The edge sends the value's bit (FNV-1a, then MurmurHash3's 64-bit finalizer, top 10 bits); the script sets it and estimates `-1024 × ln(clear bits / 1024)` (linear counting) | Different values of `distinct_of` per subject per period, starting with the first value. Over the limit, every request is refused until the period ends | Time to period end |
 
 Notes:
 - **Integer milliseconds, one model.** Every script works in whole milliseconds, and `ratelimit.Step` is the same arithmetic in Go. Step serves `fail_mode: local` and the backstop, and a differential test runs random sequences against real Valkey (standalone and cluster), comparing each decision, the stored state and the TTL.
   - Lua numbers are doubles, so validation keeps `burst × period(ms)` at most 2^51 for the bucket algorithms (e.g. at most 26,062,497 per 24h). Sliding-window weights use parts per million so products stay below 2^53, and the weighted previous count rounds **up**: rounding down would admit one extra request just after every boundary. Stored numbers are formatted with `%d`, because Lua's default conversion keeps only 14 digits.
   - A blocked request (active penalty) writes nothing; the key's TTL already covers the penalty.
 - **Rejected:** sliding-window *log*, because its memory grows with the limit.
+- **Distinct is an estimate, bounded by design.** A set of seen values per subject grows with the values; a fixed 1024-bit map does not. Linear counting stays within 10% (about 4% in tests) up to the 1000 values validation allows (a test against real Valkey checks it), and drifts beyond. The plain FNV-1a low bits cluster for similar strings, so the hash is finalized before the top bits are taken. It has no `Step` model, so `fail_mode: local` is refused: a map per subject would outgrow the bounded local store. `distinct_of` is hashed into the key prefix, so changing it starts fresh state and a query name can't add a brace to the cluster hash tag.
 - **Token vs leaky bucket:** with equal parameters, leaky bucket as a meter admits the same traffic as token bucket. Both are offered for operator familiarity.
 - **Changing a rule:**
   - A change to `limit` or `burst` applies on the next call.
@@ -327,11 +350,11 @@ Notes:
 | `ip` | Trusted client IP. IPv6 truncated to /64 |
 | `header:<n>`, `cookie:<n>`, `query:<n>` | Request (attacker-controlled) |
 | `jwt_claim:<n>` | Verified JWT |
-| `host`, `method`, `country`, `asnum`, `locale` | Request / viewer / [§8](#8-locale-from-accept-language) |
+| `host`, `method`, `country`, `asnum`, `ja4`, `locale` | Request / viewer / [§8](#8-locale-from-accept-language) |
 | `constant` | One bucket for the rule. A hot key on one shard, so use only with low limits |
 
 - **Valkey key:** `rl:<algo>:<period ms>:<rule_id>:{<b64url(sha256(subject))[:16 bytes]>}`. The subject is a domain byte followed by length-prefixed values, or a different domain byte followed by the client IP for `fallback_ip`. So a client-chosen header value can never produce another client's fallback bucket. The hash bounds key size and keeps raw values out of Valkey. The `{}` hash tag spreads subjects across slots.
-- **Rule: attacker-controlled keys need a partner.** Clients can rotate header, cookie or query values to get a fresh bucket each time, and also `host` (the edge forwards any Host to the one upstream, so any Host reaches the rule) and `method` (any uppercase token is a valid method). So a rule keyed only on those is a validation error unless its own key also includes `ip` or `jwt_claim`, or a site-wide rule keyed on `ip` exists. Whether two arbitrary expressions overlap is undecidable, so validation doesn't try.
+- **Rule: attacker-controlled keys need a partner.** Clients can rotate header, cookie or query values to get a fresh bucket each time, and also `host` (the edge forwards any Host to the one upstream, so any Host reaches the rule), `method` (any uppercase token is a valid method) and `ja4` (a client picks its TLS stack). So a rule keyed only on those is a validation error unless its own key also includes `ip` or `jwt_claim`, or a site-wide rule keyed on `ip` exists that counts requests in Valkey (a count or `distinct` rule doesn't limit request rates). Whether two arbitrary expressions overlap is undecidable, so validation doesn't try.
 - **JWT claims are available only when this request's `auth` setting verified a token.** Otherwise `jwt_claim` keys count as missing (`on_missing_key`).
 - **Rule: `on_missing_key` defaults to `fallback_ip`.** With `skip` (the AWS WAF and NGINX behavior), omitting the header bypasses the rule.
 
@@ -367,7 +390,7 @@ Notes:
 
 - **No retries.** A call consumes quota, so a timeout is ambiguous.
   - **Verified in valkey-go v1.0.78:** network-error retry applies only to commands carrying the retryable tag (`client.go` `Do`/`DoMulti`; `cluster.go` `doresultfn` for `TRYAGAIN`, `CLUSTERDOWN` and `LOADING`). A plain `EVALSHA` from the command builder has no such tag, and `DisableRetry` is set as well.
-  - **Batch, not `Lua.ExecMulti`:** `ExecMulti` runs `SCRIPT LOAD` on every node on every call (`lua.go`), which would add round trips. The edge preloads the scripts at connect time and on every topology refresh, then sends one `DoMulti` of `EVALSHA`.
+  - **Batch, not `Lua.ExecMulti`:** `ExecMulti` runs `SCRIPT LOAD` on every node on every call (`lua.go`), which would add round trips. The edge preloads the scripts once per node, at connect time or when a topology refresh finds a new node, then sends one `DoMulti` of `EVALSHA`. A node that loses them (restart, failover) gets them back through the `NOSCRIPT` → `EVAL` fallback, because `EVAL` caches the script.
   - Remaining retries are safe, because the command never ran: `MOVED`/`ASK` redirects and the `NOSCRIPT` → `EVAL` fallback.
 - **A dedicated valkey-go client for rate limiting,** with its own short timeouts.
 
@@ -458,13 +481,13 @@ flowchart LR
 
 ### 5.4 SSRF guard
 
-Admin users enter URLs that admin and edges then fetch, so `internal/jwks` enforces:
+Admin users enter JWKS URLs that admin and edges then fetch, and admin fetches the deployment's `VERIFIED_BOT_SOURCES` crawler range lists with the same client, so `internal/jwks` enforces for both:
 
 - HTTPS only, TLS 1.2 or later.
 - Resolved addresses must be public unicast: not loopback, private, link-local (cloud metadata), unspecified, multicast, shared (`100.64.0.0/10`) or NAT64 (`64:ff9b::/96`) of any of those. `JWKS_ALLOWED_HOSTS` lists hosts (by URL host) exempt from this.
 - No proxy from the environment: the dial check would see only the proxy's address.
 - **Checked at connect time,** in `net.Dialer.Control` against the address actually dialed. A pre-resolution check alone is open to DNS rebinding: resolving to a public IP once, then to a private one.
-- 64 KB response cap.
+- 64 KB response cap; 512 KiB for crawler range lists.
 - A 5s timeout.
 - Redirects only to the same host over https, at most 3.
 
@@ -553,13 +576,15 @@ responses:
 
 ## 10. Client identity and viewer metadata
 
-`CLIENT_IP_SOURCE` names where the client IP comes from: a CDN preset (`cloudfront`, `cloudflare`) that also fills in the viewer headers, a named header, `X-Forwarded-For` walked right to left past trusted proxies, or the TCP peer (`remote_addr`). The headers each preset reads are in [Client IP presets](deploy/edge.md#client-ip-presets).
+`CLIENT_IP_SOURCE` names where the client IP comes from: a CDN preset (`cloudfront`, `cloudflare`, `gcp`) that also fills in the viewer headers, a named header, `X-Forwarded-For` walked right to left past trusted proxies, or the TCP peer (`remote_addr`). The headers each preset reads are in [Client IP presets](deploy/edge.md#client-ip-presets).
 
 **Trust needs three controls together:**
 
-1. **The origin accepts only CDN traffic.** This is network-level and the deployment's job: CloudFront VPC origin or prefix list + secret header; Cloudflare IP ranges, Authenticated Origin Pulls or a tunnel.
+1. **The origin accepts only CDN traffic.** This is network-level and the deployment's job: CloudFront VPC origin or prefix list + secret header; Cloudflare IP ranges, Authenticated Origin Pulls or a tunnel; for `gcp`, the load balancer in front of the edge, which overwrites only the headers it adds, so every header the edge reads (and the ingress secret) must be one of its custom request headers.
 2. **`TRUSTED_PROXIES`:** headers are honored only if the TCP peer is trusted; otherwise 400.
 3. **Normalize:** parse with `netip` and drop the port. Strip all client-IP and viewer source headers, the standard `Forwarded` header (RFC 7239) and the ingress secret header before forwarding, and send `X-Edge-Client-IP` / `X-Edge-Geo-*` instead.
+
+**Viewer value forms differ by CDN,** so step 2 normalizes them: `ssl` is true for `https` (a scheme) or `true` (GCP's `{client_encrypted}`); the HTTP version is written `1.0`, `1.1`, `2.0` or `3.0` whether the CDN sends that or `HTTP/2`, and any other value is absent; a malformed fingerprint is absent and, with an `ssl` source, so is any fingerprint on a request that wasn't HTTPS, since only TLS has one. Rules then compare one form, and a version literal outside those four gets a validation warning rather than an error, so versions published before the check still load. JA3 and JA4 are opt-in through `VIEWER_HEADERS` on every preset, and so is ASN on `gcp`: a header the load balancer doesn't add reaches the edge as the client sent it, and the regional external Application Load Balancer has no `{asn}` variable. The edge forwards JA4 to the upstream as `X-Edge-TLS-JA4`.
 
 **Ingress secret header (optional):**
 - When `INGRESS_SECRET_HEADER` and its value(s) are configured, a request without a matching value gets 400 at step 2. More than one value is allowed, so the secret can be rotated without downtime.
@@ -640,6 +665,7 @@ canary_percent: 10
 canary_expires_at: ...               # edges drop the candidate after this if admin never promotes or aborts
 fleet_size: 6                        # edges admin saw reporting in the last minute ([§4.6](#46-valkey-failure))
 keys: [ { issuer_id: corp, jwks_url: ..., fetched_at: ..., jwks: ... } ]   # latest good keys per issuer and URL; merged by newest fetched_at ([§5.2](#52-keys))
+verified_bots: [ { source: https://..., prefixes: [...] } ]   # crawler ranges; only while the active or canary version reads client.verified_bot
 ```
 
 **`<config>`** (tests are stored with versions in admin; edges don't receive them):
@@ -647,7 +673,7 @@ keys: [ { issuer_id: corp, jwks_url: ..., fetched_at: ..., jwks: ... } ]   # lat
 ```yaml
 schema: 2
 version: 42
-kill_switch: { rate_limit: false, auth: false }
+kill_switch: { rate_limit: false, auth: false, block: false }
 global: { backstop: {...}, defaults: {...}, cors_policies: {...}, responses: {...}, locale: {...}, request_headers: {...} }
 auth: { issuers: [...], default_accepted: [...] }
 config_rules: [...]
@@ -658,7 +684,8 @@ request_header_rules: [...]
 **`kill_switch`:**
 - `rate_limit: true` turns every rate-limit rule into `action: log`. Counting and stats continue; nothing is blocked. The local backstop stays on.
 - `auth: true` turns every `auth` setting into `none`. Tokens aren't checked and no `X-Edge-Auth-*` headers are sent.
-- Both are audited, show as a red banner in the admin UI, and alert while on.
+- `block: true` turns every config rule's `block` setting into `log`.
+- All three are published like any config change, audited, and shown as a red banner on the dashboard while on.
 
 ### 12.2 Validation (one validator, everywhere)
 
@@ -698,7 +725,8 @@ request_header_rules: [...]
 **Schema compatibility:**
 - An edge keeps its current snapshot if a new one has a higher major `schema`.
 - A build reads every `schema` from `MinSchema` to its `max_schema`, so a version saved under an older schema still loads on an upgraded edge.
-- A field added in a later schema is omitted from JSON when unset and needs that schema when set. A config that doesn't use it then encodes exactly as before, so edges not yet upgraded, which reject unknown fields, keep loading snapshots from an admin upgraded first. A test pins the schema 1 encoding.
+- A field added in a later schema is omitted from JSON when unset. A config that doesn't use it then encodes exactly as before, so edges not yet upgraded, which reject unknown fields, keep loading snapshots from an admin upgraded first. Tests pin the schema 1, 3 and 4 encodings.
+- A config of any schema may set such a field. `Compile` then reports the schema an edge must read (`NeedsSchema`), and admin publishes it only when every live edge reads that schema. So a stored schema 1 policy can use `global.max_inflight` (schema 3) without migrating. A rate-limit rule's `expires_at` needs schema 5.
 - Schema 2 has no `upstream` config setting and no 421 `misdirected` response kind, because the edge forwards everything to one upstream. Compile reads a schema 1 config by dropping its `misdirected` template choices from a copy, so the stored version is served unchanged; a schema 1 rule that sets `upstream` fails to decode, because its routing can't be kept.
 - Admin won't publish a schema the oldest reporting edge can't read. Each stats report carries the edge's `max_schema`; publish, revert and import return 409 naming the edge while it is live (reported within the last minute).
 - Admin won't publish while a live edge runs with different deployment settings (`CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER`, `ALLOW_REGEX`) than admin validates against. That edge would reject the config and keep its old snapshot, and the guard would only ever see `insufficient_data`. Each stats report carries a fingerprint of the edge's `snapshot.Deployment`; publish and import return 409 naming the edge. Reverts and guard rollbacks skip the check: they restore content edges already served, and an edge token reporting a bogus fingerprint must not block the way back. Edges that report no fingerprint aren't checked.
@@ -795,8 +823,10 @@ guard:
 - **Fixed:** never roll back a rollback, and every automatic action is audited and alerted.
 - **How it runs:** on the leader, every `evaluate_every`.
   - During a canary it compares the candidate with active over the same minutes since the step started (at most `window`), and renews the canary's expiry (10-minute lease) once less than half of it, or less than two `evaluate_every` intervals, is left, so edges drop the candidate on their own within 10 minutes if admin goes away. The expiry is part of the snapshot ETag, so renewing on every run would make every edge download and recompile an unchanged snapshot on every guard run (every 30 seconds by default).
-  - After full rollout it compares the new version during its first `window` with the previous version over the `window` before the publish.
-  - Both cohorts need `min_requests`, else the outcome is `insufficient_data`. Rule counts leave out the most-limited subjects in each cohort, but only heavy hitters: a subject holding at least 5% of a rule's limited requests in a minute. Many clients limited a little each is the over-blocking the guard exists to catch. The cost: an attacker spread over enough IPs that each stays under 5% is counted, and can trip `changed_rule_limited_ratio` on a rule aimed at them. That is accepted: the result is one audited rollback to a known-good version, and a rule published against an ongoing attack should carry a guard override with its reason.
+  - After full rollout it judges the latest version a person published (or a revert or rollback made), not an autopilot publish: autopilot changes only its own rules. It compares that version's first `window`, with the minutes of the autopilot versions after it but not of a canary aborted since, with every earlier version over the `window` before the publish. Fleet adoption counts edges on that version or an autopilot version after it.
+  - Autopilot rules are left out of the rule signals. Each has its own guard ([§13.7](#137-autopilot)), so an autopilot rule blocking an attack never rolls back a person's publish. A rollback restores the version before the judged one with the current autopilot rules.
+  - The rule signals cover rate-limit rules and config rules with a `block` setting. A config rule evaluates every request, so its blocked share is of all the cohort's requests; heavy hitters aren't taken out of it, since stats keep no per-client config counts. The candidate's baseline is the larger of the share the active cohort logged as `would_block` and the share it blocked; above 0, it trips only above that share × `max_vs_shadow`, since blocking what was logged or already blocked is the reviewed intent. Without either, `max_ratio` applies. Rate-limit rules trip on either threshold.
+  - Both cohorts need `min_requests`, else the outcome is `insufficient_data`. Rule counts leave out the most-limited subjects in each cohort, but only heavy hitters: a subject holding at least 5% of a rule's limited requests in a minute. A subject counts as its top-K estimate less `err`, the count it inherited when it took an evicted subject's slot, so only requests it surely sent make it heavy. Heavy subjects are found minute by minute, but their estimates are summed over the window and left out once, less a sampling allowance of 3·√(16·H) for a sum H: an estimate is 16 per sampled request (`edge.TopSample`), unbiased with a variance of about 16·H. Taken once, one minute's shortfall and another's overshoot cancel; taken per minute with a floor at 0, every shortfall would count as over-blocking. Many clients limited a little each is the over-blocking the guard exists to catch. The cost: an attacker spread over enough IPs that each stays under 5% is counted, and can trip `changed_rule_limited_ratio` on a rule aimed at them. That is accepted: the result is one audited rollback to a known-good version, and a rule published against an ongoing attack should carry a guard override with its reason.
   - The outcome (decision and every signal's value and baseline) is stored on the version. An alert is audited when it starts, not on every run.
   - A tripped `rollback` signal aborts the canary, or publishes the previous version again as `source: guard_rollback` and marks the bad one `rolled_back`, at most `max_auto_rollbacks_per_publish` times. A revert or guard rollback is only ever alerted on.
   - `step_min_time` (default 5m) and `min_requests` gate each canary step and promotion.
@@ -812,7 +842,7 @@ Every publish is a numbered, immutable version you can open, compare and revert 
 | `version` | Monotonic number |
 | `author`, `published_at` | Who and when |
 | `message` | Required short note ("Tighten login limit to 5/min") |
-| `source` | `manual`, `revert`, `guard_rollback`, `import` |
+| `source` | `manual`, `revert`, `guard_rollback`, `import`, `autopilot` (an overlay publish) |
 | `based_on` | For a revert: the version whose content was restored |
 | `status` | `active`, `canary`, `superseded`, `rolled_back` |
 | `config` | The full config, without JWKS keys (see below) |
@@ -837,7 +867,7 @@ Configs are small: they're bounded by the budgets in [§12.2](#122-validation-on
 
 **Revert semantics:**
 
-1. **A revert creates a new version** (N+1) whose content is version K's. History is never rewritten; versions only go up ([§12.3](#123-distribution)).
+1. **A revert creates a new version** (N+1) whose content is version K's own rules with the current overlay (see **Overlay** below). History is never rewritten; versions only go up ([§12.3](#123-distribution)).
 2. **It is validated against today's deployment.** An old version can reference something that no longer exists, e.g. a viewer field the CDN no longer sends, or a template since deleted.
    - Validation errors block the revert, and the UI says exactly what's missing.
    - The old version's own config tests run too, since tests are versioned with config.
@@ -855,11 +885,24 @@ Configs are small: they're bounded by the budgets in [§12.2](#122-validation-on
 
 - There is one shared draft, with optimistic concurrency ([§12.2](#122-validation-one-validator-everywhere)), so concurrent editors don't overwrite each other.
 - **The draft records `base_version`,** the active version it was started from.
-- **Before the first save,** the draft is the active version (or, when nothing is published, a starter config with the default response templates and no rules) at revision 0. Saving it with `If-Match: "0"` creates the draft.
+- **Before the first save,** the draft is the active version (or, when nothing is published, a starter config with the default response templates and no rules) at revision 0. Saving it with `If-Match: "0"` creates the draft. Any publish except an autopilot publish, the first-start one included, creates it at revision 1 when no draft exists, holding the new version's rules, so an editor still holding the older start gets 412 and reloads instead of overwriting the new version.
 - **Publishing when `base_version` is no longer active** (e.g. a revert or guard rollback happened meanwhile) is blocked. The UI shows a three-way view: what changed in the draft, what changed in the active version, and the result of applying the draft on top of the current active version. The publisher must **rebase** (accept that result) before publishing. A revert therefore can't be silently undone by publishing an older draft. While a canary runs, a draft based on the canary version has nothing to rebase: rebasing onto active would strip the canary's changes.
   - **Merge rules:** rules are matched by ID per phase. Rules the draft added, removed or edited keep the draft's state; rules the draft left alone take active's state (edited, removed, or added at active's position). `kill_switch`, `global` and `auth` are taken whole from the draft if it changed them, else from active. Where both changed the same rule or section, the draft wins and the view lists it as a conflict.
 - "Copy to draft" replaces the draft after a confirm that shows what would be lost.
 - Publishing turns the draft into the next version.
+- **Base checked under the lock:** publish locks the draft row, then takes the publish lock, then compares `base_version` with the active version. Reverts and guard rollbacks take the same lock, so none can commit between the check and the new version.
+
+**Overlay (autopilot rules):**
+
+- Rate-limit rules whose ids start `ap-` are autopilot's **overlay**, placed after the rules people write. There is no overlay table: the current overlay is the active version's `ap-` rules, and every publish path carries it over. `ap-` is reserved: a person's rule with such an id, in any phase, is refused at its `id` on save and check, and migration refuses to upgrade an install whose active version, canary or draft has one, naming the rule.
+- **The draft holds people's rules only.** A save and check compile it merged with the current overlay, so the 200-rule limit and every other check see what the next publish will. A diff of the draft against a version uses the merged config.
+- **Config tests leave the overlay out of `rate_limit_rules`.** The expected list is compared with people's rules only, so a test does not change as autopilot rules come and go.
+- **An overlay publish** (`source: autopilot`, audit `config.overlay_publish`) is the active version's own rules and tests plus the new overlay, through every publish check, except that one which only takes autopilot rules out skips the deployment and schema checks, like a revert. Admin refuses (422) an overlay rule whose id lacks the `ap-` prefix, that has no `expires_at`, or whose `expires_at` is more than 24h ahead, and leaves out one whose `expires_at` has already passed. An overlay rule's content is fixed per id: republishing a live `ap-` id with anything but `action` and `expires_at` changed is refused (422), so a changed rule needs a new id; `action` moves it from log to block, and a later `expires_at` renews it. An id adopted in the draft and no longer live is refused (422), so a new overlay rule needs a new id. It publishes over issuers whose keys admin never fetched, as the active version did, because its people's rules already ran that way, and records its own fixed reason in `override_reason`. It locks the draft row and then the publish lock, like a person's publish, and moves a draft based on the active version onto the new one without changing its content or revision, so the person editing it needs no rebase. It waits for a canary like any publish.
+- **Every publish, revert, guard rollback and import drops expired overlay rules**, those whose `expires_at` has passed.
+- **A person's publish, an import and a guard rollback** keep the current overlay. Import ignores `ap-` rate-limit rules in its input and refuses an `ap-` id in `config_rules` or `request_header_rules` with 422; an export carries the overlay, so a bootstrap edge keeps blocking until the rules expire.
+- **Revert and guard rollback** restore version K's own rules with the current overlay. An `ap-` rule of K comes back too while it has not expired, when its unprefixed id is a rate-limit rule in the current rules but not in K's: restoring K drops the adopted copy, and the attack it answers may still be on. When a revert or a guard rollback is refused with the overlay (validation, the schema the edges can load, or the config tests) but the restored rules alone pass validation and the config tests, admin publishes them with no overlay, so the overlay never blocks either, and the version's audit event records `overlay_dropped: true`. The autopilot rules that were live are retired in the same transaction, so autopilot does not publish them back; for a canary revert their transitions record `waits_for_canary`, since the active version runs them until the canary ends. That fallback skips the schema check: the rules ran before, and an edge too old to read them keeps its snapshot, so the check must not block the way back. A version saved before the upgrade with a person's `ap-` rule, in any phase, loses that rule when restored.
+- **Adopt** copies an overlay rule into the draft without its prefix and expiry (409 when the draft already has a rule with that id in any phase, since rule ids are unique across phases, 404 when the overlay has no such rule) and records it in the draft's `adopted` list. The next publish of a draft holding the copy drops the `ap-` rule from the overlay in the same transaction.
+- **Known limit: overlay rules can be capped.** They come after people's rules, so in a request whose people's non-site-wide rules fill the 5 slots, an overlay rule it matches is past the per-request cap: it is counted as `capped` instead of checked. The order keeps people's rules in their slots, and lets the overlay hold more rules than the cap. The edge counts it on `/metrics`, as `edge_ratelimit_rule_total{outcome="capped"}` for the rule and `edge_ratelimit_rules_capped_total`, and in its stats reports, so admin's stats carry each rule's `capped` count.
 
 ## 13. Admin
 
@@ -944,6 +987,8 @@ Handlers check **permissions** (`require("config.publish")`), never role names.
 | `publisher` | editor + `config.publish`, `config.rollback`, `canary.manage`, `routes.manage` |
 | `admin` | publisher + `users.manage`, `settings.manage`, `tokens.manage` |
 
+Every role has `autopilot.read`; `publisher` and `admin` also have `autopilot.manage`. `autopilot.agent` belongs to no role: only the `AUTOPILOT_TOKEN_FILE` token (actor `deployment:autopilot`) holds it, and it holds nothing else.
+
 - API token scopes are a subset of the owner's permissions.
 - User tokens must expire, within 365 days: they stand in for sessions, which end within hours. Edge service tokens have no expiry by default; deployments rotate them.
 - **No permission allows changing audit data.**
@@ -952,7 +997,7 @@ Handlers check **permissions** (`require("config.publish")`), never role names.
 
 **Recorded, forever:**
 - **Config:** every save with field-level before/after, test changes, publish, rollback, canary actions, kill switch.
-- **Automation:** guard decisions with the signal values, JWKS key changes.
+- **Automation:** guard decisions with the signal values, JWKS key changes, verified crawler range changes (`system:verified_bots`).
 - **Identity:** login success/failure, logout, session revoke, MFA, password change.
 - **Access:** users, roles, mappings, tokens.
 - **Settings.**
@@ -1009,6 +1054,7 @@ Every route with its permission is in the [Admin API reference](reference/api.md
 - Versions: timeline, view, semantic and raw compare, revert, per-rule history ([§12.7](#127-versions-and-revert))
 - Fleet (per edge: versions loaded, `UPSTREAM_URL`, config source, last report)
 - Stats (charts, most-limited keys)
+- Notifications (open and recent anomalies, defaults per signal, per-rule settings)
 - Audit
 - Users, roles and tokens
 
@@ -1087,6 +1133,26 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 - Go developers need some TypeScript and React.
 - Tailwind and react-querybuilder's defaults keep that small.
 
+### 13.7 Autopilot
+
+**Decision: a language model investigates and proposes; admin decides with fixed checks and budgets, and publishes short-lived rules as the overlay.** The model never writes policy. User guide: [Autopilot](use/autopilot.md).
+
+- **Split.** Admin holds cases, rules, checks, the publish and the audit. A separate runner holds the model credentials, claims cases by long poll and calls admin's MCP server. Credentials never reach admin, Postgres or the UI; the runner reports only which providers it holds one for, and a claim takes the oldest queued case whose model's provider the runner holds; it is refused (409) only when cases are queued and the runner holds the provider of none of them. The provider follows from the model id (`claude` in it, else `openai`), set only in admin settings.
+- **The model is untrusted.** Client-written values, anomaly summaries and earlier runs' summaries reach it inside `untrusted` fields. It proposes only through `propose`, and retires only sensors; every proposal runs the fixed shape checks (not site-wide, `fail_mode: open`, a key with `ip` or a JWT claim, no constant or host-only key, no `on_missing_key: reject`, TTL and lifetime caps, no named subjects, no duplicate, no suppressed rule), then `snapshot.Compile` over the active rules, the overlay, the pending rules and the candidate, then the budgets. Every check and its reason is returned and stored.
+- **Watch before block.** Every rule publishes as `action: log`. An enforce rule blocks only after `observe_for`, and only if its shadow counts since it went live keep the collateral share of fleet requests under `max_block_share` (heavy subjects, each at least 5% of a minute's would-limits, are found minute by minute and their summed estimates left out once over the window, less the sampling allowance of 3·√(16·H), as the guard leaves them out; an attack spread so thin that each subject stays under 5% is collateral and is refused), name no verified crawler or protected subject, and show the attack in the last `observe_for`. `observe` mode adds a person's approval.
+- **State lives in Postgres.** `autopilot_rules` holds each rule's state; the active version's `ap-` rules are what runs. The leader's 30 second job moves every rule one step and publishes the overlay at most once, under the draft lock then the publish lock, like any publish. Additions wait until no canary runs and `min_publish_interval` has passed; removals wait only for the canary. A publish that only takes rules out skips the deployment and schema checks, like a revert, since edges already ran what remains. When a publish with new rules is refused, for not compiling with today's rules (422) or by a live edge's deployment or schema (409), the job publishes again without them and rejects the proposed rules with that reason (`compile`, `deployment` or `schema`); when that is refused by an edge too (409), it publishes removals only. Settings are read under the job's locks, so a kill switch is never undone by a run already in progress.
+- **Expiry is the safety net.** Every rule expires within `max_ttl` (at most 24h). A sensor is renewed while due; an enforcing rule only if it blocked in the last 10 minutes. Both stop at `max_lifetime`. A rule renews in the last quarter of its TTL, on a 30 second tick that publishes at most every `min_publish_interval`, so a TTL under 4 × (30s + `min_publish_interval`) could expire before a renewal goes out: settings refuse `default_ttl` and `max_ttl` below that, a proposal under it fails `not_overlay_shape`, and stored settings below it are raised when read. An enforce rule's TTL restarts when it starts blocking, capped at `max_lifetime` from when it or its cited sensor went live, so observing doesn't use up the time it needs to be renewed. A runner outage changes nothing on the edges: rules run out.
+- **Per-rule guard.** For the guard's `window` after an autopilot rule starts blocking, it trips when the rule limits over `max_vs_shadow` times its shadow ratio (or over `max_ratio` when that ratio is 0, as when every shadow limit went to heavy subjects) or over `max_block_share` of fleet requests, using `changed_rule_limited_ratio`'s mode. The stored shadow ratio leaves heavy subjects out, as the guard's limited count does. An attack spread so thin that each subject stays under 5% of a minute still counts against the rule and can roll it back, by design: the guard can't tell it from over-blocking. A rollback ends the rule and suppresses its shape for `max_lifetime`.
+- **Kill switch.** `mode: off` retires every rule, cancels open cases and publishes the active version without the overlay in one transaction; refused during a canary.
+- **Records.** Runs, run results, runner events, proposals, rule transitions, note revisions, note uses and model prices are append-only tables (no `UPDATE`, `DELETE` or `TRUNCATE` for the runtime role, blocked by triggers). Every state change writes an audit row in its transaction. A proposal's tool call event is written in the proposal's transaction, so a run with no room left for it gets no proposal. Events and the result of one run are ordered by a lock on the run; no event is recorded after the result. A run keeps at most 1,000 events and 4 MiB; an event over 64 KiB keeps its size and hash.
+- **Runner.** A separate Node deployable (`autopilot/`, Autopilot runner), because the Claude Agent SDK, which drives the Claude Code binary, ships for TypeScript and Python only; the OpenAI Agents SDK runs beside it in the same process. It is a thin loop around them: claim, run the model with admin's prompt and output schema and admin's MCP server as its only tools, heartbeat every 60 seconds, report events and the result. A Claude run gets no built-in tools, no settings, memory or MCP servers from disk, and its own directory. The runner checks the model's answer against the verdict schema itself, since the OpenAI run uses the schema in non-strict mode. A run past `AUTOPILOT_CASE_TIMEOUT` reports `timeout`; a heartbeat answered 409 drops the run without a result, since admin already requeued it; SIGTERM reports each run as `error`/`shutdown`. The runner hashes the full transcript as JSON lines and sends only the hash and size. Claims back off from 1s to 60s on any failure, and no call is retried otherwise: a lost event batch shows as incomplete telemetry.
+- **Memory.** A case run records what it learned as a note (`record_learning`), and later runs read notes (`search_notes`) and cite them in proposals. Notes go live without a person, so poisoning is stopped by structure, not review. An observed note's claim is a predicate over a metric admin keeps (fleet and rule counts, top subjects, observed routes), which admin recomputes when it is written, with statistics against the 14 days before, and on every use; a hypothesis has no claim and is never confirmed. Evidence must be stats reads of the same run, so a note can't vouch for itself; it is kept as references to run events, which are never pruned. A note that makes the autopilot less likely to act needs an anchor an attacker can't create: an identity it can't spoof, or a claim that held on 7 of 14 days; a subject or history counts only for a tight claim, within a factor of 2 of what admin found, since a loose one holds whatever the traffic does, and history only for a claim also within a factor of 2 of the days' median, since a ceiling over a one-day spike holds on every normal day. One case confirms a note when its statistics clear a fixed bar and the case's outcome held; only a confirmed note has an effect, and only on a proposal that cites it, bounded by kind (narrower keys, a lower block share, a doubled evidence bar, a shorter observe time). A rollback or false positive on a rule that an attack signature or key preference pushed retracts that note (a note that held the rule back stays), an ablation re-run without it that disagrees demotes it for good, and 3 failed uses make it dormant. Limits (3 a run, 20 a day, 5 a scope, 200 kept) are counted under one lock. The SDKs' own memory is not used: it is provider-specific, lives in a stateless container and is outside the audit.
+- **Exclusions are a person's trust.** A client a person found legitimate on a host and path prefix is left out of every autopilot rule proposed while the exclusion is active, as the protected networks are, sharing their half of an expression. Only a person makes or ends one; no model tool or note can. A rule's content never changes under its id, so an exclusion that ends retires the observing sensors carrying it, and an enforce rule carrying it runs out by its own renewal rule rather than stop blocking an attack.
+- **Cost** is recorded and reported, from admin's price table at the run's start and from the runner's own figure. It is never a budget: an unpriced model still runs.
+- **Connectors.** Where the deployment sets them, read-only Prometheus, Grafana and Datadog connectors give the runner six more tools. They are deployment config, like the upstream and the IdP, so they are called without the SSRF guard, with a plain `http.Client` that treats a redirect as an error, so a token never goes to a host the deployment didn't name. Only the runner's token calls them, since a connector reaches whatever its credentials do, which is more than `stats.read`. Unset connectors' tools are left out of the list, so a deployment's tool hash is stable and the model never spends turns on tools that can only fail. Answers are bounded (10 seconds, 256 KiB read, 48 KiB passed on), scrubbed of credential-like strings, and their labels, titles and log lines are `untrusted`. A connector read can be cited as evidence, but claims stay on admin's own metrics: admin can't size the sample of an outside query, so such a note could never be confirmed, and a connector outage would be a new way for notes to fail. A recorded connector answer can hold other services' data, so reading it needs `autopilot.manage` as well as `stats.read` and `config.read`.
+- **Replay.** `GET /api/autopilot/contract` returns what a claim gives the runner, less the case. The runner's `replay` command combines it with a case's recorded tool calls and serves them to a model from a local MCP server: recorded calls get their recorded answers, any other call an error. Admin calls no model and opens no run for it, so only the runner holds model credentials. A replay is not deterministic: new arguments get "not recorded", and the prompt text is not stored, so it uses the current prompt and reports when the hash differs. Golden cases are bundles from the load test's synthetic attacks, replayed against a real provider only by hand.
+- **Bounded.** 100 open cases, one per target, `cases_per_hour` runs, 4 MCP calls in flight per token, 5 seconds (10 for a connector call) and 64 KiB per call, the model metric label at 16 models per provider.
+
 ## 14. Availability
 
 ### 14.1 Dependency matrix
@@ -1125,6 +1191,9 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
   - `url.path`
   - `http.response.status_code`
   - `client.address` (raw)
+  - `user_agent.original`
+  - `client.as.number`, `client.geo.country_iso_code`, `tls.client.ja4` (when the deployment has their sources)
+  - `client.signals` (names, when any; on every logged request that reached the config phase, so rules can be tuned from the logs. The bitmask is copied on the request path and named in the writer goroutine)
 - **Edge fields:**
   - `edge.config_version`
   - `edge.cohort`
@@ -1132,17 +1201,19 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
   - `edge.query_keys` (the query's parameter names, sorted and unique, at most 32)
   - `edge.query_keys_dropped` (keys not logged: a pair without `=`, which can be a bare token; a key that does not match `[A-Za-z0-9_.[\]-]{1,64}`; keys past 32)
   - `edge.rate_limit_rule`
-  - `edge.decision`
+  - `edge.decision` (`allow`, `would_block`, or the rejection reason)
   - `edge.auth` (`verified`, `cached`, `missing`, `invalid`, `pass_no_keys`; absent when auth is off)
+  - `edge.upstream_answered` (whether the response came from the upstream; on every line. A CORS preflight the edge answers is `allow` but `false`, and the upstream answered the request even when its response is 5xx. A 101 whose `Upgrade` doesn't match the request's is `false`: the edge answers it with its own 502)
+  - `edge.upstream_error` (at most 512 bytes, cut at a rune boundary) and `edge.upstream_error_kind` when the edge got no answer from the upstream: `dns`, `refused`, `reset`, `tls` (decision `upstream_tls`), `timeout` (decision `upstream_timeout`) or `other`. `proxyError` classifies the cause once, on the error path (`*net.DNSError`, `ECONNREFUSED`, `ECONNRESET`, a TLS alert or certificate error, a timeout), and keeps the cause and the `error` value, neither of which allocates; the writer goroutine formats the message. There is no separate warn line per failure: slog's JSON handler holds a mutex for its write, so during an outage every failing request would take that lock on the request path. Go quotes whole header lines (`net/textproto`) and the client's and upstream's `Upgrade` values (`ReverseProxy`) in some errors, and those can carry a cookie or token. So the writer keeps the message as it is only when the chain holds a `*net.DNSError`, `*tls.CertificateVerificationError` or `*net.OpError`, whose text is addresses, syscalls and certificate names; in any other error each quoted span becomes `"…"`
   - `request_id`
   - `duration_ms`
 - **Access logs are written asynchronously:** a bounded channel feeds a writer goroutine. When the channel is full, the line is dropped and `edge_log_dropped_total` is incremented. Logging never blocks a request.
-- **Sampling:** allowed requests below 500 are sampled, upstream 4xx included. Every rejection (any decision other than `allow`) and every 5xx is always logged. A sampled line carries `edge.sample_rate`, so a reader can count it as 1/rate requests.
+- **Sampling:** allowed requests below 500 are sampled, upstream 4xx included. Every rejection and `would_block` (any decision other than `allow`) and every 5xx is always logged. A sampled line carries `edge.sample_rate`, so a reader can count it as 1/rate requests.
 - **Redaction:** never log `Authorization`, `Cookie` or query values. Parameter names are logged so routes can be grouped by query shape; a key that could itself be a secret is only counted.
 
 ### 15.2 Stats: push to admin
 
-- **Request path:** `atomic.AddUint64` on fixed per-rule, per-version counters, plus latency histogram buckets.
+- **Request path:** `atomic.AddUint64` on fixed per-rule, per-version counters, plus latency histogram buckets. Each finished request is one add in `codes[origin][min(status, 600)]`, where the origin is the edge or the upstream, slot 0 is a request that got no answer and 600 holds any code above 599 (Go accepts any three digits from an upstream). The report derives requests, edge 5xx, upstream 5xx and edge 401s (auth failures) from those counts, so the guard and notifications read the same totals, and carries the non-zero codes since the last report as `status_codes`. An upstream failure adds one to its cause's counter on the error path, and reports carry the non-zero causes as `upstream_errors`. Rate-limit rules count requests checked, limited, would-limit and failed. Config and request-header rules count the requests they matched and how those ended (edge 5xx, upstream 5xx, edge 401), and the config rule whose `block` setting decided counts the request as blocked or would block: one add per matched rule, at the end of the request, on counters padded to their own cache line so a hot rule doesn't slow its neighbours.
 - **Top-K most-limited keys:**
   - Updated only on a limit, and **sampled** 1 in 16 so an attack doesn't serialize on its mutex. Counts are estimates (sampled count × 16).
   - **Space-Saving** (Metwally, Agrawal, El Abbadi, 2005) per config version: at most 256 subjects; a new subject replaces the smallest and inherits its count. Any subject above 1/256 of the sampled limits stays tracked, and counts never underestimate. Each report carries the top 20 per version, then starts over.
@@ -1150,6 +1221,8 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 - **Reporter:** every 10s each replica posts `{instance, config_source, bootstrap_age_seconds, interval_seconds, max_schema, deployment, upstream}` (`deployment` is the deployment config fingerprint, `upstream` its `UPSTREAM_URL`) plus, per config version, count deltas and top-K. It authenticates with the edge service token ([§13.1](#131-identity-extensible)); admin rejects unauthenticated reports, so a forged report can't trigger the guard. On failure the report is dropped.
 - **Admin:**
   - Aggregates in memory, per minute and config version, bounded (at most 1000 most-limited subjects per minute and version).
+  - Validates `status_codes` (codes 0 to 600) and `upstream_errors` (the six cause names), with counts below the same bound as the other counts, and accepts a report without them from an older edge. Both are summed per minute into `edge_stats_minute`, and `/api/stats` sums them across replicas. Admin stores counts only; the lines themselves stay in the deployment's log store, which `LOG_SEARCH_URL` links to from the UI.
+  - `/api/stats?step=N` sums rows into buckets of N minutes from UTC midnight and keeps the 20 most limited clients per rule in each bucket, summing as it reads, so memory follows the buckets rather than the stored minutes.
   - Writes one batch every 10s into `edge_stats_minute`, the minute in progress included: each write replaces the row with the minute's running sum, so the dashboard is at most one report and one write behind. Each admin replica writes its own rows for the reports it received, under its name plus its start time so a restarted replica never overwrites its previous run's minute, and readers sum across replicas, so replicas never merge each other's arrays. On a write failure a finished minute is dropped; the minute in progress is written again on the next one. On shutdown admin stops accepting connections, waits for reports in flight, then writes everything it still holds, giving up after 5s so an unresponsive Postgres can't keep the replica from exiting.
   - 30-day retention by a daily delete on the leader.
   - `fleet` keeps each edge's last report, which the Fleet screen shows with the edge's `UPSTREAM_URL`; `fleet_size` counts edges seen in the last minute. Admin answers each report with it.
@@ -1157,7 +1230,18 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
   - Pull needs per-platform replica discovery and a network path into every replica. That breaks P3.
   - Pull misses short-lived replicas.
   - Pull is too slow for canary and guard decisions.
-- **`/metrics`:** the edges also expose Prometheus text format on the internal port, for platform scrapers.
+- **`/metrics`:** the edges also expose Prometheus text format on the internal port, for platform scrapers. A process-wide `codes[origin][slot]` array, added to once per request in place of a counter by class, gives `edge_responses_total{origin,code}` (non-zero series only, except the edge's 502, 503 and 504, which are always present so rate() sees the first one) and `edge_requests_total{class}`, derived from it. `edge_upstream_errors_total{cause}` is counted on the error path. `edge_request_duration_seconds` (the guard's latency buckets, with no `_sum`, since only bucket counts are kept) and `edge_ratelimit_rule_total{rule,outcome}` are read from the per-version counters already kept for reports, plus one atomic add per rule the per-request cap skips or that has expired, so they add no lock or allocation to the request path. When a retired version's last delta is reported, its counts are folded into registry totals so exported counters never go down; a rule's folded counts are dropped once no held version has the rule, which bounds the series to the rules of the versions still held. A scrape copies the totals under the registry lock and writes after releasing it. Admin serves its own counters on a separate internal address (`ADMIN_INTERNAL_ADDR`, default `:9091`) with no authentication; only the leader exports the fleet gauges (`admin_edges_live`, `admin_anomalies_firing`), from what its last notification check read, so a scrape never queries Postgres. Trends and graphs belong in the deployment's metrics stack; admin keeps per-version counts for the guard and its own pages.
+
+### 15.2.1 Notifications: anomalies from the stats
+
+[Notifications](operate/notifications.md) find anomalies in `edge_stats_minute`, so the edge does no extra work for them.
+
+- **Where:** a leader job every minute compares the last window with the baseline before it, over every version, for the fleet and for each rule of the active and canary versions. Process health (not ready, snapshot rejected, overload, panics, Valkey errors) stays with Prometheus and the edges' `/metrics`: a dead edge sends no stats.
+- **Decisions:** thresholds relative to the baseline with an absolute floor and a minimum count, as in the guard. No learned model: an operator can read why an alert fired. Hysteresis (`fire_after`, `resolve_after`) drops one-minute blips. Per-rule checks are measured against the fleet in the same window (a rule's expected matches follow its share of requests, and its failure share must pass `factor` times the fleet's), so one cause such as an upstream outage sends one alert rather than one per rule; grouping and inhibition beyond that are left to Alertmanager.
+- **Settings apart from the policy:** defaults per signal plus per-rule settings, in `settings` like the guard's. Edges decode snapshots strictly, so a field there would need a schema bump; and turning off a noisy alert must not need a publish, which itself starts a guard watch.
+- **State:** `anomalies` holds at most one open row per signal and subject, so leadership can change mid-anomaly. Firing and resolving are audited in the same transaction.
+- **Delivery:** Alertmanager's API v2, which owns grouping, silences and routing. Firing alerts are sent every check with an end three checks ahead; resolved ones for 5 minutes. A failed send is logged and retried at the next check; nothing queues. `ALERTMANAGER_URL` is deployment config.
+- **What the autopilot works is held back.** While the autopilot runs, an autopilot rule's would-block and dominant-subject anomalies are not sent, unless critical: they open cases, and a person hears the conclusion. A non-critical anomaly that opens a case waits up to 10 minutes for the verdict and is sent with it, without the case's summary, which the model writes after reading traffic clients control; only an `info` one closed benign is dropped, since traffic an attacker shapes could talk the model into a benign verdict. Nothing is held back while no runner is connected, and an anomaly already sent is sent until it resolves.
 
 ### 15.3 Observed routes: built from access logs
 
@@ -1166,7 +1250,7 @@ Routes are built from the access lines the edges already write, so the edge does
 - **Ingest:** `POST /v1/logs/access`, one access line per line (newline-delimited JSON), at most 4 MiB a request. A line over 64 KiB is skipped alone. Lines are counted only once the whole body is read, so a failed request adds nothing. Only the deployment's shipper token (`LOG_INGEST_TOKEN_FILE`) may post, and it may do nothing else; admin refuses to start if it equals the edge token. Two ingests run at once; a third gets 429 and the shipper sends the batch again.
 - **Lines used:** `msg` is `access` and host, method and path are present. Rejections of the request line itself (`path`, `method`) say nothing about a route and are skipped, as is any line with NUL, which Postgres refuses in `jsonb`.
 - **Grouping:** a route is host, method and path template. A segment of digits becomes `{id}`, a UUID `{uuid}`, 16 or more hex digits `{hex}`, and 20 or more letters and digits with both, anything with `@`, or anything longer than 64 characters, `{token}`. Query key names go through the same rules. Other segments are stored as they are and shown to anyone with `stats.read`. Operator patterns, where `*` is one segment, are tried first, host patterns before every-host ones, then the most literal. Admin suggests a pattern when 20 or more literal routes share a parent. Creating one merges the routes it now groups, leaving those a more specific pattern groups, in the same transaction as its audit row; creates run one at a time. Lines still held in memory are grouped with the current patterns when they are flushed.
-- **Counts:** per route and hour: logged requests, status classes, latency buckets (the edge's bounds), decisions, matched config rules, the rate-limit rule, and query shapes (sorted key names). A line counts once, except a sampled line (`edge.sample_rate` below 1), which counts as 1/rate requests, at most 1,000,000, rounded up or down at random so the expected total is exact. The scaled requests are kept as `estimated` so the UI can mark them; rejections and 5xx are always logged and stay exact. Each replica sums in memory and adds its deltas to the shared rows every 10s, in one order on every replica so flushes never deadlock, and rows are never read back and rewritten. On failure the deltas are dropped.
+- **Counts:** per route and hour: logged requests, status classes and codes, upstream failures by `edge.upstream_error_kind` (the six cause names only), latency buckets (the edge's bounds), decisions, matched config rules, the rate-limit rule, and query shapes (sorted key names). A line counts once, except a sampled line (`edge.sample_rate` below 1), which counts as 1/rate requests, at most 1,000,000, rounded up or down at random so the expected total is exact. The scaled requests are kept as `estimated` so the UI can mark them; rejections and 5xx are always logged and stay exact. Each replica sums in memory and adds its deltas to the shared rows every 10s, in one order on every replica so flushes never deadlock, and rows are never read back and rewritten. On failure the deltas are dropped.
 - **Bounds:** 5,000 stored routes and 10,000 route hours between flushes. A route seen only with error answers, such as a login whose every request is rate limited, is stored apart and marked, at most 500 of them, so a scanner's 404s and rejections can't push other routes out; the mark clears on its first 1xx to 3xx answer, which takes a place among the 5,000 or is not grouped, so the two limits bound the table together. Traffic that isn't stored, and templates over 512 characters or 32 segments, are counted as not grouped. Per route and hour, 20 query shapes of at most 256 characters and 200 rule IDs or decisions, with the rest summed under `*`; reads cap the summed range the same way.
 - **Coverage:** lines served under a policy version, divided by the requests the edges reported in `edge_stats_minute`. It falls below 100% when lines are dropped, or when edges sample without saying their rate.
 - **What applies to a route:** admin runs the edge's `Simulate` on a sample of the route, with placeholders filled and the most common query shape. Each rule is then classed as always, never or depends. Conditions on host, method and path are compiled by `internal/expr` and run against several sample paths, including ones built from the condition's own values; a regex on a path with placeholders is unknown. Agreement across samples is evidence, not proof. Conditions on any other field are unknown and named by their label. `and`, `or` and `not` combine these with three-valued logic.
@@ -1182,9 +1266,9 @@ Off unless `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (or the base `OTEL_EXPORTER_OTLP
 - **Sampling:** `ParentBased(TraceIDRatioBased(TRACE_SAMPLE_RATE))`, wrapped in a per-replica cap of `TRACE_MAX_PER_SECOND` trace starts per second, counted separately for traces the edge starts and traces joined from callers, so forged flags can't starve the edge's own sampling. The ratio sampler decides from the trace ID's bits and parent-based sampling follows the caller's flag, and a client controls both, so only the cap bounds what it can force. A client can also keep its own requests out of traces with the flag off; the access log still has them. Child spans follow their parent and are not counted, so a sampled request keeps all its spans. A capped trace is forwarded with the sampled flag off.
 - **Headers:** `traceparent` and `tracestate` are not reserved. A rule that writes them or a forward filter that names them gets a warning rather than an error, so a snapshot that already did still loads. Forward filters always keep them, and when tracing is on the edge replaces them, so a rule's value never arrives. The edge propagates context even for unsampled requests, and logs `trace_id` and `span_id` on every access line, so logs on both sides of the edge join up.
 - **Bounded:** the batch processor's queue (2048 spans) drops when full and never blocks; attribute values are cut at 512 characters (the SDK default is unlimited, and a path can be as long as `MAX_HEADER_BYTES`).
-- **Failure:** OTel reports errors through process-wide hooks that print plain text to stderr; both are routed to the JSON log. Errors are logged at most once a minute (`opentelemetry error`), and the edge counts failed exports in `edge_trace_export_errors_total`; admin has no metrics, so it has only the log line. OTel warnings are below the log's Info level and are dropped, so the SDK's own `OTEL_*` variables (TLS, compression, queue sizes) silently fall back to their defaults when malformed. The header variables are checked at startup instead, because the exporter would log a malformed one with its value, usually the collector credential.
+- **Failure:** OTel reports errors through process-wide hooks that print plain text to stderr; both are routed to the JSON log. Errors are logged at most once a minute (`opentelemetry error`), and both count failed exports, in `edge_trace_export_errors_total` and `admin_trace_export_errors_total`. OTel warnings are below the log's Info level and are dropped, so the SDK's own `OTEL_*` variables (TLS, compression, queue sizes) silently fall back to their defaults when malformed. The header variables are checked at startup instead, because the exporter would log a malformed one with its value, usually the collector credential.
 - **Shutdown:** `http.Server` waits for neither hijacked connections nor, after its timeout, active handlers, so after cancelling the base context the edge waits for in-flight handlers (an atomic count, decremented after the access log and span are written) and then flushes. Both share `TRACE_SHUTDOWN_TIMEOUT`, apart from `SHUTDOWN_TIMEOUT`, which `http.Server.Shutdown` can use up.
-- **Admin:** `otelhttp` wraps the handler and traces `/api/` only: `/v1/` is edge and log-shipper traffic every few seconds, and `/` serves files. A `pgx` query tracer in `internal/admindb` adds a span per query, only under a request span, so background jobs start no traces; it records the statement with its placeholders and never arguments or error messages, and a failed query's span has error status only. Edge traffic uses its own, untraced pool. Unlike the edge, only a trusted proxy (`ADMIN_TRUSTED_PROXIES`) joins a caller's trace; otherwise the caller's context is kept as a link. The span's `client.address` is the trusted client IP audit uses, set over otelhttp's, which takes the leftmost `X-Forwarded-For` entry from any peer, and `http.route` is set after the mux matches, since otelhttp reads the pattern before routing.
+- **Admin:** `otelhttp` wraps the handler and traces `/api/` only: `/v1/` is edge, log-shipper and autopilot runner traffic every few seconds, and `/` serves files. A `pgx` query tracer in `internal/admindb` adds a span per query, only under a request span, so background jobs start no traces; it records the statement with its placeholders and never arguments or error messages, and a failed query's span has error status only. Edge traffic uses its own, untraced pool. Unlike the edge, only a trusted proxy (`ADMIN_TRUSTED_PROXIES`) joins a caller's trace; otherwise the caller's context is kept as a link. The span's `client.address` is the trusted client IP audit uses, set over otelhttp's, which takes the leftmost `X-Forwarded-For` entry from any peer, and `http.route` is set after the mux matches, since otelhttp reads the pattern before routing.
 - **Cost:** 9 more allocations per unsampled request and 16 per sampled one, held by `TestTracedRequestAllocations`. Sampled requests are capped per second, so their cost doesn't grow with traffic.
 
 ## 16. Capacity inputs
@@ -1203,7 +1287,7 @@ Worked example with **hypothetical** inputs, to show the method:
 | Valkey ops/s | 20k RPS × 1.5 matched rules = 30k ops/s → shard count after a benchmark |
 | Valkey memory | 1M IPs/min × 2 rules × about 120 B ≈ 240 MB |
 | Edge replicas | Measured 5k RPS per replica → 4, ×1.5 for losing 1 of 3 zones → 6 |
-| In-flight cap | Little's law: 5k RPS × 50 ms ≈ 250 concurrent; cap around 2× |
+| In-flight cap | Little's law: 5k RPS × 50 ms ≈ 250 concurrent; cap around 2×. Memory bounds it too: a load test on Kubernetes measured about 100 KiB per in-flight request, kernel socket buffers included, so the default allows 256 KiB each |
 | Log sampling | 20k RPS × 400 B = 8 MB/s unsampled → sample allowed requests at 1–10% |
 | Backstop | Above the busiest legitimate client, e.g. an office NAT |
 
@@ -1251,6 +1335,8 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 - A streamed fetch body arrives chunk by chunk.
 - A WebSocket echoes masked frames, with its subprotocol and `Origin`.
 - A refused upgrade closes the WebSocket with 1006.
+
+**Autopilot runner:** `TestAutopilotRunner` (`internal/admin`, run with `AUTOPILOT_RUNNER=1` by `scripts/ci/autopilot.sh`) runs the real runner process with a scripted adapter in place of a model (`autopilot/test/scripted.ts`) against a real admin and Postgres: a case closing with its proposal and complete telemetry, a claim refused for a missing credential, a run timing out on both attempts, an answer without a verdict failing as `invalid_output` on both attempts, two cases running at once with `AUTOPILOT_CONCURRENCY=2`, a lapsed lease and SIGTERM. Every case also checks the runner's output holds neither its token nor its credential. The runner's own unit tests (`node:test`) cover its settings, the event recorder and the mapping of each SDK's messages, against fixtures typed by the SDKs.
 
 **How tests are written (both):**
 - **Scenario-based:** a real situation plus its observable outcome. Never write a test to reach a line.
@@ -1330,6 +1416,7 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 | Valkey, admin, Postgres, IdP failures | No readiness flaps; bounded latency; fail modes correct |
 | Publish every 10s; canary | No spikes; cohorts correct; convergence |
 | Over-blocking publish | Canary aborts or guard rolls back |
+| Five attacks with the autopilot on | A case opens and a rule enforces for each, with collateral 429s under `max_block_share`; each rule expires after its attack |
 | 10k SSE/WebSocket for 1h | Flat memory and goroutines; drain completes |
 | Rolling restart via mock LB | No 5xx |
 | Lose 1 of 3 edges | Target load held |
@@ -1341,7 +1428,7 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 - JWT auth end to end with the mock IdP's ES256 keys
 - a 20s Valkey outage under load: no failed requests, readiness steady, and limits enforced again once Valkey returns
 
-`make capacity` steps one edge through fixed rates with scenario-shaped traffic and reports per-unit costs (edge CPU, Valkey calls, bytes per key, CPU per call) for [§16](#16-capacity-inputs); a worked sizing is in the docs' Capacity planning page. `make container` checks that the edge image becomes ready from a bootstrap snapshot with no admin or Valkey.
+`make capacity` steps one edge through fixed rates with scenario-shaped traffic and reports per-unit costs (edge CPU, Valkey calls, bytes per key, CPU per call) for [§16](#16-capacity-inputs), and with `SENSORS=N` adds N log-only rules shaped like the autopilot's sensors, so two runs give a sensor's cost; a worked sizing is in the docs' Capacity planning page. `make container` checks that the edge image becomes ready from a bootstrap snapshot with no admin or Valkey.
 
 Measurements on Docker Desktop with **2 vCPUs and 4 GB shared by every container including k6**, so they are a floor, not the edge's capacity:
 
@@ -1351,7 +1438,7 @@ Measurements on Docker Desktop with **2 vCPUs and 4 GB shared by every container
 | One edge, no errors | Up to 9.3k RPS achieved; k6 dropped iterations from 4k RPS, where p99 was 11 ms |
 | Valkey down 20s | 0 failed requests, p99 5–36 ms, readiness 100% |
 
-**Full profile:** `make load-full` (`scripts/ci/load-full.sh`, nightly in GitHub Actions and on GitLab schedules) runs every row of the table above. It adds a mock LB (`loadtest/tools lb`: round robin over edges whose `/readyz` passes), a stream holder (`loadtest/tools streams`: SSE and RFC 6455 WebSocket), and a second compose project with a 3-shard Valkey cluster. `ONLY=<regex>` runs a subset. The default profile uses 20k IPs and a 5 minute stream hold; `PROFILE=release` uses 1M IPs and 1h. Load-test publishes carry a guard override with a reason, because they limit traffic on purpose.
+**Full profile:** `make load-full` (`scripts/ci/load-full.sh`, nightly in GitHub Actions and on GitLab schedules) runs every row of the table above. It adds a mock LB (`loadtest/tools lb`: round robin over edges whose `/readyz` passes), a stream holder (`loadtest/tools streams`: SSE and RFC 6455 WebSocket), a scripted autopilot runner (`loadtest/tools agent`: answers cases from a fixed plan over admin's MCP, so no model is called), and a second compose project with a 3-shard Valkey cluster. `ONLY=<regex>` runs a subset. The default profile uses 20k IPs and a 5 minute stream hold; `PROFILE=release` uses 1M IPs and 1h. Load-test publishes carry a guard override with a reason, because they limit traffic on purpose.
 
 Measured on the same 2 vCPU machine with the default profile, per scenario across runs:
 

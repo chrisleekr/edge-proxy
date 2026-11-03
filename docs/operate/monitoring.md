@@ -6,8 +6,10 @@ Prometheus text at `GET :9090/metrics`, per replica.
 
 | Metric | Meaning |
 |---|---|
-| `edge_requests_total{class}` | Responses by class (`2xx` … `5xx`; `none` when the client left first) |
-| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path` and others. `upstream_tls` is an https upstream that has no certificate for the request's Host; clients choose the Host, so it is counted without a log line |
+| `edge_requests_total{class}` | Responses by class (`2xx` … `5xx`; `none` when the client left first). A code above 599, which an upstream can send, counts as `5xx` |
+| `edge_responses_total{origin,code}` | Responses by who answered (`edge` or `upstream`) and status code, so the edge's 502 reads apart from the upstream's. Only codes seen have a series, except the edge's 502, 503 and 504, which are always present so an alert sees the first one. Code `0` is a request that got no answer, `600` any code above 599 |
+| `edge_upstream_errors_total{cause}` | Requests the edge got no answer from the upstream for, by cause: `dns`, `refused`, `reset`, `tls`, `timeout`, `other`, as on the access line |
+| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `blocked` (a config rule's `block` setting), `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path`, `body_timeout` (a 400 for a body sent too slowly), `body_invalid` (a 400 for a body that could not be read, such as broken chunk framing) and others. `upstream_tls` is a failed TLS handshake with the upstream: it refused the handshake, or its certificate is not valid for the request's Host, which the client chose, or not trusted; its error is on the request's access line |
 | `edge_inflight`, `edge_streams` | Concurrent requests and open WebSocket/SSE streams |
 | `edge_ready` | 1 when a policy is loaded and the edge isn't draining |
 | `edge_snapshot_version` | Policy version this replica runs |
@@ -21,8 +23,47 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | `edge_background_panics_total` | Recovered panics in background loops |
 | `edge_trace_export_errors_total` | Span batches the trace collector did not accept. Spans are dropped, never retried into the request path |
 | `edge_trace_capped_total` | Traces not sampled because the replica reached `TRACE_MAX_PER_SECOND` |
+| `edge_request_duration_seconds` | Histogram of request latency, on the buckets the rollback guard reads (1 ms to 10 s, then `+Inf`). For SSE and WebSocket it measures the time to response headers, not the stream's lifetime. It has `_bucket` and `_count` but no `_sum`, so averages are not available; `histogram_quantile(0.99, sum by (le) (rate(edge_request_duration_seconds_bucket[5m])))` gives the p99. A request is counted when it finishes, so one still open when its version is dropped, such as a long stream across a publish, is not counted |
+| `edge_ratelimit_rule_total{rule,outcome}` | Each rate-limit rule's requests by outcome: `evaluated`, `limited`, `would_limit` (a log-only rule, or any rule under the kill switch, over its limit), `failed` (Valkey did not answer and the rule took its `fail_mode`), `capped` (matched, but skipped by the per-request rule cap) and `expired` (matched after the rule's `expires_at`, so skipped). Only rules of the versions this replica serves, or served since its last stats report, have series, so a rule removed by a publish loses its series after the next report. A version has at most 200 rate-limit rules, so an active version and a canary give at most 400 rules of 6 series each, plus rules of versions retired since the last report |
 
-`/metrics` has no latency metric. Each edge reports a latency histogram to admin with its stats, which the rollback guard's p99 latency check reads; for SSE and WebSocket it counts the time to response headers. In the admin UI, latency is on **Routes**: p95 and p50 per route, from the access log's `duration_ms`, which for SSE and WebSocket is the stream's whole lifetime. **Stats** shows no latency. You can also measure it at your load balancer.
+In the admin UI, latency is on **Routes**: p95 and p50 per route, from the access log's `duration_ms`, which for SSE and WebSocket is the stream's whole lifetime. **Stats** shows no latency.
+
+## Admin metrics
+
+Prometheus text at `GET :9091/metrics` (`ADMIN_INTERNAL_ADDR`), per replica, with no authentication. Every series below except the leader gauges and the model-labelled `admin_autopilot_llm_runs_total`, `admin_autopilot_llm_tokens_total` and `admin_autopilot_llm_cost_usd_total` is present from the start, at 0. Those three appear with a model's first run, so `rate()` and `increase()` miss that run.
+
+| Metric | Meaning |
+|---|---|
+| `admin_leader` | 1 on the replica running background jobs, 0 on the others |
+| `admin_publishes_total{source}` | New versions by how they were made: `manual` (including the starter policy at first start), `revert`, `guard_rollback`, `import`, `autopilot` |
+| `admin_guard_actions_total{action}` | Guard actions: `rollback`, `canary_abort`, `alert` (counted once when an alert starts) |
+| `admin_notifications_total{result}` | Posts to Alertmanager, `sent` or `failed` |
+| `admin_edge_reports_total{result}` | Edge stats reports: `accepted`, `invalid` (refused as malformed or too large, or a body that could not be read, such as from an edge that disconnected mid-report or hit admin's 30 s read timeout) or `error` (admin failed after authenticating the report and before ingesting it, such as Postgres unreachable). A report refused before this check, for a missing or wrong edge token or because Postgres was down while checking a token created in admin, is not counted under any label; the edge drops every report admin does not answer with 2xx and counts it in `edge_stats_dropped_total` |
+| `admin_log_lines_total{result}` | Shipped access lines `accepted` into **Routes**, or `rejected` (not an access line, or too long) |
+| `admin_log_batches_busy_total` | Access-log batches answered 429 because admin was busy; the shipper resends them |
+| `admin_background_job_failures_total{job}` | Failed leader jobs: `jwks`, `verified_bots`, `audit`, `audit_full`, `guard`, `notifications`, `retention`, `autopilot`. `jwks` and `verified_bots` count only Postgres errors: a failed JWKS or crawler range fetch keeps the last good set and logs `jwks fetch failed; keeping the last good keys` or `verified bot ranges fetch failed; keeping the last good set` instead. `notifications` also counts a post Alertmanager did not accept (unreachable or not 2xx), which `admin_notifications_total{result="failed"}` counts too. `audit` and `audit_full` also count a broken chain, which `admin_audit_verify_failures_total` counts too |
+| `admin_audit_verify_failures_total` | Audit verifications that found the chain broken |
+| `admin_trace_export_errors_total` | Span batches the trace collector did not accept |
+| `admin_connector_requests_total{connector,result}` | Requests to the autopilot's [connectors](../deploy/admin.md#connectors) (`prometheus`, `grafana`, `datadog`), by result: `ok`, `error` (unreachable, a redirect or not 2xx), `timeout` (over 10 seconds) or `too_large` (an answer over 256 KiB). Exported from zero on every replica, configured or not |
+| `admin_autopilot_cases_total{trigger,verdict}` | [Autopilot](../use/autopilot.md) cases closed, by what opened them (`anomaly`, `sweep`, `review`, `investigate`, `ablation`) and verdict (`attack`, `benign`, `unsure`, `failed`, `cancelled`) |
+| `admin_autopilot_proposals_total{action,result}` | Proposals by action (`add_sensor`, `enforce`, `retire`) and `accepted` or `rejected` |
+| `admin_autopilot_policy_rejections_total{reason}` | Failed checks, by check: each failed check of a refused proposal counts, as do enforce rules rejected after observing (`block_share`, `crawler_subject`, `protected_subject`, `attack_stopped`, `note_expected_pattern`, or, for a proposed rule refused at publish, `compile`, `schema` or `deployment`) and approvals refused as `observed_too_short` |
+| `admin_autopilot_note_writes_total{result}` | [Gate](../use/autopilot.md#the-gate) outcomes of `record_learning` calls: `written`, or `refused` for one of its reasons |
+| `admin_autopilot_note_refusals_total{reason}` | Refused notes, by [gate](../use/autopilot.md#the-gate) reason |
+| `admin_autopilot_note_transitions_total{to}` | Notes moved to `unconfirmed` (contested), `confirmed`, `dormant`, `retracted` or `retired` |
+| `admin_autopilot_llm_runs_total{provider,model,status}` | Runs reported, by provider, model and status (`ok`, `error`, `timeout`, `lease_lost`). `model` holds at most 16 models per provider, then `other`; a model with no price reads `unpriced` |
+| `admin_autopilot_llm_tokens_total{provider,model,kind}` | Tokens the runs reported: `input`, `output`, `cache_read`, `cache_write` |
+| `admin_autopilot_llm_cost_usd_total{provider,model,source}` | Cost in USD: `configured` from the model prices admin holds, `provider` as the runner reported it |
+| `admin_autopilot_llm_run_seconds{provider}` | Histogram of run durations |
+| `admin_autopilot_agent_connected` | Leader only: 1 while a runner was seen in the last 2 minutes, else 0 |
+| `admin_autopilot_cases_open` | Leader only: queued and running cases |
+| `admin_autopilot_rules{state}` | Leader only: autopilot rules `observing` and `enforcing` |
+| `admin_autopilot_notes{trust}` | Leader only: notes by trust level |
+| `admin_autopilot_budget_used_ratio{budget}` | Leader only: the share in use of each budget: `enforcing` (`max_enforcing`), `sensors` (`max_sensors`), `cases_hour` (`cases_per_hour`) |
+| `admin_edges_live` | Leader only: edges that reported in the last minute |
+| `admin_anomalies_firing{signal}` | Leader only: firing [notifications](notifications.md), by signal |
+
+The leader gauges come from the leader's notification check, so they appear up to one minute after a replica takes the lead and disappear when it steps down. They also disappear while that check fails, rather than show stale values. Use `max` across replicas for them.
 
 ## Alerts worth having
 
@@ -36,23 +77,31 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | `increase(edge_auth_total{result="pass_no_keys"}[10m]) > 0` | Tokens pass unchecked: keys were never fetched | [IdP down](runbooks.md#identity-provider-down) |
 | `edge_bootstrap_age_seconds > 0` | Running from a bootstrap file | Restore admin; the edge switches over on its next successful poll |
 | `rate(edge_rejected_total{reason=~"overloaded\|streams_overloaded"}[5m]) > 0` | Capacity limits hit | Scale edges or raise `MAX_*` |
+| `rate(edge_stats_dropped_total[5m]) > 0` | Edges can't report stats to admin, so [notifications](notifications.md) can't see them | [Admin down](runbooks.md#admin-or-postgres-down) |
 | `rate(edge_trace_export_errors_total[5m]) > 0` | Spans are being dropped; traffic is unaffected | Check the collector and the edge's `opentelemetry error` log line, written at most once a minute |
 | `increase(edge_background_panics_total[10m]) > 0` or `edge_rejected_total{reason="panic"}` rising | A bug | Collect logs and report it |
+| `(max(admin_leader) or vector(0)) == 0` for 5 minutes, which also fires when no admin replica is scraped | No admin replica runs the guard, notifications, JWKS refresh or audit checks; traffic is unaffected | Check admin logs for `leader loop`, and Postgres |
+| `sum(changes(admin_leader[30m])) > 4` | Leadership keeps moving, so background jobs keep restarting | Check the leader's connection to Postgres (`leader connection lost; stopping jobs`) |
+| `increase(admin_audit_verify_failures_total[1h]) > 0` | Audit rows were altered, or the audit key is wrong | Check the `audit chain broken` log line |
+| `increase(admin_background_job_failures_total[30m]) > 0` | A leader job failed: usually Postgres, but also Alertmanager unreachable or not answering 2xx (`notifications`) or a broken audit chain (`audit`, `audit_full`). An unreachable IdP or crawler range source does not count here | Check the `background job failed` log line for its error |
+| `sum by (connector) (rate(admin_connector_requests_total{result=~"error\|timeout"}[15m])) > 0` for 15 minutes | A connector is unreachable, slow or refusing requests, so autopilot runs get tool errors from it. A query the model wrote that the connector refuses counts too, so look at the statuses before acting. Traffic and the rest of the autopilot are unaffected | [A connector fails](runbooks.md#a-connector-fails) |
 
 ## Logs
 
 Both binaries write JSON lines to stdout.
 
-**Edge access log** (`msg: access`): method, host (`server.address`), normalized path, query key names (`edge.query_keys`, and `edge.query_keys_dropped` counting keys not logged because they looked like secrets or were past the first 32), status, `request_id`, `edge.decision` (`allow` or the rejection reason), `duration_ms`, client IP, config version and cohort (`edge.cohort`: `candidate` when the request's client is in the [canary](../use/publishing.md#canary), otherwise `active`), the config rules that matched (`edge.config_rules`), the rate-limit rule that answered 429 (`edge.rate_limit_rule`) and the JWT result (`edge.auth`: `verified`, `cached`, `missing`, `invalid` or `pass_no_keys`). Query values, `Authorization` and `Cookie` are never logged. Rejections and 5xx are always logged; other requests follow `LOG_SAMPLE_RATE`, and when it is below 1 their lines carry it as `edge.sample_rate`. With [tracing](#traces) on, every line except shed requests (`overloaded`, `streams_overloaded`) carries `trace_id` and `span_id`, sampled or not, and the upstream receives the same trace ID in `traceparent`.
+**Edge access log** (`msg: access`): method, host (`server.address`), normalized path, query key names (`edge.query_keys`, and `edge.query_keys_dropped` counting keys not logged because they looked like secrets or were past the first 32), status, `request_id`, `edge.decision` (`allow`, `would_block` when a config rule set to log only would have blocked it, or the rejection reason, such as `blocked`), whether the upstream answered (`edge.upstream_answered`: `false` when the edge wrote the response, such as a CORS preflight, which is still `allow`, or the 502 for a protocol switch the edge refused because the upstream's `Upgrade` didn't match the request's), `duration_ms`, client IP (`client.address`), `user_agent.original`, the viewer AS number (`client.as.number`), country (`client.geo.country_iso_code`) and JA4 (`tls.client.ja4`) when the deployment has their sources, the request's [client signals](../reference/expressions.md#client-signals) (`client.signals`, when any; computed for every logged request that reached the config phase, whether or not a rule reads them), config version and cohort (`edge.cohort`: `candidate` when the request's client is in the [canary](../use/publishing.md#canary), otherwise `active`), the config rules that matched (`edge.config_rules`), the rate-limit rule that answered 429 (`edge.rate_limit_rule`) and the JWT result (`edge.auth`: `verified`, `cached`, `missing`, `invalid` or `pass_no_keys`). When the edge got no answer from the upstream, the line carries the error (`edge.upstream_error`, at most 512 bytes; quoted values, which can be a header line or an `Upgrade` value, are replaced with `"…"` unless the error is a DNS, certificate or socket error) and its cause (`edge.upstream_error_kind`): `dns` when the upstream's name did not resolve, `refused` when nothing accepted the connection, `reset` when the upstream dropped it, `tls` when the TLS handshake with the upstream failed: it refused the handshake, or its certificate is not valid for the request's Host or not trusted (decision `upstream_tls`), `timeout` when the upstream did not connect, finish the TLS handshake or send response headers in time (decision `upstream_timeout`, a 504), or `other`. **Stats** and `edge_upstream_errors_total` count the same causes exactly. There is no separate log line per failure: during an outage every failing request would take the log handler's lock on the request path. Admin keeps counts, not lines: keep these lines in your log store, and set `LOG_SEARCH_URL` ([admin settings](../deploy/admin.md)) so admin links its counts to them. Query values, `Authorization` and `Cookie` are never logged. Rejections, `would_block` and 5xx are always logged; other requests follow `LOG_SAMPLE_RATE`, and when it is below 1 their lines carry it as `edge.sample_rate`. With [tracing](#traces) on, every line except shed requests (`overloaded`, `streams_overloaded`) carries `trace_id` and `span_id`, sampled or not, and the upstream receives the same trace ID in `traceparent`.
 
 **Admin messages to alert on:**
 
 | Message | Means |
 |---|---|
 | `guard tripped` | The guard rolled back a version, aborted a canary or raised an alert |
+| `anomaly firing`, `anomaly resolved` | A [notification](notifications.md) started or ended; it is also sent to Alertmanager when `ALERTMANAGER_URL` is set |
 | `audit chain broken` | Audit verification failed: rows were altered or the key is wrong |
-| `background job failed` | A leader job (guard, JWKS, audit, retention) failed |
+| `background job failed` | A leader job (guard, notifications, JWKS, verified crawler ranges, audit, retention) failed |
 | `jwks fetch failed; keeping the last good keys` | An issuer's JWKS URL is failing |
+| `verified bot ranges fetch failed; keeping the last good set` | A `VERIFIED_BOT_SOURCES` URL is failing |
 
 ## Traces
 
@@ -85,7 +134,7 @@ With the same variables set on admin ([Admin settings](../deploy/admin.md#variab
 - **What is not recorded.** Query arguments, so no written value, password hash or token appears in a trace; Postgres error messages, which can quote values; the URL query; request bodies; and headers other than `User-Agent` and `Host`.
 - **Personal data.** `client.address` and `user_agent.original` identify people; keep trace retention in line with the access log's.
 - **Joining a trace.** Unlike the edge, admin joins the caller's trace only from a peer in `ADMIN_TRUSTED_PROXIES`. Any other caller's trace context starts a new trace that links to it. Sampling is under the same per-replica cap as the edge.
-- **Failure.** Admin has no metrics endpoint, so a failed export shows only as the `opentelemetry error` log line, at most once a minute.
+- **Failure.** A failed export is counted in `admin_trace_export_errors_total` and logged as `opentelemetry error`, at most once a minute.
 
 ## Admin health
 

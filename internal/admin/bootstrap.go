@@ -57,6 +57,7 @@ func bootstrap(ctx context.Context, db *pgxpool.Pool, s *Server, log *slog.Logge
 			return err
 		}
 		if v != 0 {
+			s.met.published("manual")
 			log.Info("bootstrap published the starter policy", "version", v)
 		}
 	}

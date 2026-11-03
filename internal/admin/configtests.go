@@ -27,15 +27,20 @@ type ConfigTest struct {
 // TestRequest is a synthetic request. Trust is deployment-specific, so the
 // test states the client IP and viewer values directly.
 type TestRequest struct {
-	Method    string            `json:"method,omitempty"` // default GET
-	Host      string            `json:"host"`
-	Path      string            `json:"path"`         // as sent, query included
-	IP        string            `json:"ip,omitempty"` // default 192.0.2.1
-	Headers   map[string]string `json:"headers,omitempty"`
-	Country   string            `json:"country,omitempty"`
-	ASN       int64             `json:"asn,omitempty"`
-	SSL       bool              `json:"ssl,omitempty"`
-	JWTClaims map[string]string `json:"jwt_claims,omitempty"`
+	Method  string            `json:"method,omitempty"` // default GET
+	Host    string            `json:"host"`
+	Path    string            `json:"path"`         // as sent, query included
+	IP      string            `json:"ip,omitempty"` // default 192.0.2.1
+	Headers map[string]string `json:"headers,omitempty"`
+	Country string            `json:"country,omitempty"`
+	ASN     int64             `json:"asn,omitempty"`
+	SSL     bool              `json:"ssl,omitempty"`
+	// JA4, JA3 and HTTPVersion are what the CDN would send.
+	JA4         string            `json:"ja4,omitempty"`
+	JA3         string            `json:"ja3,omitempty"`
+	HTTPVersion string            `json:"http_version,omitempty"`
+	VerifiedBot bool              `json:"verified_bot,omitempty"`
+	JWTClaims   map[string]string `json:"jwt_claims,omitempty"`
 }
 
 // TestExpect lists what must hold; anything left out isn't checked.
@@ -70,6 +75,7 @@ type SimView struct {
 
 func (r TestRequest) sim() edge.SimRequest {
 	sr := edge.SimRequest{Method: r.Method, Host: r.Host, Target: r.Path, IP: r.IP, Country: r.Country, ASN: r.ASN, SSL: r.SSL,
+		JA4: r.JA4, JA3: r.JA3, HTTPVersion: r.HTTPVersion, VerifiedBot: r.VerifiedBot,
 		Headers: map[string][]string{}, JWTClaims: map[string][]string{}}
 	if sr.Method == "" {
 		sr.Method = "GET"
@@ -167,8 +173,10 @@ func (e TestExpect) mismatches(got SimView) []string {
 	if e.ConfigRules != nil && !slices.Equal(*e.ConfigRules, got.ConfigRules) {
 		f = append(f, fmt.Sprintf("config_rules: want %v, got %v", *e.ConfigRules, got.ConfigRules))
 	}
-	if e.RateLimitRules != nil && !slices.Equal(*e.RateLimitRules, got.RateLimitRules) {
-		f = append(f, fmt.Sprintf("rate_limit_rules: want %v, got %v", *e.RateLimitRules, got.RateLimitRules))
+	// Tests describe people's rules. Autopilot's come and go with attacks,
+	// so a test that listed them would fail on every overlay change.
+	if people := slices.DeleteFunc(slices.Clone(got.RateLimitRules), isOverlay); e.RateLimitRules != nil && !slices.Equal(*e.RateLimitRules, people) {
+		f = append(f, fmt.Sprintf("rate_limit_rules: want %v, got %v", *e.RateLimitRules, people))
 	}
 	if len(e.Settings) > 0 {
 		actual, _ := generic(got.Settings).(map[string]any)

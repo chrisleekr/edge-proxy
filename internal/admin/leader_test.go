@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/chrisleekr/edge-proxy/internal/edge"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 	"github.com/chrisleekr/edge-proxy/internal/testenv"
 )
@@ -161,7 +164,9 @@ func TestAuditEndpoints(t *testing.T) {
 	h.user("vera", "viewer")
 	status(t, h.signedIn("vera").do("GET", "/api/audit", nil), 200)
 
-	// Tampering shows in the verification result and is recorded.
+	h.wantMetrics("admin_audit_verify_failures_total 0")
+
+	// Tampering shows in the verification result, is recorded and counted.
 	for _, q := range []string{"ALTER TABLE audit_events DISABLE TRIGGER USER", "UPDATE audit_events SET target = 'x' WHERE seq = 2"} {
 		if _, err := h.owner.Exec(t.Context(), q); err != nil {
 			t.Fatal(err)
@@ -173,6 +178,66 @@ func TestAuditEndpoints(t *testing.T) {
 	if err := h.s.fullAuditVerify(t.Context()); err == nil || !strings.Contains(h.logs.String(), "audit chain broken") {
 		t.Fatalf("full verify: %v", err)
 	}
+	h.wantMetrics("admin_audit_verify_failures_total 2")
+
+	// A leader verifies the chain on start, and counts the break as a failed
+	// job. jwks and verified_bots fail only on Postgres errors, and retention
+	// and audit_full run on a daily ticker, so they are not driven here.
+	ctx, stop := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- h.s.leadOnce(ctx, h.s.cfg.DatabaseURL) }()
+	waitFor(t, func() bool {
+		return strings.Contains(h.metrics(), `admin_background_job_failures_total{job="audit"} 1`+"\n")
+	})
+	h.wantMetrics(`admin_background_job_failures_total{job="audit_full"} 0`)
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The activity page reads the audit log over a time range, filtered to a
+// category of actions, such as every release.
+func TestAuditFiltersBySinceAndActions(t *testing.T) {
+	h, pub := published(t) // version 1, published now
+	// Inside the session's idle timeout, so the publisher stays signed in.
+	h.advance(10 * time.Minute)
+	since := h.now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	c := testConfig()
+	c.RateLimitRules[0].Limit = 5
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("v2"), 201)
+	status(t, pub.do("POST", "/api/versions/1/revert", map[string]string{"reason": "v2 too tight"}), 201)
+	type event struct{ Action, Target string }
+	list := func(query string) []string {
+		t.Helper()
+		var out []string
+		for _, e := range decode[[]event](t, pub.do("GET", "/api/audit?"+query, nil)) {
+			out = append(out, e.Action+" "+e.Target)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name, query string
+		want        []string
+	}{
+		{"one action lists every event of it", "action=config.publish", []string{"config.publish version 2", "config.publish version 1"}},
+		{"a list of actions lists events of any of them", "action=config.publish,config.revert", []string{"config.revert version 3", "config.publish version 2", "config.publish version 1"}},
+		{"since leaves out events before it", "since=" + since + "&action=config.publish", []string{"config.publish version 2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := list(tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("since that is not a time is refused", func(t *testing.T) {
+		status(t, pub.do("GET", "/api/audit?since=yesterday", nil), 400)
+	})
+	t.Run("a list of 51 actions is refused", func(t *testing.T) {
+		actions := slices.Repeat([]string{"config.publish"}, 51)
+		status(t, pub.do("GET", "/api/audit?action="+strings.Join(actions, ","), nil), 400)
+	})
 }
 
 // Stepping down closes the lock connection only after the ping loop has
@@ -238,4 +303,92 @@ func (s *syncBuffer) count(sub string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return strings.Count(s.b.String(), sub)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// Every replica exports whether it leads. Only the leader exports the live
+// edge count and firing anomalies by signal, from what its last
+// notification check read, so a scrape never queries Postgres and replicas
+// don't each report the same fleet. Stepping down takes them away.
+func TestLeaderMetrics(t *testing.T) {
+	h, pub, _ := notifyHarness(t)
+	h.put(65, 6, minute{requests: 1000})
+	h.put(5, 1, minute{requests: 1000, upstream5xx: 200})
+	h.check()
+	h.advance(time.Minute)
+	h.put(1, 1, minute{requests: 1000, upstream5xx: 200})
+	h.check()
+	if a := h.anomalies(pub); len(a) != 1 || a[0].State != "firing" {
+		t.Fatalf("anomalies %+v, want one firing", a)
+	}
+	notLeading := func(when string) {
+		t.Helper()
+		m := h.metrics()
+		if !strings.Contains(m, "admin_leader 0\n") || strings.Contains(m, "admin_edges_live") || strings.Contains(m, "admin_anomalies_firing") {
+			t.Fatalf("%s:\n%s", when, m)
+		}
+	}
+	notLeading("not leading, after a notification check")
+
+	ctx, stop := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- h.s.leadOnce(ctx, h.s.cfg.DatabaseURL) }()
+	waitFor(t, func() bool { return strings.Contains(h.metrics(), "admin_leader 1\n") })
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-a", ConfigSource: "admin"}), 200)
+	h.check()
+	m := h.metrics()
+	if !strings.Contains(m, "admin_edges_live 1\n") {
+		t.Errorf("leader metrics missing admin_edges_live 1:\n%s", m)
+	}
+	for _, signal := range notifyNames {
+		n := 0
+		if signal == "upstream_5xx_ratio" {
+			n = 1
+		}
+		if want := fmt.Sprintf("admin_anomalies_firing{signal=%q} %d\n", signal, n); !strings.Contains(m, want) {
+			t.Errorf("leader metrics missing %q", want)
+		}
+	}
+
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	notLeading("after stepping down")
+}
+
+// When the leader's notification check fails, the fleet gauges it exports
+// disappear instead of showing the last good numbers as current, and the
+// failure is counted. Here the runtime role has lost its grant on settings,
+// so the check can't read the notification settings.
+func TestFailedNotificationCheckHidesLeaderGauges(t *testing.T) {
+	h := newHarness(t)
+	defer func(d time.Duration) { notifyEvery = d }(notifyEvery)
+	notifyEvery = 20 * time.Millisecond
+	ctx, stop := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- h.s.leadOnce(ctx, h.s.cfg.DatabaseURL) }()
+	waitFor(t, func() bool { return strings.Contains(h.metrics(), "admin_edges_live 0\n") })
+
+	if _, err := h.owner.Exec(t.Context(), "REVOKE SELECT ON settings FROM "+testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		return !strings.Contains(h.metrics(), `admin_background_job_failures_total{job="notifications"} 0`+"\n")
+	})
+	m := h.metrics()
+	if strings.Contains(m, "admin_edges_live") || strings.Contains(m, "admin_anomalies_firing") || !strings.Contains(m, "admin_leader 1\n") {
+		t.Fatalf("after a failed check:\n%s", m)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }

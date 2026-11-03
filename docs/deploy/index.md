@@ -1,11 +1,12 @@
 # Deploy
 
-Two images, two deployables:
+Three images, three deployables:
 
 | Image | Runs | Scale |
 |---|---|---|
 | `chrisleekr/edge-proxy` | The proxy. Public traffic arrives from your CDN or load balancer | Horizontally, at least 2 replicas across zones |
 | `chrisleekr/edge-proxy-admin` | Admin API and UI, background jobs | 1 or 2 replicas, internal network only |
+| `chrisleekr/edge-proxy-autopilot` | Optional. The autopilot runner: runs the model for autopilot cases, holding the model credentials | 1 replica, internal network only; it talks only to admin and the model provider |
 
 The edge goes between your CDN and the load balancer or gateway that already routes your services. It forwards every request there with `Host` unchanged, so routing stays where it is and the edge knows only that one address (`UPSTREAM_URL`):
 
@@ -18,7 +19,7 @@ flowchart LR
 
 On Kubernetes, the Helm chart performs every step below for you: see [Kubernetes with Helm](kubernetes.md).
 
-Both are static Go binaries on distroless, running as non-root (uid 65532), configured only by environment variables. A GitHub release pushes both to Docker Hub, tagged with its version (`1.2.3`) and `latest`, for amd64 and arm64. GitLab CI pushes only a rolling amd64 `latest` from `main`, to the GitLab project's own registry. See [Development](../build/development.md#release) for how they are built.
+The edge and admin are static Go binaries on distroless, and the runner is Node on distroless. All run as non-root (uid 65532), configured only by environment variables. A GitHub release pushes all three to Docker Hub, tagged with its version (`1.2.3`) and `latest`, for amd64 and arm64. GitLab CI pushes only a rolling amd64 `latest` from `main`, to the GitLab project's own registry. See [Development](../build/development.md#release) for how they are built.
 
 ## Requirements
 
@@ -89,7 +90,7 @@ Admin needs the edge's `CLIENT_IP_SOURCE`, and `VIEWER_HEADERS`, `ALLOW_REGEX` o
 docker run -d --env-file admin.env -p 127.0.0.1:8081:8081 chrisleekr/edge-proxy-admin
 ```
 
-It listens on `:8081`. Docker [publishes ports on all interfaces](https://docs.docker.com/engine/network/port-publishing/) unless given an address, hence `127.0.0.1`; if the proxy runs in a container, put both on a private Docker network and publish no port instead. Put it behind an internal HTTPS proxy that appends `X-Forwarded-For`, and set `ADMIN_TRUSTED_PROXIES` to that proxy's addresses so login throttling sees each client rather than the proxy.
+It listens on `:8081` for the API and UI, and on `:9091` for `/metrics`, which has no authentication: let only your metrics scraper reach `:9091`, and never publish it. Docker [publishes ports on all interfaces](https://docs.docker.com/engine/network/port-publishing/) unless given an address, hence `127.0.0.1`; if the proxy runs in a container, put both on a private Docker network and publish no port instead. Put it behind an internal HTTPS proxy that appends `X-Forwarded-For`, and set `ADMIN_TRUSTED_PROXIES` to that proxy's addresses so login throttling sees each client rather than the proxy.
 
 ### 4. First admin user
 

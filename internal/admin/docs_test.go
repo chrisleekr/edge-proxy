@@ -191,3 +191,27 @@ func TestDocsShowEveryScreenshot(t *testing.T) {
 	diff(t, "screenshot", uniq(rendered), uniq(stored))
 	diff(t, "screenshot", uniq(rendered), uniq(shown))
 }
+
+// The monitoring page lists every admin metric, including the leader-only
+// gauges, and nothing admin no longer exports.
+func TestDocsListEveryAdminMetric(t *testing.T) {
+	s := &Server{}
+	s.met.leader.Store(true)
+	s.met.gauges.Store(&leaderGauges{})
+	var b bytes.Buffer
+	s.writeMetrics(&b)
+	var code []string
+	for line := range strings.Lines(b.String()) {
+		if f := strings.Fields(line); len(f) == 4 && f[1] == "TYPE" {
+			code = append(code, f[2])
+		}
+	}
+	metric := regexp.MustCompile(`^admin_[a-z_]+(\{[a-z_,]+\})?$`)
+	var documented []string
+	for _, row := range docRows(t, "operate/monitoring.md", "Admin metrics") {
+		for _, m := range spans(row[0], metric) {
+			documented = append(documented, strings.SplitN(m, "{", 2)[0])
+		}
+	}
+	diff(t, "metric", uniq(code), uniq(documented))
+}

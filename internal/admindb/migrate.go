@@ -19,9 +19,9 @@ var migrations embed.FS
 // migrateLock serializes migrators across admin replicas.
 const migrateLock = 0x65646765 // "edge"
 
-// runtimeGrants are everything the runtime role may do. audit_events gets
-// only INSERT and SELECT, and config_versions no DELETE: versions are kept
-// forever.
+// runtimeGrants are everything the runtime role may do. audit_events and
+// autopilot's record get only INSERT and SELECT, and config_versions no
+// DELETE: versions are kept forever.
 var runtimeGrants = []string{
 	"GRANT USAGE ON SCHEMA public TO %[1]s",
 	"GRANT SELECT ON schema_migrations, roles, role_permissions TO %[1]s",
@@ -29,8 +29,20 @@ var runtimeGrants = []string{
 	"GRANT SELECT, INSERT, UPDATE ON config_versions TO %[1]s",
 	"GRANT SELECT, INSERT, UPDATE, DELETE ON users, user_identities, local_credentials, user_roles, group_role_mappings, " +
 		"sessions, api_tokens, config_draft, canary, jwks_keys, settings, fleet, edge_stats_minute, " +
-		"observed_routes, observed_route_hour, route_patterns TO %[1]s",
-	"GRANT USAGE ON SEQUENCE observed_routes_id_seq, route_patterns_id_seq TO %[1]s",
+		"observed_routes, observed_route_hour, route_patterns, anomalies, verified_bot_sets TO %[1]s",
+	"GRANT USAGE ON SEQUENCE observed_routes_id_seq, route_patterns_id_seq, anomalies_id_seq TO %[1]s",
+	// Autopilot's record is append-only, like audit_events.
+	"GRANT SELECT, INSERT ON autopilot_model_prices, autopilot_runs, autopilot_run_results, autopilot_run_events, autopilot_proposals, autopilot_transitions TO %[1]s",
+	"GRANT SELECT, INSERT, UPDATE, DELETE ON autopilot_runners, autopilot_cases, autopilot_rules TO %[1]s",
+	"GRANT USAGE ON SEQUENCE autopilot_cases_id_seq, autopilot_model_prices_id_seq, autopilot_runs_id_seq, autopilot_run_events_id_seq, " +
+		"autopilot_proposals_id_seq, autopilot_transitions_id_seq TO %[1]s",
+	// A note's current state changes; its revisions and uses are its record.
+	"GRANT SELECT, INSERT, UPDATE ON autopilot_notes TO %[1]s",
+	"GRANT SELECT, INSERT ON autopilot_note_revisions, autopilot_note_uses TO %[1]s",
+	"GRANT USAGE ON SEQUENCE autopilot_notes_id_seq, autopilot_note_revisions_id_seq, autopilot_note_uses_id_seq TO %[1]s",
+	// An exclusion is revoked, never deleted.
+	"GRANT SELECT, INSERT, UPDATE ON autopilot_exclusions TO %[1]s",
+	"GRANT USAGE ON SEQUENCE autopilot_exclusions_id_seq TO %[1]s",
 }
 
 // Migrate applies new migrations in order, each in its own transaction,

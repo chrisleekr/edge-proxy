@@ -79,6 +79,8 @@ type Server struct {
 	replica string // this admin instance, for its stats rows
 	agg     *aggregator
 	jwks    *jwks.Client
+	// alertClient sends anomalies to Alertmanager.
+	alertClient *http.Client
 	// guardEvery is the leader's guard tick, fixed until leadership changes.
 	guardEvery atomic.Int64
 	// The leader's incremental audit verification position.
@@ -92,9 +94,25 @@ type Server struct {
 	routeAgg *routeAggregator
 	patterns atomic.Pointer[[]routePattern]
 
+	met adminMetrics
+	// mcpCalls counts each token's MCP calls in progress.
+	mcpCalls inFlight
+	// tools are the MCP tools this deployment offers: every tool but those
+	// of unconfigured connectors. toolsSHA256 is their hash runs record.
+	tools       []mcpTool
+	toolsSHA256 [32]byte
+	// connClient calls the connectors; connTimeout bounds each call.
+	connClient  *http.Client
+	connTimeout time.Duration
+
 	// registered lists every route as "METHOD /path permission", so a test
 	// can check the API reference against it.
 	registered []string
+
+	// afterBaseCheck, when set, runs after publish checks the draft's base
+	// under the publish lock and before it publishes, so a test can try to
+	// commit a revert in that gap.
+	afterBaseCheck func()
 }
 
 // NewServer wires the API. db must connect as the runtime role.
@@ -106,8 +124,16 @@ func NewServer(cfg *Config, db *pgxpool.Pool, log *slog.Logger) *Server {
 		// The start time keeps a restarted replica's rows apart from its
 		// previous run's for the same minute; readers sum replicas.
 		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil),
-		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(),
+		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(), alertClient: &http.Client{Timeout: 10 * time.Second},
 	}
+	s.tools = configuredTools(cfg)
+	s.toolsSHA256 = toolsHash(s.tools)
+	s.connClient = &http.Client{
+		// A redirect is answered as an error, so a token never goes to a host
+		// the deployment didn't name.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	s.connTimeout = connCallTimeout
 	s.routes()
 	return s
 }
@@ -163,6 +189,9 @@ type problem struct {
 	Detail string       `json:"detail,omitempty"`
 	Errors []expr.Issue `json:"errors,omitempty"`
 	Tests  []TestResult `json:"test_results,omitempty"`
+	// held names the check a live edge failed for a 409: schema or
+	// deployment. Autopilot records it when it rejects a rule.
+	held string
 }
 
 // Error includes the issues because the CLI has only this text to show.
@@ -352,6 +381,9 @@ func (s *Server) tokenPrincipal(ctx context.Context, db *pgxpool.Pool, h []byte,
 	if s.cfg.LogToken != nil && subtle.ConstantTimeCompare(h, s.cfg.LogToken) == 1 {
 		return &principal{actor: "deployment:log-shipper", perms: map[string]bool{permLogs: true}}, nil
 	}
+	if s.cfg.AutopilotToken != nil && subtle.ConstantTimeCompare(h, s.cfg.AutopilotToken) == 1 {
+		return &principal{actor: "deployment:autopilot", perms: map[string]bool{permAutopilot: true}}, nil
+	}
 	var id, kind string
 	var userID, username *string
 	var scopes []string
@@ -377,11 +409,12 @@ func (s *Server) tokenPrincipal(ctx context.Context, db *pgxpool.Pool, h []byte,
 	return p, err
 }
 
-// permEdge is held only by edge service tokens, and permLogs only by the log
-// shipper's token.
+// permEdge is held only by edge service tokens, permLogs only by the log
+// shipper's token and permAutopilot only by the autopilot runner's token.
 const (
-	permEdge = "edge"
-	permLogs = "logs.ingest"
+	permEdge      = "edge"
+	permLogs      = "logs.ingest"
+	permAutopilot = "autopilot.agent"
 )
 
 func (s *Server) userPerms(ctx context.Context, userID string) (map[string]bool, error) {
@@ -423,26 +456,34 @@ func (s *Server) trusted(a netip.Addr) bool {
 	return slices.ContainsFunc(s.cfg.TrustedProxies, func(p netip.Prefix) bool { return p.Contains(a) })
 }
 
-// Serve runs the API until ctx ends.
-func (s *Server) Serve(ctx context.Context, l net.Listener) error {
-	srv := &http.Server{
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       readTimeout,
-		IdleTimeout:       idleTimeout,
-		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
+// Serve runs the API on l and /metrics on internal until ctx ends or a
+// server fails. Either way both servers stop and buffered stats are written.
+func (s *Server) Serve(ctx context.Context, l, internal net.Listener) error {
+	newServer := func(h http.Handler) *http.Server {
+		return &http.Server{
+			Handler:           h,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       readTimeout,
+			IdleTimeout:       idleTimeout,
+			ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
+		}
 	}
-	errc := make(chan error, 1)
+	srv, in := newServer(s.Handler()), newServer(s.internalHandler())
+	errc := make(chan error, 2)
 	go func() { errc <- srv.Serve(l) }()
-	go s.lead(ctx, s.cfg.DatabaseURL)
+	go func() { errc <- in.Serve(internal) }()
+	leadCtx, stopLead := context.WithCancel(ctx)
+	defer stopLead()
+	go s.lead(leadCtx, s.cfg.DatabaseURL)
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
 	flushTick := time.NewTicker(flushEvery)
 	defer flushTick.Stop()
+	var serveErr error
 	for running := true; running; {
 		select {
-		case err := <-errc:
-			return err
+		case serveErr = <-errc:
+			running = false
 		case now := <-tick.C:
 			s.sweep(now)
 		case now := <-flushTick.C:
@@ -458,7 +499,7 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err := srv.Shutdown(sctx)
+	err := errors.Join(srv.Shutdown(sctx), in.Shutdown(sctx))
 	// After Shutdown, so reports still in flight are included. Write what
 	// this replica still holds; the next minute never comes.
 	fctx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), flushTimeout)
@@ -470,9 +511,9 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 		s.log.Warn("route flush at shutdown", "error", ferr.Error())
 	}
 	if err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		err = fmt.Errorf("shutdown: %w", err)
 	}
-	return nil
+	return errors.Join(serveErr, err)
 }
 
 // sweep drops expired throttle state so the tables don't fill.

@@ -12,8 +12,10 @@ func (s *Server) routes() {
 	s.edgeRoutes()
 	s.canaryRoutes()
 	s.guardRoutes()
+	s.notifyRoutes()
 	s.auditRoutes()
 	s.observedRoutes()
+	s.autopilotRoutes()
 	s.uiRoutes()
 }
 
