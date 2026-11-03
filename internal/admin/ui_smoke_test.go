@@ -40,6 +40,11 @@ func TestUISmoke(t *testing.T) {
 	h.s.cfg.UI = ui
 	h.s.uiRoutes()
 	h.user("smoke", "admin")
+	// An on-call role that reads stats but not config, as an operator may add.
+	if _, err := h.owner.Exec(t.Context(), "INSERT INTO roles VALUES ('oncall'); INSERT INTO role_permissions VALUES ('oncall', 'stats.read')"); err != nil {
+		t.Fatal(err)
+	}
+	h.user("oncall", "oncall")
 
 	// Access lines for the Routes page: a rate limited login, and blog posts
 	// enough alike for a grouping suggestion.
@@ -97,7 +102,7 @@ func TestUISmoke(t *testing.T) {
 
 	cmd := exec.Command("npx", "playwright", "test")
 	cmd.Dir = "../../web/admin"
-	cmd.Env = append(os.Environ(), "BASE_URL="+h.srv.URL, "SMOKE_USER=smoke", "SMOKE_PASSWORD="+goodPassword)
+	cmd.Env = append(os.Environ(), "BASE_URL="+h.srv.URL, "SMOKE_USER=smoke", "SMOKE_ONCALL_USER=oncall", "SMOKE_PASSWORD="+goodPassword)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("playwright: %v", err)

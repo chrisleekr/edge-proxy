@@ -302,8 +302,8 @@ function RateLimitForm({ value: v, onChange, choices, at }: { value: JsonObject;
           value={v.algorithm as string | undefined}
           options={choices.algorithms}
           onChange={(a) => {
-            // A burst or distinct_of left behind would make the new algorithm fail.
-            const next = a === 'distinct' ? setField(v, 'algorithm', a) : without(setField(v, 'algorithm', a), 'distinct_of');
+            // A burst, distinct_of or count_statuses left behind would make the new algorithm fail.
+            const next = a === 'distinct' ? without(setField(v, 'algorithm', a), 'count_statuses') : without(setField(v, 'algorithm', a), 'distinct_of');
             onChange(bursty.includes(a ?? '') ? { ...next, burst: typeof v.burst === 'number' ? v.burst : (v.limit ?? 1) } : without(next, 'burst'));
           }}
         />

@@ -718,6 +718,11 @@ func TestAutopilotCost(t *testing.T) {
 	}{
 		{"a negative price", price("claude-opus-5-5", -1, 25, 0.5, 6.25, time.Now())},
 		{"a price over $1000 per million tokens", price("claude-opus-5-5", 5, 1001, 0.5, 6.25, time.Now())},
+		{"a price with no cache write rate, which would cost those tokens $0", func() map[string]any {
+			p := price("claude-opus-5-5", 5, 25, 0.5, 6.25, time.Now())
+			delete(p, "cache_write_usd_per_mtok")
+			return p
+		}()},
 		{"an unknown provider", func() map[string]any {
 			p := price("gemini-3", 1, 1, 1, 1, time.Now())
 			p["provider"] = "google"

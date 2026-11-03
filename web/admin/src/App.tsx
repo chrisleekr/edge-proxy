@@ -308,7 +308,7 @@ function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
     routes: () => (parts[1] ? <RouteDetail key={path} id={Number(parts[1])} can={can} /> : <Routes can={can} />),
     fleet: () => <Fleet />,
     stats: () => <Stats />,
-    notifications: () => <Notifications canManage={can('settings.manage')} />,
+    notifications: () => <Notifications canRead={can('config.read')} canManage={can('settings.manage')} />,
     autopilot: () =>
       parts[1] === 'cases' && parts[2] ? (
         <AutopilotCase key={path} id={Number(parts[2])} />

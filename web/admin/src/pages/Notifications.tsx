@@ -493,11 +493,12 @@ function Anomalies() {
   );
 }
 
-export function Notifications({ canManage }: { canManage: boolean }) {
+export function Notifications({ canRead, canManage }: { canRead: boolean; canManage: boolean }) {
   return (
     <Page title="Notifications" info="Anomalies admin found in the edges' stats, and when each signal notifies. Firing anomalies are sent to Alertmanager, which routes them.">
       <Anomalies />
-      <Settings canManage={canManage} />
+      {/* The page opens for stats.read; the settings need config.read. */}
+      {canRead && <Settings canManage={canManage} />}
     </Page>
   );
 }

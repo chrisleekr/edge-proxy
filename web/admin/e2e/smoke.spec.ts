@@ -9,6 +9,7 @@ test.describe.configure({ mode: 'serial' });
 
 const user = process.env.SMOKE_USER!;
 const password = process.env.SMOKE_PASSWORD!;
+const oncall = process.env.SMOKE_ONCALL_USER!;
 
 let page: Page;
 test.beforeAll(async ({ browser }) => {
@@ -210,6 +211,24 @@ test('each mistake in a rate limit shows by its field and keeps Apply off until 
   await expect(page.getByRole('link', { name: 'search', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Discard' }).click();
   await confirm('Discard changes');
+});
+
+test('switching a rate limit to Distinct drops the statuses it can not count', async () => {
+  const limits = page.getByRole('list', { name: 'Rate limit rules' }).locator('..');
+  await limits.getByRole('button', { name: 'Add rate limit rule' }).click();
+  await page.getByRole('button', { name: '+ Add a status' }).click();
+  await page.getByRole('textbox', { name: 'Status 1', exact: true }).fill('404');
+  const algorithm = page.getByRole('combobox', { name: /^Algorithm/ });
+  const was = await algorithm.inputValue();
+  await algorithm.selectOption('distinct');
+  await expect(page.getByRole('textbox', { name: 'Status 1', exact: true })).toBeHidden();
+  // Back to the first algorithm: the hidden statuses were dropped, not kept.
+  await algorithm.selectOption(was);
+  await expect(page.getByRole('group', { name: 'Count only responses with status' })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Status 1', exact: true })).toBeHidden();
+  // Nothing is left to lose, so Cancel asks nothing.
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('heading', { name: 'Rules', exact: true })).toBeVisible();
 });
 
 test('a penalty typed in seconds stays in seconds as it passes a whole minute', async () => {
@@ -474,6 +493,22 @@ test('Needs attention lists the firing anomaly with one action', async () => {
   await expect(item).toHaveCount(1);
   await expect(item.getByRole('link')).toHaveCount(1);
   await expect(item.getByRole('link')).toHaveAttribute('href', /^\/notifications(\?|$)/);
+});
+
+test('a role that reads stats but not config sees Notifications without asking for its settings', async ({ browser }) => {
+  const other = await (await browser.newContext()).newPage();
+  const asked: string[] = [];
+  other.on('request', (r) => r.url().includes('/api/settings/notifications') && asked.push(r.url()));
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Notifications', exact: true }).click();
+  await expect(other.getByRole('cell').filter({ hasText: 'Edge 5xx' }).first()).toBeVisible();
+  await other.waitForLoadState('networkidle');
+  expect(asked).toEqual([]);
+  await expect(other.getByText('Forbidden')).toHaveCount(0);
+  await other.context().close();
 });
 
 test('a rule anomaly for the same signal as a fleet anomaly is listed under it, not on its own', async () => {

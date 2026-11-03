@@ -822,7 +822,8 @@ function Prices({ canManage }: { canManage: boolean }) {
         provider: p.provider,
         model: p.model,
         effective_from: p.from ? new Date(p.from).toISOString() : '',
-        ...Object.fromEntries(priceFields.map(([k]) => [k, Number(p[k] ?? '')])),
+        // A blank rate is left out, so admin refuses it rather than storing $0.
+        ...Object.fromEntries(priceFields.map(([k]) => [k, p[k] ? Number(p[k]) : undefined])),
       }),
     onSuccess: () => (setP({ provider: p.provider ?? 'claude', model: '', from: localNow() }), qc.invalidateQueries({ queryKey: ['autopilot'] })),
   });
