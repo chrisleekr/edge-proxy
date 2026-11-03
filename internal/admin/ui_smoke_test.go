@@ -76,7 +76,10 @@ func TestUISmoke(t *testing.T) {
 	limits := `[{"id":"login","evaluated":50,"would_limit":16}]`
 	// The edge always sends limited, so a log only rule's subjects carry 0.
 	client := `[{"rule":"login","key":"k1","display":"198.51.100.7","limited":0,"would_limit":16}]`
+	// The baseline ends where the five anomaly minutes start, so no minute is counted twice.
+	h.advance(-5 * time.Minute)
 	h.putStats(2, 65, 1000, 0, 0, []int64{1000}, limits, client)
+	h.advance(5 * time.Minute)
 	h.putStats(2, 5, 1000, 200, 0, []int64{1000}, limits, client)
 	for range 2 {
 		if err := h.s.runNotify(t.Context()); err != nil {

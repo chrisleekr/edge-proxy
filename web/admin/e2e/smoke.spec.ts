@@ -826,6 +826,29 @@ test('turning autopilot off asks for a reason, and the audit log keeps it', asyn
   await expect(page.getByRole('row').filter({ hasText: 'changed autopilot settings' }).first()).toContainText('Blocking checkout for a partner');
 });
 
+test('a model price with a blank rate is refused at that field, and a full one is added', async () => {
+  await page.goto('/autopilot');
+  const form = page.locator('form').filter({ has: page.getByRole('heading', { name: 'Add a price', exact: true }) });
+  // Page-rooted, since a has filter looks for it inside each div.
+  const rate = (name: string) => page.getByRole('spinbutton', { name: new RegExp(`^${name}`) });
+  // Not the smoke runner's model, whose cases stay unpriced.
+  await form.getByLabel('Model ID').fill('claude-haiku-5-5');
+  await rate('Input').fill('1');
+  await rate('Output').fill('5');
+  await rate('Cache read').fill('0.1');
+  await form.getByRole('button', { name: 'Add price' }).click();
+  await expect(form.locator('div').filter({ has: rate('Cache write') }).last().getByRole('alert')).toHaveText('is required');
+  await rate('Cache write').fill('1.25');
+  await form.getByRole('button', { name: 'Add price' }).click();
+  await expect(page.getByRole('row').filter({ hasText: 'claude-haiku-5-5' })).toContainText('$1.25');
+});
+
+test('the audit log files a model price under Settings', async () => {
+  await page.goto('/audit');
+  await page.getByRole('group', { name: 'Category' }).getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('cell', { name: 'settings.autopilot_price' }).first()).toBeVisible();
+});
+
 test('at 1280 pixels wide no page scrolls sideways or has a serious accessibility problem', async () => {
   const size = page.viewportSize()!;
   await page.setViewportSize({ width: 1280, height: 800 });

@@ -82,7 +82,7 @@ export const said: Record<string, string> = {
 const categories: [string, string[]][] = [
   ['Releases', ['config.publish', 'config.revert', 'config.rollback', 'config.import', 'config.overlay_publish', 'canary.step', 'canary.promote', 'canary.abort', 'guard.rollback', 'guard.canary_abort', 'guard.alert']],
   ['Draft', ['config.save', 'config.rebase', 'config.copy_to_draft', 'config.adopt', 'config.export']],
-  ['Settings', ['settings.guard', 'settings.notifications', 'settings.autopilot']],
+  ['Settings', ['settings.guard', 'settings.notifications', 'settings.autopilot', 'settings.autopilot_price']],
   ['Anomalies', ['anomaly.fire', 'anomaly.resolve']],
   ['Users and tokens', ['user.create', 'user.disable', 'user.roles', 'token.create', 'token.revoke', 'auth.password.change']],
   ['Sign-ins', ['auth.login.success', 'auth.login.failure', 'auth.logout']],

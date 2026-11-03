@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { api, type Me } from './api';
+import { meQuery } from './api';
 
 // LogValues fill a LOG_SEARCH_URL template: a time window in epoch
 // milliseconds, and a status code and host where the page has one.
@@ -38,7 +38,7 @@ export function logSearchURL(template: string, v: LogValues): string | undefined
 // undefined when LOG_SEARCH_URL is not set. The signed-in user is already
 // fetched, so this reads the cached answer.
 export function useLogSearch() {
-  const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me'), retry: false });
+  const me = useQuery(meQuery);
   const template = me.data?.log_search_url;
   return (v: LogValues) => (template ? logSearchURL(template, v) : undefined);
 }
