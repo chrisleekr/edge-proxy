@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/chrisleekr/edge-proxy/compare/v1.1.0...v1.1.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **loadtest:** replace config_rules in the autopilot load-full setup ([#21](https://github.com/chrisleekr/edge-proxy/issues/21)) ([feeabbb](https://github.com/chrisleekr/edge-proxy/commit/feeabbb27e5fb5baf6719ae1485952859ea95005))
+
 ## [1.1.0](https://github.com/chrisleekr/edge-proxy/compare/v1.0.0...v1.1.0) (2026-11-03)
 
 
