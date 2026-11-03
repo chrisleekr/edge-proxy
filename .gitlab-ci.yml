@@ -25,7 +25,7 @@ variables:
   PLAYWRIGHT_BROWSERS_PATH: $CI_PROJECT_DIR/.cache/ms-playwright
 
 default:
-  image: golang:1.27.3@sha256:957861185dbf29d93668ace41e011d091c6e779953d47f0316ef2cc58e28fe2b
+  image: golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
   # Lets auto-cancel stop a superseded pipeline.
   interruptible: true
   # One cache per job: race, fuzz and cover builds differ, so a shared key
@@ -45,7 +45,7 @@ lint:
 # Docker for testcontainers: tests and Valkey benchmarks start real Valkey.
 .docker: &docker
   services:
-    - name: docker:29.9.1-dind@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
+    - name: docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
       alias: docker
       # TLS off so dind starts without certificates (testcontainers GitLab guide).
       command: ["--tls=false"]
@@ -91,7 +91,7 @@ commits:
 
 docs:
   stage: check
-  image: ghcr.io/astral-sh/uv:0.13.4-python3.12-alpine@sha256:9033906810b07383055e7b59907ab2a534f6356e5ab91de14d753420fac345b6
+  image: ghcr.io/astral-sh/uv:0.13.7-python3.12-alpine@sha256:aef1a1327a732e74892765e22fa528499eca3f828140a66ed46b2f8df51bd0dc
   cache: []
   script:
     - ./scripts/ci/docs.sh
@@ -125,7 +125,7 @@ autopilot:
 # POSIX sh for it.
 load:
   stage: check
-  image: docker:29.9.1@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
+  image: docker:29.9.2@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
   <<: *docker
   cache: []
   script:
@@ -140,7 +140,7 @@ load:
 # schedule before a release.
 load-full:
   stage: check
-  image: docker:29.9.1@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
+  image: docker:29.9.2@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
   <<: *docker
   timeout: 3h
   cache: []
@@ -159,13 +159,13 @@ load-full:
 # local build and smoke test, so no dev tags are pushed.
 publish-latest:
   stage: publish
-  image: docker:29.9.1@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
+  image: docker:29.9.2@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
   interruptible: false
   cache: []
   # Its own TLS daemon: this job sends registry credentials, unlike the test
   # jobs that share the plain-TCP one.
   services:
-    - name: docker:29.9.1-dind@sha256:3e5756e2b6dad6a5f1f5deacf0a19f9eaa2581b76ae092b2d4a118162e1d4d4e
+    - name: docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376
