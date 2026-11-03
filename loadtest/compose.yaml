@@ -111,7 +111,7 @@ configs:
 services:
   # Receives the edges' spans and counts them; nothing is stored.
   collector:
-    image: otel/opentelemetry-collector-contrib:0.163.1@sha256:1175b03003053962012f5a231f5567f66a3e8fdb960c7835c0e48f7aa1555806
+    image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
     configs: [{ source: collector, target: /etc/otelcol-contrib/config.yaml }]
 
   postgres:
@@ -119,7 +119,7 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        FROM postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
         COPY postgres-init.sql /docker-entrypoint-initdb.d/init.sql
     environment: { POSTGRES_PASSWORD: postgres }
     healthcheck:
@@ -130,7 +130,7 @@ services:
       retries: 30
 
   valkey:
-    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
     # Rate-limit state has TTLs and needs no persistence.
     command: [valkey-server, --save, "", --appendonly, "no"]
     healthcheck:
@@ -194,7 +194,7 @@ services:
   # make demo only: Routes in admin is built from these lines. It reads
   # Docker's socket to find edge-1's output, which a load test never needs.
   log-shipper:
-    image: timberio/vector:0.60.0-distroless-libc@sha256:a9ed9a4710bdc2efa66e94c1e8edc7b439709e6e50079f1e1b2b1bf479d387da
+    image: timberio/vector:0.61.0-distroless-libc@sha256:1a3451978644d5cd4b99a0b28c990791e2f7e1efbea4184122f1c59a56448143
     profiles: [demo]
     command: [--config, /etc/vector/vector.yaml]
     configs: [{ source: vector, target: /etc/vector/vector.yaml }]
@@ -237,7 +237,7 @@ services:
   # Three-shard Valkey cluster, fixed IPs because nodes
   # announce addresses, not names.
   valkey-c1: &cluster-node
-    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
     profiles: [cluster]
     command: [valkey-server, --cluster-enabled, "yes", --cluster-require-full-coverage, "no", --save, "", --appendonly, "no"]
     networks: { default: { ipv4_address: 10.77.0.21 } }
@@ -248,7 +248,7 @@ services:
     <<: *cluster-node
     networks: { default: { ipv4_address: 10.77.0.23 } }
   valkey-cluster-init:
-    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
     profiles: [cluster]
     depends_on: [valkey-c1, valkey-c2, valkey-c3]
     command: [sh, -c, "sleep 2 && valkey-cli --cluster create 10.77.0.21:6379 10.77.0.22:6379 10.77.0.23:6379 --cluster-replicas 0 --cluster-yes"]
@@ -258,7 +258,7 @@ services:
     build:
       context: ./k6
       dockerfile_inline: |
-        FROM grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34
+        FROM grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8
         COPY . /scripts
     profiles: [k6]
     depends_on: [edge-1, edge-2, edge-3]
