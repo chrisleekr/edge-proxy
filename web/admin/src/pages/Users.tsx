@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useState } from 'react';
-import { api, type Me } from '../api';
+import { api, meQuery } from '../api';
 import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Notice, Input, Page, Table, when } from '../ui';
 
 interface User {
@@ -114,7 +114,7 @@ function RoleEditor({ user, self }: { user: User; self: boolean }) {
 function UserList() {
   const qc = useQueryClient();
   const users = useQuery({ queryKey: ['users'], queryFn: () => api<User[]>('GET', '/api/users') });
-  const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me') });
+  const me = useQuery(meQuery);
   const disable = useMutation({ mutationFn: (id: string) => api('POST', `/api/users/${id}/disable`), onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }) });
   const [form, setForm] = useState({ username: '', email: '', password: '', roles: ['viewer'] });
   const create = useMutation({
@@ -198,7 +198,7 @@ function Tokens() {
   const revoke = useMutation({ mutationFn: (id: string) => api('DELETE', `/api/tokens/${id}`), onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }) });
   const [form, setForm] = useState({ name: '', kind: 'edge', scopes: [] as string[], expires_in: '' });
   // A token can hold only permissions its creator has.
-  const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me') });
+  const me = useQuery(meQuery);
   const create = useMutation({
     // Scopes stay in the form when the kind changes, and edge tokens refuse them.
     mutationFn: () => api<{ token: string }>('POST', '/api/tokens', form.kind === 'user' ? form : { ...form, scopes: [] }),

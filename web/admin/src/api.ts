@@ -1,3 +1,5 @@
+import { useQuery } from '@tanstack/react-query';
+
 // Types mirror the admin API (internal/admin). Configs are passed through
 // as JSON; the server validates every save.
 
@@ -10,6 +12,8 @@ export interface FieldDef {
   keyed: boolean;
   phases: Phase[];
   available: boolean;
+  // Exact fields hold names compared whole: only eq, ne, in and not_in apply.
+  exact: boolean;
 }
 
 export interface OpDef {
@@ -17,6 +21,7 @@ export interface OpDef {
   label: string;
   list: boolean;
   no_value: boolean;
+  negates?: string;
   types: string[];
 }
 
@@ -35,6 +40,9 @@ export interface RuleChoices {
   content_types: string[];
   jwt_algorithms: string[];
   methods: string[];
+  block_modes: string[];
+  distinct_of_kinds: string[];
+  signals: { name: string; needs?: string[] }[];
 }
 
 export interface Schema {
@@ -63,6 +71,8 @@ export interface Rendered {
 export interface Me {
   username: string;
   permissions: string[];
+  // The deployment's LOG_SEARCH_URL template; absent when it is not set.
+  log_search_url?: string;
 }
 
 // Json is a value the server defines and validates; the UI passes it
@@ -87,7 +97,7 @@ export interface Rule {
 export interface Config {
   schema: number;
   version: number;
-  kill_switch: { rate_limit: boolean; auth: boolean };
+  kill_switch: { rate_limit: boolean; auth: boolean; block?: boolean };
   global: JsonObject & { defaults: JsonObject };
   auth: { issuers: Json[] | null; default_accepted: string[] | null };
   config_rules: Rule[] | null;
@@ -108,6 +118,10 @@ export interface Draft {
   revision: number;
   updated_by: string;
   updated_at: string;
+  // overlay is the active version's autopilot rules, which the draft does
+  // not hold; adopted lists those adopted since the last publish.
+  overlay: Rule[];
+  adopted: string[];
 }
 
 export interface Saved {
@@ -184,3 +198,13 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
 }
 
 export const etag = (revision: number) => `"${revision}"`;
+
+// meQuery is the signed-in user; App watches it to show sign in.
+export const meQuery = { queryKey: ['me'], queryFn: () => api<Me>('GET', '/api/auth/me'), retry: false };
+
+// useCan says whether the signed-in role holds a permission, from the
+// cached user, so any screen can check one without props.
+export function useCan() {
+  const me = useQuery(meQuery);
+  return (p: string) => !!me.data?.permissions.includes(p);
+}

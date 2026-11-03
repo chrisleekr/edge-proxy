@@ -97,6 +97,8 @@ The same rule with `and ip.src in {"203.0.113.0/24"}` added is refused. Autopilo
 
 **Autopilot**, under **Operate**, needs `autopilot.read`. It refreshes every 30 seconds. **Memory** opens the autopilot's [notes](#the-memory-pages), and, with `stats.read`, the range picker sets the range of the live rules' counts.
 
+![Autopilot](../assets/screenshots/autopilot.png)
+
 - **Status:** the mode, how many cases are open, each runner seen in the last day with its version, the providers it holds a credential for and when it was last seen, and any warning, such as a model whose provider no connected runner holds. When no runner was seen in the last 2 minutes it says so: nothing new is investigated, and live rules run until they expire. Three budgets show what is in use: **Enforce rules** (`max_enforcing`), **Sensors** (`max_sensors`) and **Cases started this hour** (`cases_per_hour`). With `settings.manage`, **Turn autopilot off** is the [kill switch](#turning-it-off).
 - **Find an autopilot rule** narrows **Live rules** to the rules whose ID contains what you type, and **Cases** to the cases opened on exactly that rule ID. An autopilot rule's ID on **Rules** links here with it filled in.
 - **Live rules:** each proposed, observing or enforcing rule, as a sensor or an enforce rule, with its condition as admin renders it, its limit and key, and when it expires. Once an enforce rule has been measured, it shows the share of the requests it checked that were over its limit while it only logged; the edges count every request, so the share is exact. With `stats.read`, each rule also shows how many requests it found over its limit in the picked range while logging and while blocking, with a sparkline of each; the counts are exact. A rule's ID opens the case that made it.
@@ -119,6 +121,8 @@ How the enforce rules that ended in the last 7 days turned out, one row per mode
 
 A case's page reads top to bottom as the case happened. It refreshes every 2 seconds while the case is open or one of its rules waits to publish.
 
+![A case](../assets/screenshots/autopilot-case.png)
+
 - **Trigger:** what opened it, its question, who opened it and when, and its state.
 - **Evidence:** for each proposal, the model's rationale and the evidence it cited, as it wrote them.
 - **Tool calls:** every MCP call the case's runs made, in order, as admin recorded it. Each is closed until opened, and shows the arguments and admin's answer or refusal, and how long it took. Admin's answer needs both `stats.read` and `config.read`, and is hidden without either one, with the permissions it needs. A [connector](#external-metrics-and-logs) call's answer also needs `autopilot.manage`; hidden, it shows neither its arguments nor its refusal, since its query and error text are part of what it read. A call over 64 KiB is kept only as its size and SHA-256, and shows just those.
@@ -131,7 +135,7 @@ A case's page reads top to bottom as the case happened. It refreshes every 2 sec
 
 **Investigate**, with `autopilot.manage`, opens a case and this page: on a rule's editor, on a route's page, and on an open anomaly on **Notifications**. It takes an optional question.
 
-Find opens one of the latest 100 cases by `Case N`, and one of the newest 500 notes by `Note N` or words from the first 80 characters of its statement.
+[Find](dashboard.md#find) opens one of the latest 100 cases by `Case N`, and one of the newest 500 notes by `Note N` or words from the first 80 characters of its statement.
 
 ## Settings
 
@@ -315,6 +319,8 @@ Notes are kept in `autopilot_notes`, with every change in `autopilot_note_revisi
 
 **Memory**, from the Autopilot page, lists the newest 500 notes, newest first, with their trust, kind, claim in words, statement and when they were written. **Trust** narrows it to one level. A hypothesis has no claim and reads as one about its scope. No person writes notes: they come only from runs, through the gate.
 
+![Memory](../assets/screenshots/autopilot-memory.png)
+
 A note's page has:
 
 - **Claim:** its trust, kind and basis (`observed`, whose claim admin checks, or `hypothesis`), its scope, the claim in words, its effect and anchor, the statement and rationale the model wrote, and the case that wrote it.
@@ -324,6 +330,8 @@ A note's page has:
 - **Uses:** the latest 200 times a run or admin's checks read it, whether its claim matched and the value found.
 - **Blast radius:** the cases served it, the proposals that cited it and the rules still enforcing because of them.
 - **History:** every revision, with who made it and why.
+
+![A note](../assets/screenshots/autopilot-note.png)
 
 With `autopilot.manage`, **Retract** asks for a reason of up to 500 characters and is offered while the note is unconfirmed, confirmed or dormant. **Re-evaluate** opens an investigate case on each rule still enforcing because of it, and shows admin's reason when it can't, such as no rule citing it.
 

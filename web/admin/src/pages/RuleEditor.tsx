@@ -1,14 +1,51 @@
 import { useQuery } from '@tanstack/react-query';
 import { useContext, useEffect, useState } from 'react';
 import type { RuleGroupType, RuleType } from 'react-querybuilder';
-import { api, type Checked, type Config, type Issue, type Json, type JsonObject, type Rendered, type Rule, type Schema } from '../api';
+import { api, type Checked, type Config, type Issue, type Json, type JsonObject, type Rendered, type Rule, type Schema, useCan } from '../api';
 import { useDraft } from '../draft';
 import { phaseOf, phases, rulesOf } from '../phases';
-import { navigate, useLeaveGuard } from '../router';
+import { Link, navigate, useLeaveGuard } from '../router';
 import { RuleBuilder, toAST, usePreview } from '../RuleBuilder';
 import { Errors, RuleForm } from '../RuleForms';
 import { Button, CanWrite, Card, CodeEditor, ConfirmButton, Editable, ErrorBox, Hint, Input, Issues, JsonEditor, NotFound, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
+import { Investigate } from './Autopilot';
 import { RuleHistory } from './Versions';
+import { RangePicker, useRange } from './Fleet';
+import { anomaliesQuery, label, stateWords } from './Notifications';
+import { Live } from './Rules';
+
+// LiveCard shows what a rule in the draft did over the picked range, and any
+// open anomaly on it, before its settings.
+function LiveCard({ id }: { id: string }) {
+  const r = useRange();
+  const anomalies = useQuery(anomaliesQuery);
+  const open = (anomalies.data?.anomalies ?? []).filter((a) => a.rule === id && a.state !== 'resolved');
+  return (
+    <Card title="Live" region info="Counts from every edge, for the version each request was served by. Every request is counted, not sampled. A rule not yet published shows 0 matched.">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {r.q.data ? <Live r={r} id={id} /> : <ErrorBox error={r.q.error} />}
+          <RangePicker r={r} />
+        </div>
+        {open.length > 0 && (
+          <ul className="flex flex-col gap-1 text-sm">
+            {open.map((a) => (
+              <li key={a.id}>
+                <span className="font-medium text-heading">
+                  {stateWords(a)}: {label(a.signal)}
+                </span>{' '}
+                <span className="text-body">{a.summary}.</span>{' '}
+                <Link to="/notifications" className="font-medium text-heading underline">
+                  Notifications
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Card>
+  );
+}
 
 // asGroup wraps a single-condition expression so the builder shows a row.
 // The server's AST uses the builder's group and rule shapes.
@@ -76,6 +113,7 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
   const p = phaseOf(phase);
   const d = useDraft();
   const canWrite = useContext(CanWrite);
+  const stats = useCan()('stats.read');
   const schema = useQuery({ queryKey: ['schema'], queryFn: () => api<Schema>('GET', '/api/expr/schema'), staleTime: Infinity });
   const existing = p && rulesOf(d.config, p.key).find((r) => r.id === id);
   const [ruleID, setRuleID] = useState(existing?.id ?? '');
@@ -197,6 +235,7 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
               Delete rule
             </ConfirmButton>
           )}
+          {existing && <Investigate target={{ rule: existing.id }} name={existing.id} />}
           <Button onClick={() => navigate('/rules')}>{canWrite ? 'Cancel' : 'Back to rules'}</Button>
           {canWrite && (
             <Button variant="primary" disabled={!!blocked} onClick={() => void apply()}>
@@ -207,6 +246,7 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
       }
     >
       <ReadOnlyNote />
+      {existing && stats && <LiveCard id={existing.id} />}
       <Editable>
         {from && (
           <Notice tone="green">

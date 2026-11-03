@@ -91,22 +91,54 @@ export function Page({ title, info, actions, children }: { title: string; info?:
   );
 }
 
-export function Card({ title, intro, info, children }: { title?: string; intro?: ReactNode; info?: ReactNode; children: ReactNode }) {
+// Card is a titled region. intro explains it and opens from the title's
+// Info, so the card leads with its content; note stays on screen, for a
+// status or warning that must be read. A card without a title shows intro.
+// region makes it a landmark named by its title. It is off by default: a
+// region's name is also a label, which would clash with fields named alike.
+export function Card({
+  title,
+  intro,
+  note,
+  info,
+  region,
+  children,
+}: {
+  title?: string;
+  intro?: ReactNode;
+  note?: ReactNode;
+  info?: ReactNode;
+  region?: boolean;
+  children: ReactNode;
+}) {
+  const id = useId();
+  const tip = intro && info ? (
+    <>
+      {intro} {info}
+    </>
+  ) : (
+    (intro ?? info)
+  );
   return (
-    <div className="rounded-card bg-panel p-6 shadow-card">
-      {title && <Title info={info} className="mb-3">{title}</Title>}
-      {intro && <p className="mb-3 max-w-prose text-body">{intro}</p>}
+    <section aria-labelledby={region ? id : undefined} className="rounded-card bg-panel p-6 shadow-card">
+      {title && (
+        <Title id={id} info={tip} className="mb-3">
+          {title}
+        </Title>
+      )}
+      {!title && intro && <p className="mb-3 max-w-prose text-body">{intro}</p>}
+      {note && <p className="mb-3 max-w-prose text-body">{note}</p>}
       {children}
-    </div>
+    </section>
   );
 }
 
 // Title is a section heading with an optional Info beside it, outside the
 // heading so the heading's name stays its text.
-export function Title({ info, className = '', children }: { info?: ReactNode; className?: string; children: string }) {
+export function Title({ id, info, className = '', children }: { id?: string; info?: ReactNode; className?: string; children: string }) {
   return (
     <div className={`flex items-center gap-2 ${className}`}>
-      <h2>{children}</h2>
+      <h2 id={id}>{children}</h2>
       {info && <Info label={children}>{info}</Info>}
     </div>
   );

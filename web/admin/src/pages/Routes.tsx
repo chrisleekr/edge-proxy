@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useMemo, useState } from 'react';
 import { api, type Config, type Draft, type Rule, type VersionDetail } from '../api';
-import { Link, navigate } from '../router';
+import { Link, navigate, useSearch } from '../router';
 import { Badge, Button, Card, ConfirmButton, ErrorBox, Input, Modal, Notice, Page, Pending, Table, Title, ago, when } from '../ui';
-import { count } from './Fleet';
+import { Investigate } from './Autopilot';
+import { LogLink, useLogSearch } from '../logSearch';
+import { type Mark, causeStatus, causeWords, clock, codeName, count, Key, Markers, MarkKeys, RangeSelect, ranges, statusOf, useMarks, useRangeKey } from './Fleet';
 import { summary } from './Rules';
 import { useVersions } from './Publish';
 
@@ -50,6 +52,10 @@ interface RoutePattern {
 }
 
 interface RouteDetailData extends RouteStats {
+  // Answers by status code, weighted like status, and the edge's upstream
+  // failures by cause.
+  status_codes: Record<string, number>;
+  upstream_errors: Record<string, number>;
   since: string;
   series: {
     hour: string;
@@ -84,6 +90,7 @@ interface Flow {
       body_limit: number;
       upstream_timeout: string;
       ratelimit_headers: boolean;
+      block: string;
     };
   };
   rules: {
@@ -100,12 +107,15 @@ const OTHER = '*';
 const decisionWords: Record<string, string> = {
   allow: 'Forwarded to the upstream',
   rate_limited: 'Blocked by a rate limit rule',
+  blocked: 'Blocked by a config rule',
+  would_block: 'Forwarded; a log only config rule would block it',
   backstop: 'Blocked by the per-edge backstop',
   auth: 'Refused: missing or invalid token',
   rate_limit_key: 'Refused: a rate limit key was missing',
   rate_limit_unavailable: 'Refused: rate limits could not be checked',
   payload_too_large: 'Refused: body too large',
   body_timeout: 'Refused: body sent too slowly',
+  body_invalid: 'Refused: body could not be read',
   overloaded: 'Shed: the edge was at capacity',
   streams_overloaded: 'Shed: too many open streams',
   upstream_timeout: 'Upstream did not answer in time',
@@ -132,15 +142,10 @@ const rate = (n: number, d: number) => {
 // once would make every filter keystroke slow.
 const page = 100;
 
-const ranges = [
-  [24, 'last 24 hours'],
-  [168, 'last 7 days'],
-  [720, 'last 30 days'],
-] as const;
-
 // Decisions that are not the edge refusing or shedding: the request was
-// forwarded, or limited (its own column), or the upstream or client failed it.
-const notRefused = new Set(['allow', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
+// forwarded, also by a log only rule, or limited (its own column), or the
+// upstream or client failed it.
+const notRefused = new Set(['allow', 'would_block', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
 
 // Derived figures for one route, shared by the list and the detail page.
 function figures(r: RouteStats) {
@@ -156,36 +161,17 @@ function figures(r: RouteStats) {
 
 const shapeKeys = (shape: string) => (shape === '' ? [] : shape.split('&'));
 
-// useSearchState keeps a page's filters in the address, so a filtered view
-// can be bookmarked and shared. It replaces the entry: filtering is not a
-// step back should undo.
-function useSearchState() {
-  const [params, setParams] = useState(() => new URLSearchParams(window.location.search));
-  const set = (changes: Record<string, string>) => {
-    const p = new URLSearchParams(params);
-    for (const [k, v] of Object.entries(changes)) {
-      if (v) p.set(k, v);
-      else p.delete(k);
-    }
-    setParams(p);
-    window.history.replaceState(null, '', `${window.location.pathname}${p.size ? `?${p}` : ''}`);
-  };
-  return [params, set] as const;
+// useHours is the picked range in whole hours, as routes are counted. One
+// more than the range, so the hour in progress and the hour the range
+// starts in are both whole; 30 days is the most kept.
+function useHours() {
+  const [key, pick] = useRangeKey();
+  const { minutes, label } = ranges[key];
+  return { key, pick, label, hours: Math.min(720, minutes / 60 + 1) };
 }
 
-function RangeSelect({ hours, onChange }: { hours: number; onChange: (h: number) => void }) {
-  return (
-    <select aria-label="Time range" value={hours} onChange={(e) => onChange(Number(e.target.value))}>
-      {ranges.map(([h, label]) => (
-        <option key={h} value={h}>
-          {label[0]!.toUpperCase() + label.slice(1)}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-const phraseOf = (hours: number) => `in the ${ranges.find(([h]) => h === hours)?.[1] ?? `last ${hours} hours`}`;
+// phraseOf names the window, from the start the API says it counted.
+const phraseOf = (label: string, hours: number, since: string) => `in the ${label} (since ${clock(Date.parse(since), hours > 24)})`;
 
 // RouteName shows a route the way people say it: method, then host and path.
 // Placeholders are styled so "{id}" reads as "any ID", not literal text.
@@ -223,22 +209,44 @@ const flags = [
 ] as const;
 
 // Columns of the routes table; sortable ones name the figure they sort by.
-const columns = ['Route', 'Host', 'Query shapes', 'Requests', '5xx', 'Rate limited', 'Refused or shed', 'p95', 'Config rules', 'Last seen'];
+// Outcome sorts by 5xx share, the part most worth finding.
+const columns = ['Route', 'Requests', 'Outcome', 'p95', 'Last seen'];
 const sortKeys: Record<number, string> = {
   0: 'route',
-  1: 'host',
-  3: 'requests',
-  4: 'errors',
-  5: 'limited',
-  6: 'rejected',
-  7: 'p95',
-  9: 'last',
+  1: 'requests',
+  2: 'outcome',
+  3: 'p95',
+  4: 'last',
 };
+
+// Outcome is one bar of a route's requests by the edge's decision:
+// forwarded, rate limited, and refused or shed. A 5xx can come from any of
+// them (a 503 when shed, a 502 from the upstream), so the text gives its
+// share apart from the bar.
+function Outcome({ r, f }: { r: RouteStats; f: ReturnType<typeof figures> }) {
+  const forwarded = Math.max(0, r.requests - f.limited - f.rejected);
+  const parts = [
+    ['forwarded', forwarded, 'bg-heading/75'],
+    ['rate limited', f.limited, 'bg-warning'],
+    ['refused or shed', f.rejected, 'bg-muted'],
+  ] as const;
+  const total = Math.max(1, forwarded + f.limited + f.rejected);
+  const text = `${parts.map(([name, n]) => `${rate(n, r.requests)} ${name}`).join(', ')}; ${rate(f.errors, r.requests)} answered 5xx`;
+  return (
+    <span title={text} className="flex h-2.5 w-32 overflow-hidden rounded-xs bg-soft">
+      <span className="sr-only">{text}</span>
+      {parts.map(([name, n, color]) => (
+        <span key={name} aria-hidden className={color} style={{ width: `${(100 * n) / total}%` }} />
+      ))}
+    </span>
+  );
+}
 
 export function Routes({ can }: { can: (p: string) => boolean }) {
   const qc = useQueryClient();
-  const [params, set] = useSearchState();
-  const hours = Number(params.get('hours')) || 24;
+  const [params, set] = useSearch();
+  const range = useHours();
+  const { hours } = range;
   const search = params.get('q') ?? '';
   const host = params.get('host') ?? '';
   const method = params.get('method') ?? '';
@@ -254,7 +262,7 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
   const routes = q.data?.routes;
   // "Seen in the last hour" is relative to the data's fetch, not to render.
   const asOf = q.dataUpdatedAt;
-  const phrase = phraseOf(hours);
+  const phrase = q.data ? phraseOf(range.label, hours, q.data.since) : `in the ${range.label}`;
 
   const hosts = useMemo(() => [...new Set(routes?.map((r) => r.host))].sort(), [routes]);
   const methods = useMemo(() => [...new Set(routes?.map((r) => r.method))].sort(), [routes]);
@@ -278,11 +286,8 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
     const key = ({ r, f }: (typeof list)[number]): number | string =>
       ({
         route: r.template,
-        host: r.host,
         requests: r.requests,
-        errors: f.errors / r.requests,
-        limited: f.limited / r.requests,
-        rejected: f.rejected / r.requests,
+        outcome: f.errors / r.requests,
         p95: r.p95_ms,
         last: Date.parse(r.last_seen),
       })[sortBy] ?? r.requests;
@@ -300,11 +305,11 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
     else next.add(k);
     set({ show: [...next].join(',') });
   };
-  const sortCol = Number(Object.entries(sortKeys).find(([, k]) => k === sortBy)?.[0] ?? 3);
+  const sortCol = Number(Object.entries(sortKeys).find(([, k]) => k === sortBy)?.[0] ?? 1);
   const onSort = (col: number) => {
     const k = sortKeys[col]!;
     // Names sort A to Z first; figures largest first.
-    const firstAsc = k === 'route' || k === 'host';
+    const firstAsc = k === 'route';
     set({
       sort: k === 'requests' ? '' : k,
       dir: k === sortBy ? (asc ? '' : 'asc') : firstAsc ? 'asc' : '',
@@ -328,7 +333,7 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
       info="Built from the edges' access logs, which the log shipper posts to admin, so the edge does no extra work for this page. A route is a host, a method and a path where IDs, UUIDs and tokens are replaced by placeholders such as {id}."
       actions={
         <>
-          <RangeSelect hours={hours} onChange={(h) => set({ hours: h === 24 ? '' : String(h) })} />
+          <RangeSelect value={range.key} onChange={range.pick} />
           {can('routes.manage') && routes && routes.length > 0 && (
             <ConfirmButton
               variant="danger"
@@ -424,7 +429,7 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
       ) : (
         <Table
           head={columns}
-          num={[3, 4, 5, 6, 7]}
+          num={[1, 3]}
           sort={{
             by: sortCol,
             desc: !asc,
@@ -434,7 +439,6 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
           empty={filtered ? 'No route matches these filters.' : `No route had traffic ${phrase}.`}
         >
           {rows.slice(0, shown).map(({ r, f }) => {
-            const shapes = Object.entries(r.query_shapes).sort((a, b) => b[1] - a[1]);
             return (
               <tr key={r.id}>
                 <td className="min-w-64">
@@ -444,32 +448,16 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
                       <Badge tone="amber">only errors so far</Badge>
                     </span>
                   )}
-                </td>
-                <td className="break-all">{r.host}</td>
-                <td>
-                  <Shapes shapes={shapes} total={r.requests} max={2} />
+                  <span className="block text-sm break-all text-muted">{r.host}</span>
                 </td>
                 <td className="text-right tabular-nums">
                   {r.estimated > 0 && <span title="Estimated from sampled access logs">≈ </span>}
                   {count(r.requests)}
                 </td>
-                <td className={`text-right tabular-nums ${f.errors ? 'text-danger' : ''}`}>{rate(f.errors, r.requests)}</td>
-                <td className={`text-right tabular-nums ${f.limited ? 'text-warning' : ''}`}>{rate(f.limited, r.requests)}</td>
-                <td className="text-right tabular-nums">{rate(f.rejected, r.requests)}</td>
-                <td className="text-right tabular-nums">{ms(r.p95_ms)}</td>
                 <td>
-                  {f.rules.length ? (
-                    <span className="flex flex-wrap gap-1">
-                      {f.rules.map((id) => (
-                        <code key={id} className="text-heading">
-                          {id}
-                        </code>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="text-muted">None</span>
-                  )}
+                  <Outcome r={r} f={f} />
                 </td>
+                <td className="text-right tabular-nums">{ms(r.p95_ms)}</td>
                 <td>
                   <time dateTime={r.last_seen} title={when(r.last_seen)}>
                     {ago(r.last_seen)}
@@ -529,22 +517,6 @@ function Coverage({ d, phrase }: { d: RouteList; phrase: string }) {
         </Notice>
       )}
     </div>
-  );
-}
-
-// Shapes lists a route's query shapes, the commonest first.
-function Shapes({ shapes, total, max }: { shapes: [string, number][]; total: number; max: number }) {
-  if (shapes.length === 1 && shapes[0]![0] === '') return <span className="text-muted">No query</span>;
-  return (
-    <span className="flex flex-col gap-0.5">
-      {shapes.slice(0, max).map(([s, n]) => (
-        <span key={s} className="flex flex-wrap items-center gap-1">
-          <QueryKeys shape={s} />
-          <span className="text-xs text-muted">{rate(n, total)}</span>
-        </span>
-      ))}
-      {shapes.length > max && <span className="text-xs text-muted">and {shapes.length - max} more</span>}
-    </span>
   );
 }
 
@@ -642,8 +614,11 @@ function Groupings({ can }: { can: (p: string) => boolean }) {
 
 export function RouteDetail({ id, can }: { id: number; can: (p: string) => boolean }) {
   const qc = useQueryClient();
-  const [params, set] = useSearchState();
-  const hours = Number(params.get('hours')) || 24;
+  const logs = useLogSearch();
+  const range = useHours();
+  const { hours } = range;
+  const [opened] = useState(Date.now);
+  const marks = useMarks(opened - hours * 3600_000);
   const q = useQuery({
     queryKey: ['route', id, hours],
     queryFn: () => api<RouteDetailData>('GET', `/api/observed-routes/${id}?hours=${hours}`),
@@ -669,15 +644,19 @@ export function RouteDetail({ id, can }: { id: number; can: (p: string) => boole
     );
   const r = q.data;
   const f = figures(r);
-  const phrase = phraseOf(hours);
+  const phrase = phraseOf(range.label, hours, r.since);
   const shapes = Object.entries(r.query_shapes).sort((a, b) => b[1] - a[1]);
   const decisions = Object.entries(r.decisions).sort((a, b) => b[1] - a[1]);
+  const codes = Object.entries(r.status_codes).sort((a, b) => b[1] - a[1]);
+  const failures = Object.entries(r.upstream_errors).sort((a, b) => b[1] - a[1]);
+  const lines = (status: string | undefined) => logs({ from: Date.parse(r.since), to: q.dataUpdatedAt, status, host: r.host });
   return (
     <Page
       title={`${r.method} ${r.host}${r.template}`}
       actions={
         <>
-          <RangeSelect hours={hours} onChange={(h) => set({ hours: h === 24 ? '' : String(h) })} />
+          <RangeSelect value={range.key} onChange={range.pick} />
+          <Investigate target={{ route_id: r.id }} name={`${r.method} ${r.host}${r.template}`} />
           {can('config.write') && (
             <Button variant="primary" onClick={() => setAdding(true)}>
               Add rule for this route
@@ -725,7 +704,7 @@ export function RouteDetail({ id, can }: { id: number; can: (p: string) => boole
       </p>
       {can('config.read') && <TrafficFlow id={r.id} r={r} />}
       <Card title={`Requests per hour, ${phrase}`}>
-        <HourBars r={r} hours={hours} />
+        <HourBars r={r} hours={hours} marks={marks} />
       </Card>
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="flex flex-col gap-2">
@@ -749,6 +728,40 @@ export function RouteDetail({ id, can }: { id: number; can: (p: string) => boole
             {decisions.map(([d, n]) => (
               <tr key={d}>
                 <td>{decisionName(d)}</td>
+                <td className="text-right tabular-nums">{count(n)}</td>
+                <td className="text-right tabular-nums">{rate(n, r.requests)}</td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+        <div className="flex flex-col gap-2">
+          <Title info="The status code of each answer, from the edge or the upstream, from the access log.">Answers by code</Title>
+          <Table head={['Status', 'Requests', 'Share']} num={[1, 2]} empty="No requests in this range.">
+            {codes.map(([c, n]) => (
+              <tr key={c}>
+                <td className="tabular-nums">
+                  <LogLink href={lines(statusOf(c))}>{codeName(c)}</LogLink>
+                </td>
+                {/* Only allowed answers below 500 are sampled. A 4xx can be the edge's exact refusal or a sampled upstream answer, so any code below 500 may include estimates. */}
+                <td className="text-right tabular-nums">
+                  {r.estimated > 0 && Number(c) < 500 && <span title="Includes estimates from sampled access logs">≈ </span>}
+                  {count(n)}
+                </td>
+                <td className="text-right tabular-nums">{rate(n, r.requests)}</td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+        <div className="flex flex-col gap-2">
+          <Title info="Why the edge could not get an answer from the upstream for this route, from the access log. Each is a 502 the edge sent, or 504 when the upstream took too long.">
+            Upstream failures
+          </Title>
+          <Table head={['Cause', 'Requests', 'Share']} num={[1, 2]} empty="The edge reached the upstream every time in this range.">
+            {failures.map(([c, n]) => (
+              <tr key={c}>
+                <td>
+                  <LogLink href={lines(causeStatus(c))}>{causeWords[c] ?? c}</LogLink>
+                </td>
                 <td className="text-right tabular-nums">{count(n)}</td>
                 <td className="text-right tabular-nums">{rate(n, r.requests)}</td>
               </tr>
@@ -801,11 +814,13 @@ function AddRule({ id, onClose }: { id: number; onClose: () => void }) {
 }
 
 // HourBars draws requests per hour, with 5xx and rate limited on top, so a
-// spike shows what it was. Ranges over a week draw a bar per day.
-function HourBars({ r, hours }: { r: RouteDetailData; hours: number }) {
+// spike shows what it was. Ranges over a week draw a bar per day, ending
+// with the hour in progress; the oldest hours short of a day are left out.
+function HourBars({ r, hours, marks }: { r: RouteDetailData; hours: number; marks: Mark[] }) {
   const per = hours > 168 ? 24 : 1;
-  const start = Date.parse(r.since);
-  const n = Math.ceil(hours / per);
+  const n = Math.floor(hours / per);
+  const start = Date.parse(r.since) + (hours % per) * 3600_000;
+  const [more, setMore] = useState(0);
   const bars = Array.from({ length: n }, (_, i) => ({
     t: start + i * per * 3600_000,
     requests: 0,
@@ -827,21 +842,14 @@ function HourBars({ r, hours }: { r: RouteDetailData; hours: number }) {
         <span>
           Peak {count(max)} per {per === 24 ? 'day' : 'hour'}
         </span>
-        <span className="flex gap-3">
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden className="size-2 rounded-xs bg-heading/75" />
-            Other
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden className="size-2 rounded-xs bg-warning" />
-            Rate limited
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden className="size-2 rounded-xs bg-danger" />
-            5xx
-          </span>
+        <span className="flex flex-wrap gap-3">
+          <Key className="bg-heading/75">Other</Key>
+          <Key className="bg-warning">Rate limited</Key>
+          <Key className="bg-danger">5xx</Key>
+          {marks.length > 0 && <MarkKeys more={more} />}
         </span>
       </figcaption>
+      <Markers marks={marks} from={start} to={start + n * per * 3600_000} reach="h-[8.5rem]" onMore={setMore} />
       <ol aria-label={`Requests per ${per === 24 ? 'day' : 'hour'}`} className="flex h-32 items-end gap-px border-b border-line">
         {bars.map((b) => {
           const rest = Math.max(0, b.requests - b.errors - b.limited);
@@ -1005,10 +1013,12 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
             Result: waiting up to {s.upstream_timeout || 'the default'} for the upstream, body limit{' '}
             {bytes(s.body_limit)}
             {s.cors_policy ? `, CORS policy ${s.cors_policy}` : ''}
-            {s.locale ? ', locale detected' : ''}.
+            {s.locale ? ', locale detected' : ''}
+            {s.block === 'block' ? ', answered 403 by a block setting' : s.block === 'log' ? ', logged as one a block setting would answer 403' : ''}.
           </p>
         </div>
       ),
+      seen: [share(d.blocked) && `${share(d.blocked)} were blocked`, share(d.would_block) && `${share(d.would_block)} would be blocked by a log only rule`].filter(Boolean).join('; ') || undefined,
     },
     {
       title: 'Backstop',

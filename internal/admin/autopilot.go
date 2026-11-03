@@ -819,15 +819,16 @@ func (s *Server) retireRule(w http.ResponseWriter, r *http.Request, p *principal
 	return nil
 }
 
-// priceView is one price row in USD per million tokens.
+// priceView is one price row in USD per million tokens. The rates are
+// pointers, so a rate left out of a new price is refused, not taken as $0.
 type priceView struct {
 	ID            int64     `json:"id"`
 	Provider      string    `json:"provider"`
 	Model         string    `json:"model"`
-	Input         float64   `json:"input_usd_per_mtok"`
-	Output        float64   `json:"output_usd_per_mtok"`
-	CacheRead     float64   `json:"cache_read_usd_per_mtok"`
-	CacheWrite    float64   `json:"cache_write_usd_per_mtok"`
+	Input         *float64  `json:"input_usd_per_mtok"`
+	Output        *float64  `json:"output_usd_per_mtok"`
+	CacheRead     *float64  `json:"cache_read_usd_per_mtok"`
+	CacheWrite    *float64  `json:"cache_write_usd_per_mtok"`
 	EffectiveFrom time.Time `json:"effective_from"`
 	Author        string    `json:"author"`
 }
@@ -876,10 +877,14 @@ func (s *Server) addPrice(w http.ResponseWriter, r *http.Request, p *principal) 
 	var micros [4]int64
 	for i, f := range []struct {
 		path string
-		v    float64
+		v    *float64
 	}{{"input_usd_per_mtok", in.Input}, {"output_usd_per_mtok", in.Output}, {"cache_read_usd_per_mtok", in.CacheRead}, {"cache_write_usd_per_mtok", in.CacheWrite}} {
+		if f.v == nil {
+			errs = append(errs, expr.Issue{Path: f.path, Msg: "is required"})
+			continue
+		}
 		var ok bool
-		if micros[i], ok = usdMicros(f.v, maxPriceUSD); !ok {
+		if micros[i], ok = usdMicros(*f.v, maxPriceUSD); !ok {
 			errs = append(errs, expr.Issue{Path: f.path, Msg: fmt.Sprintf("must be 0 to %d USD per million tokens", maxPriceUSD)})
 		}
 	}

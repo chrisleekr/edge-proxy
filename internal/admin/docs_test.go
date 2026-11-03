@@ -188,8 +188,8 @@ func TestDocsShowEveryScreenshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rendered []string
-	for _, m := range regexp.MustCompile(`\['([a-z-]+)', '/|shot\(page, '([a-z-]+)'`).FindAllStringSubmatch(string(spec), -1) {
-		rendered = append(rendered, m[1]+m[2]+".png")
+	for _, m := range regexp.MustCompile(`\['([a-z-]+)', '/|shot\(page, '([a-z-]+)'|toHaveScreenshot\('([a-z-]+)\.png'`).FindAllStringSubmatch(string(spec), -1) {
+		rendered = append(rendered, m[1]+m[2]+m[3]+".png")
 	}
 	files, err := os.ReadDir("../../docs/assets/screenshots")
 	if err != nil {
