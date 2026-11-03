@@ -4,6 +4,11 @@
     ".": {
       "release-type": "go",
       "include-component-in-tag": false,
+      "extra-files": [
+        { "type": "json", "path": "autopilot/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "autopilot/package-lock.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "autopilot/package-lock.json", "jsonpath": "$.packages[''].version" }
+      ],
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },

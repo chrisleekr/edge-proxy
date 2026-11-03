@@ -6,7 +6,7 @@ Three images, three deployables:
 |---|---|---|
 | `chrisleekr/edge-proxy` | The proxy. Public traffic arrives from your CDN or load balancer | Horizontally, at least 2 replicas across zones |
 | `chrisleekr/edge-proxy-admin` | Admin API and UI, background jobs | 1 or 2 replicas, internal network only |
-| `chrisleekr/edge-proxy-autopilot` | Optional. The autopilot runner: runs the model for autopilot cases, holding the model credentials | 1 replica, internal network only; it talks only to admin and the model provider |
+| `chrisleekr/edge-proxy-autopilot` | Optional. The [autopilot runner](autopilot.md): runs the model for autopilot cases, holding the model credentials | 1 replica, internal network only; it talks only to admin and the model provider |
 
 The edge goes between your CDN and the load balancer or gateway that already routes your services. It forwards every request there with `Host` unchanged, so routing stays where it is and the edge knows only that one address (`UPSTREAM_URL`):
 

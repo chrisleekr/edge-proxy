@@ -51,6 +51,10 @@ type mcpTool struct {
 }
 
 func object(props map[string]any, required ...string) map[string]any {
+	// MCP's Tool.inputSchema allows properties as an object or absent, never null.
+	if props == nil {
+		props = map[string]any{}
+	}
 	m := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
 	if required != nil {
 		m["required"] = required

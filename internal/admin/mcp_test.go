@@ -105,6 +105,17 @@ func TestMCPPermissions(t *testing.T) {
 			}
 		}
 	})
+	t.Run("every tool's input schema has properties as an object, as MCP requires", func(t *testing.T) {
+		res, err := sessions["the runner's token"].ListTools(t.Context(), &mcp.ListToolsParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range res.Tools {
+			if _, ok := tool.InputSchema.(map[string]any)["properties"].(map[string]any); !ok {
+				t.Errorf("%s: properties %v", tool.Name, tool.InputSchema.(map[string]any)["properties"])
+			}
+		}
+	})
 	t.Run("the runner's token can't call for a run that has finished", func(t *testing.T) {
 		status(t, agent.result(c.CaseID, resultBody(c.RunID, "benign", usage{Input: 10}, nil, 0)), 204)
 		if _, refused := callTool(t, sessions["the runner's token"], "get_case", nil); refused == "" {

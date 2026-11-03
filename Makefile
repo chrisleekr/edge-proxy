@@ -1,7 +1,7 @@
 # Plain `make` lists the targets.
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint vuln fuzz bench ui screenshots docs docs-serve container load load-full capacity capacity-max ci infra-up infra-down demo demo-down demo-traffic demo-outage
+.PHONY: help test lint vuln fuzz bench ui autopilot screenshots docs docs-serve container load load-full capacity capacity-max ci infra-up infra-down demo demo-autopilot demo-down demo-traffic demo-outage
 
 # Unit + integration tests, then the 100% edge coverage gate.
 test:
@@ -27,6 +27,10 @@ bench:
 ui:
 	./scripts/ci/ui.sh
 
+# Autopilot runner: lint, typecheck, unit tests, and the real runner against admin.
+autopilot:
+	./scripts/ci/autopilot.sh
+
 # Docs screenshots match the UI; `./scripts/ci/screenshots.sh update`
 # rewrites them after a deliberate UI change. Part of `make ui`.
 screenshots:
@@ -40,7 +44,7 @@ docs:
 docs-serve:
 	uv run --locked --group docs mkdocs serve
 
-# Edge, admin and load-test images; the edge must start from a bootstrap.
+# Edge, admin, runner and load-test images; the edge must start from a bootstrap.
 container:
 	./scripts/ci/image.sh
 
@@ -63,7 +67,7 @@ capacity-max:
 	./scripts/capacity-max.sh
 
 # Same gates CI runs, in order.
-ci: lint test fuzz bench vuln ui docs container load
+ci: lint test fuzz bench vuln ui autopilot docs container load
 
 # Local Valkey and Postgres for manual runs. Tests start their own containers.
 infra-up:
@@ -83,6 +87,12 @@ infra-down:
 demo:
 	cd loadtest && export TRUSTED_PROXIES=0.0.0.0/0,::/0 SEED_POLICY=demo VALKEY_TIMEOUT=$${VALKEY_TIMEOUT:-150ms} && docker compose -p edge-demo build && docker compose -p edge-demo up -d --wait collector edge-1 upstream log-shipper
 
+# Add the autopilot runner to the running demo (needs a model credential).
+# Export CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY first, or
+# OPENAI_API_KEY with an OpenAI model set on the Autopilot page.
+demo-autopilot:
+	cd loadtest && docker compose -p edge-demo --profile autopilot up -d --build autopilot
+
 # Send traffic to the running demo until Ctrl+C; watch it on the dashboard.
 # It exercises every rule, template, CORS policy and issuer in the demo
 # policy (loadtest/k6/demo.js). RATE per second (200), IPS client addresses (300), DURATION
@@ -100,7 +110,7 @@ demo-outage:
 
 # Stop the demo and delete its data; make demo starts it fresh.
 demo-down:
-	cd loadtest && docker compose -p edge-demo --profile demo down -v
+	cd loadtest && docker compose -p edge-demo --profile demo --profile autopilot down -v
 
 # This list: each target with the first line of its comment.
 help:
