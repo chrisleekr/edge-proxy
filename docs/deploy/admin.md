@@ -18,7 +18,7 @@ Environment variables only. The image's commands:
 | `AUDIT_HMAC_PREVIOUS_KEYS` | none | `id=base64,...` of retired keys, so older rows still verify |
 | `LISTEN_ADDR` | `:8081` | |
 | `ADMIN_INTERNAL_ADDR` | `:9091` | Serves only `GET /metrics` ([Admin metrics](../operate/monitoring.md#admin-metrics)), with no authentication. Never expose it publicly; let only your metrics scraper reach it. Admin exits at start if it can't listen here |
-| `DRAIN_DELAY` | `5s` | After SIGTERM, how long admin keeps serving before it stops accepting connections, so whatever routes to it (a Service, a load balancer) stops sending new ones first. Edge polls that land on a closed listener fail |
+| `DRAIN_DELAY` | `5s` | After SIGTERM, how long admin keeps serving before it stops accepting connections, so whatever routes to it (a Service, a load balancer) stops sending new ones first. Edge polls that land on a closed listener fail. Must be above zero |
 | `SESSION_IDLE_TIMEOUT` | `30m` | Sign-out after inactivity |
 | `SESSION_MAX_AGE` | `12h` | Sign-out regardless of activity |
 | `PASSWORD_BLOCKLIST_PATH` | none | File of refused passwords, one per line, matched case-insensitively |
