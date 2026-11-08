@@ -4,6 +4,7 @@ Terms used in the admin UI, the logs, the metrics and these docs. Each links to 
 
 | Term | Meaning |
 |---|---|
+| **Access rule** | A rule in the `config` phase: it chooses per-route settings such as auth, CORS and blocking. The admin UI calls these access rules. They are stored as `config_rules` and the phase key stays `config`, so config JSON, the API and expressions use those keys. See [Policy](../use/policy.md#phases) |
 | **Action** | What a rule does to the requests its expression matches: settings in `config`, `block` or `log` in `rate_limit`, header operations in `request_headers`. See [Policy](../use/policy.md#phases) |
 | **Adopt** | Copying an autopilot rule into the draft as your own rule, without its `ap-` prefix and expiry. The next publish drops the autopilot copy. See [Publish and roll back](../use/publishing.md#autopilot-rules) |
 | **Admin** | The internal service and UI that manage policy, store it in Postgres and serve it to edges. Never on the request path. See [Admin settings](../deploy/admin.md) |
@@ -15,7 +16,6 @@ Terms used in the admin UI, the logs, the metrics and these docs. Each links to 
 | **CDN** | Content delivery network, such as CloudFront or Cloudflare. It sits in front of the edge and sets the client-IP header. The edge trusts that header only from a peer in `TRUSTED_PROXIES`, the hop directly in front of it, usually the load balancer, not the CDN. See [Edge settings](../deploy/edge.md#client-ip-presets) |
 | **Client IP** | The IP the edge believes, read from `CLIENT_IP_SOURCE` and only from a peer in `TRUSTED_PROXIES`. Requests from other peers are rejected; the edge never falls back to the peer address. See [Edge settings](../deploy/edge.md#trust) |
 | **Cohort** | The requests served by one version. During a canary each request is in the `active` or `candidate` cohort (`edge.cohort` in the access log), and the guard compares the two. See [Monitoring](../operate/monitoring.md#logs) |
-| **Config test** | A stored synthetic request and the outcome you expect from it, run through the edge's own code. A failing test blocks publish. See [Policy](../use/policy.md#config-tests) |
 | **CORS / preflight** | Browser cross-origin rules / the `OPTIONS` request a browser sends before a cross-origin request. The edge answers preflights itself from a named CORS policy. See [Policy](../use/policy.md#cors) |
 | **Draft** | The one shared, unpublished copy of the policy that editors change. Every save is validated, and saves are guarded by revision; if the live version moved on, rebase the draft. See [Publish and roll back](../use/publishing.md#draft) |
 | **Edge** | The stateless proxy that takes traffic, enforces the policy and forwards to `UPSTREAM_URL`. Run several replicas. See [Edge settings](../deploy/edge.md) |
@@ -26,7 +26,7 @@ Terms used in the admin UI, the logs, the metrics and these docs. Each links to 
 | **Guard (rollback guard)** | Admin process that watches a canary, or a set window after a publish, and compares the new version with the old one. It rolls back or aborts on signals only a config change causes, and only alerts on the rest. See [Publish and roll back](../use/publishing.md#rollback-guard) |
 | **IdP** | Identity provider: the service that issues the JWTs the edge verifies |
 | **Ingress secret** | A header your CDN adds with a secret value (`INGRESS_SECRET_HEADER`). Requests without a matching value are rejected, and the header is removed before forwarding. See [Edge settings](../deploy/edge.md#trust) |
-| **Issuer** | A JWT issuer in settings: its `iss`, audiences, JWKS URL and algorithm. Config rules choose which issuers a route accepts. See [Policy](../use/policy.md#settings) |
+| **Issuer** | A JWT issuer in settings: its `iss`, audiences, JWKS URL and algorithm. Access rules choose which issuers a route accepts. See [Policy](../use/policy.md#settings) |
 | **JWKS / `kid`** | An issuer's public key set / the key ID in a token. Admin and edges fetch it through the SSRF guard, and an edge keeps the newest keys it has when the IdP is down. See [Runbooks](../operate/runbooks.md#identity-provider-down) |
 | **JWT** | JSON Web Token. Rules and rate-limit keys use claims only from a token that verified. See [Policy](../use/policy.md#settings) |
 | **Kill switch** | Settings that turn every rate-limit rule into `log`, or turn JWT checks off, once published. See [Rate limiting](../use/rate-limiting.md#emergency-switch) |
@@ -37,8 +37,9 @@ Terms used in the admin UI, the logs, the metrics and these docs. Each links to 
 | **Penalty** | On a blocking rate-limit rule, how long a key stays blocked after its first rejected request. Edges cache active penalties and answer them without calling Valkey. See [Rate limiting](../use/rate-limiting.md#penalty) |
 | **Phase** | A point in the request path where one kind of rule runs: `config`, `rate_limit` or `request_headers`. See [Policy](../use/policy.md#phases) |
 | **Policy** | Everything you edit: rules in phases, plus templates, CORS policies, issuers and settings. You change it as the draft and publish it as a version. See [Policy](../use/policy.md) |
+| **Policy test** | A stored synthetic request and the outcome you expect from it, run through the edge's own code. A failing test blocks publish. See [Policy](../use/policy.md#policy-tests) |
 | **POP** | Point of presence: one of a CDN's data centres. Vendors count rate limits per POP, server or region. See [Compared with vendors](../vendor-comparison.md) |
-| **Publish** | Turning the saved draft into a new version, after its config tests pass. Edges pick it up within a poll interval (`POLL_INTERVAL`). See [Publish and roll back](../use/publishing.md#publish) |
+| **Publish** | Turning the saved draft into a new version, after its policy tests pass. Edges pick it up within a poll interval (`POLL_INTERVAL`). See [Publish and roll back](../use/publishing.md#publish) |
 | **Readiness** | `/readyz` on `INTERNAL_ADDR`. It fails only while no snapshot is loaded or while the edge drains, never because a dependency is down. See [Runbooks](../operate/runbooks.md#edge-not-ready) |
 | **Revert** | Publishing an old version's config as a new version. History is never rewritten. See [Publish and roll back](../use/publishing.md#revert) |
 | **Role / permission** | A bundle of permissions (viewer, editor, publisher, admin) / one allowed action. Access is checked by permission. See [Dashboard](../use/dashboard.md#roles) |

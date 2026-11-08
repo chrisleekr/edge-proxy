@@ -83,7 +83,7 @@ export function summary(r: Rule) {
 }
 
 // logOnly says a rule only logs what it would block: a rate limit set to
-// log, or a config rule whose block setting logs.
+// log, or an access rule whose block setting logs.
 export const logOnly = (r: Rule) => r.action === 'log' || r.settings?.block === 'log';
 
 // Live is a rule's counts over the picked range, with a spark of its matches.
@@ -252,7 +252,13 @@ export function Rules() {
           },
         };
         return (
-          <Card key={phase} title={title} intro={intro} info={info}>
+          <Card
+            key={phase}
+            title={title}
+            intro={intro}
+            info={info}
+            note={phase === 'config' && rules.some((x) => x.settings?.block) ? 'When several rules that block match a request, the block is counted on the last one, so an earlier rule can show matches and no blocks.' : undefined}
+          >
             <Editable>
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={move} accessibility={accessibility}>
                 <SortableContext items={shown.map((r) => r.id)} strategy={verticalListSortingStrategy}>
@@ -263,7 +269,7 @@ export function Rules() {
                   </ul>
                 </SortableContext>
               </DndContext>
-              {rules.length === 0 && <p className="text-body">No rules in this phase yet.</p>}
+              {rules.length === 0 && <p className="text-body">No rules here yet.</p>}
               {rules.length > 0 && shown.length === 0 && <p className="text-body">No rule matches “{find.trim()}”.</p>}
               {words && shown.length > 0 && (
                 <p className="text-sm text-body">

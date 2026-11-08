@@ -171,6 +171,13 @@
   textarea:focus-visible {
     outline-offset: 0;
   }
+  /* WCAG 2.5.8: 24px targets on touch screens. Base layer, so utilities win. */
+  @media (pointer: coarse) {
+    main a {
+      display: inline-block;
+      min-height: 24px;
+    }
+  }
   input[type='checkbox'],
   input[type='radio'] {
     accent-color: var(--color-brand);

@@ -14,7 +14,7 @@ Traffic keeps flowing through every failure below. What changes is how policy is
 `/readyz` returns 503 only while no policy is loaded or while draining.
 
 1. Check the edge log for `no snapshot source succeeded; staying not ready`.
-2. Make sure admin is reachable from the edge, the edge token is valid (created on **Users**, or the same `EDGE_SERVICE_TOKEN_FILE` on admin and the edge) and something has been published (or admin has `BOOTSTRAP_PUBLISH_DEFAULT=true`).
+2. Make sure admin is reachable from the edge, the edge token is valid (created on **Users and tokens**, or the same `EDGE_SERVICE_TOKEN_FILE` on admin and the edge) and something has been published (or admin has `BOOTSTRAP_PUBLISH_DEFAULT=true`).
 3. If admin is down, give the edge a cache file or a fresh bootstrap file ([Deploy](../deploy/index.md#where-an-edge-gets-its-policy)).
 
 ## Valkey down
@@ -40,7 +40,7 @@ Traffic keeps flowing through every failure below. What changes is how policy is
 
 1. **Versions → Revert to previous**, with a reason. It is a new version and reaches every edge within one poll.
 2. During a canary, **Publish → Abort** instead.
-3. The guard may already have done this; check **Versions** and **Audit**.
+3. The guard may already have done this; check **Versions** and **Audit log**.
 
 ## A flood
 
@@ -54,7 +54,7 @@ Traffic keeps flowing through every failure below. What changes is how policy is
 
 ## Stop rate limiting, blocking or JWT checks now
 
-**Settings → Kill switch**, then save and publish. **Disable rate limiting** makes every rate-limit rule log-only; **Disable blocking by config rules** makes every config rule's `block` setting log-only; **Disable JWT checks** stops requiring tokens. The per-IP backstop still applies. All three are audited. Turn them off the same way.
+**Settings → Kill switch**, then **Save draft** and **Publish**: a kill switch takes effect only after both, and **Publish** ships the whole draft, including anyone else's unpublished edits, so read the comparison on **Publish** first. **Find** (Cmd+K or Ctrl+K) opens **Kill switch** from any page. **Disable rate limiting** makes every rate-limit rule log-only; **Disable blocking by access rules** makes every access rule's `block` setting log-only; **Disable JWT checks** stops requiring tokens. The per-IP backstop still applies. All three are audited. Turn them off the same way.
 
 ## Stop autopilot now
 
@@ -92,19 +92,19 @@ While bypassed, nothing the edge does applies:
 `audit chain broken` means a row no longer matches its HMAC chain.
 
 1. Check that `AUDIT_HMAC_KEY_ID`, `AUDIT_HMAC_KEY` and `AUDIT_HMAC_PREVIOUS_KEYS` are the values used when the rows were written. A missing previous key is the usual cause.
-2. If the keys are right, treat it as tampering: export the log (**Audit → Export with HMACs**), compare it with the `audit anchor` lines admin logs, and investigate database access. Rows can't be repaired; the app never edits or deletes them.
+2. If the keys are right, treat it as tampering: export the log (**Audit log → Export with HMACs**), compare it with the `audit anchor` lines admin logs, and investigate database access. Rows can't be repaired; the app never edits or deletes them.
 
 ## Rotate secrets
 
 | Secret | How |
 |---|---|
 | Audit HMAC key | Add the current pair to `AUDIT_HMAC_PREVIOUS_KEYS` as `id=key`, set a new `AUDIT_HMAC_KEY_ID` and `AUDIT_HMAC_KEY`, restart admin |
-| Edge token | Create a new edge token, roll the edges with it, then revoke the old one in **Users** |
+| Edge token | Create a new edge token, roll the edges with it, then revoke the old one in **Users and tokens** |
 | Deployment edge token (`EDGE_SERVICE_TOKEN_FILE`) | Change the file for admin and the edges, then restart admin and the edges |
 | Log shipper token (`LOG_INGEST_TOKEN_FILE`) | Put the new token in admin's file and in the shipper's config, then restart admin and the shipper |
 | Autopilot runner token (`AUTOPILOT_TOKEN_FILE`) | Put the new token in admin's file and in the runner's config, then restart admin and the runner. A case whose runner can't renew its 10 minute lease in time is queued again once; on its second attempt it fails and raises [`autopilot_needs_person`](notifications.md#signals) |
 | Ingress secret | Add the new value to `INGRESS_SECRET_VALUES`, roll edges, switch the CDN, then remove the old value |
-| A user's password | The user changes it on **Account**. An admin can disable a user in **Users** |
+| A user's password | The user changes it on **Account**. An admin can disable a user in **Users and tokens** |
 
 ## Upgrade
 

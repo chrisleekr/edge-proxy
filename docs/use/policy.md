@@ -20,6 +20,8 @@ Any step can answer the request itself (400, 401, 403, 429 and so on) using a re
 
 ## Phases
 
+The admin UI calls the `config` phase **Access rules**, and it stores them as `config_rules`. The phase key stays `config` in config JSON, the API, tests and expressions, so those docs use the keys.
+
 | Phase | Use it to | Action |
 |---|---|---|
 | `config` | Choose per-route settings | `settings`: any of `auth` (`none`, `optional`, `required`, plus accepted issuers), `cors_policy`, `locale`, `upstream_timeout`, `body_limit`, `responses`, `ratelimit_headers`, `block`. Later matching rules override earlier ones, setting by setting |
@@ -32,9 +34,9 @@ Turn on `auth` and `locale` with a `config` rule that matches a few paths first,
 
 ### Blocking requests
 
-A config rule with `"block": "block"` answers the requests it matches with 403 and the `forbidden` template, right after the config phase, so a blocked request costs no backstop slot, token check or Valkey call. `"block": "log"` lets them through and counts them as would block. As with every setting, the last matching rule that sets `block` wins, so a later matching rule with `"block": "log"` turns an earlier rule's block into log for the requests both match, and the later rule is the one counted.
+An access rule with `"block": "block"` answers the requests it matches with 403 and the `forbidden` template, right after the config phase, so a blocked request costs no backstop slot, token check or Valkey call. `"block": "log"` lets them through and counts them as would block. As with every setting, the last matching rule that sets `block` wins, so a later matching rule with `"block": "log"` turns an earlier rule's block into log for the requests both match, and the later rule is the one counted.
 
-Start with `log`, watch **Blocking config rules** on **Stats** and the `would_block` decision in the [access log](../operate/monitoring.md#logs), then switch to `block`. `kill_switch.block`, under **Settings**, turns every `block` into `log` in an incident. [Bot detection](bots.md) has recipes.
+Start with `log`, watch **Blocking access rules** on **Stats** and the `would_block` decision in the [access log](../operate/monitoring.md#logs), then switch to `block`. `kill_switch.block`, under **Settings**, turns every `block` into `log` in an incident. [Bot detection](bots.md) has recipes.
 
 The default `forbidden` template is an HTML page, since a block usually refuses a page request. For API paths, add a JSON template with status 403 and map it in the blocking rule, or in a rule matching the API paths:
 
@@ -48,7 +50,7 @@ The default `forbidden` template is an HTML page, since a block usually refuses 
 
 A matched request skips:
 
-- every config rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block
+- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block
 - every rate-limit rule, including [autopilot rules](publishing.md#autopilot-rules), count rules, penalties already running and `on_missing_key: reject`. No Valkey call is made and no counter or quota changes
 
 On a route that requires a JWT, a trusted client is treated as `optional`: it needs no token, but a token it sends is still verified. A bad one is refused with 401, and a valid one gives claims and `X-Edge-Auth-*` headers as usual. Claims and those headers come only from a verified token. The kill switch still turns JWT checks off entirely. `ratelimit_headers` is reported false for a trusted client, since no rate-limit rule runs.
@@ -60,7 +62,7 @@ It still goes through the load shed, client IP and path checks, the local backst
 
 The list holds up to 100 entries. Each is an IPv4 or IPv6 address or a CIDR range written from its first address, such as `198.51.100.0/24`; a range with host bits set, such as `198.51.100.7/24`, is refused, and the message names both readings: `198.51.100.0/24` for the whole range or `198.51.100.7` for the one address. A range can be no wider than `/24` for IPv4 or `/48` for IPv6, because one entry is meant to be one site. Entries must not overlap, and an address is a range of one, so `203.0.113.7` can't sit beside `203.0.113.0/24`. An IPv4-mapped IPv6 entry such as `::ffff:203.0.113.7` is read as the IPv4 address and matches the IPv4 client. Zones such as `fe80::1%eth0` are refused. It needs schema 6 edges: admin holds the publish while a live edge reads an older schema, naming it.
 
-To block Australia and Singapore but let two partner networks through, add a config rule with the expression below and the setting `"block": "block"`:
+To block Australia and Singapore but let two partner networks through, add an access rule with the expression below and the setting `"block": "block"`:
 
 ```text
 ip.src.country in {"AU" "SG"}
@@ -68,7 +70,7 @@ ip.src.country in {"AU" "SG"}
 
 with `198.51.100.0/24` and `2001:db8:f00::/48` on the allowlist. Clients in those networks reach the upstream even when the viewer country is `AU` or `SG`.
 
-To test it, set `ip` in a [config test](#config-tests) and assert `rejected` is `""` and, on a route that requires a JWT, `settings.auth_mode` is `optional`: a trusted client's simulated request skips the block and needs no token. The [Tests page](dashboard.md#tests) shows a **Trusted client** row with the entry it matched.
+To test it, set `ip` in a [policy test](#policy-tests) and assert `rejected` is `""` and, on a route that requires a JWT, `settings.auth_mode` is `optional`: a trusted client's simulated request skips the block and needs no token. The [Tests and simulate page](dashboard.md#tests-and-simulate) shows a **Trusted client** row with the entry it matched.
 
 ## Expressions
 
@@ -86,8 +88,8 @@ http.request.jwt.claims["tenant"] eq "acme" and http.request.method in {"POST" "
 | Section | Holds |
 |---|---|
 | Templates | Response bodies for each kind of edge response: `bad_request`, `unauthorized`, `forbidden`, `payload_too_large`, `rate_limited`, `bad_gateway`, `unavailable`, `overloaded`, `gateway_timeout`. JSON, problem+json, HTML or text, with `{{retry_after}}`, `{{request_id}}` and `{{status}}` placeholders |
-| CORS | Named policies: origins, methods, headers, credentials, max age |
-| Issuers | JWT issuers: ID, issuer (the token's `iss`), audiences, JWKS URL (https), algorithm (RS, PS, ES or EdDSA; never HMAC). Config rules say which are accepted |
+| CORS policies | Named policies: origins, methods, headers, credentials, max age |
+| Issuers | JWT issuers: ID, issuer (the token's `iss`), audiences, JWKS URL (https), algorithm (RS, PS, ES or EdDSA; never HMAC). Access rules say which are accepted |
 | Settings | Kill switch (rate limiting, JWT checks, blocking), trusted client allowlist, local backstop, defaults (body limit and timeouts), locale (supported languages and output header), header forwarding, and the rollback guard |
 
 ## Headers your upstream can trust
@@ -145,7 +147,7 @@ Control characters are removed from header and claim values.
 
 ## CORS
 
-A CORS policy is defined by name under **CORS**, and a `config` rule picks one with `cors_policy`; `""` turns CORS off for the matching requests.
+A CORS policy is defined by name under **CORS policies**, and a `config` rule picks one with `cors_policy`; `""` turns CORS off for the matching requests.
 
 | Field | Holds |
 |---|---|
@@ -182,7 +184,7 @@ On a route with locale on, the edge picks one of `supported` from `Accept-Langua
 
 The result is sent in the output header, replacing any client copy, and is the value of `edge.locale` in expressions, the `locale` rate-limit key part and `{{locale}}`. On a route with locale off, no header is set and the value is empty, so a `locale` key part is missing and `on_missing_key` applies.
 
-## Config tests
+## Policy tests
 
 A test is a synthetic request and the outcome you expect. Tests run through the edge's own code, so they check what will really happen:
 
@@ -216,14 +218,14 @@ A test states the trusted values directly, because trust depends on the deployme
 |---|---|
 | `rejected` | The check that stops the request matches: `method`, `path`, `blocked`, `auth` or `rate_limit_key`, or `""` for none |
 | `preflight` | Whether the edge answers the request as a CORS preflight matches |
-| `config_rules` | The IDs of the matching config rules equal this list, in order |
+| `config_rules` | The IDs of the matching access rules equal this list, in order |
 | `rate_limit_rules` | The IDs of people's rate-limit rules the request is checked against equal this list, in order. [Autopilot rules](publishing.md#autopilot-rules) are left out |
 | `settings` | Each listed setting matches: `auth_mode`, `accepted`, `cors_policy`, `locale`, `responses`, `body_limit`, `upstream_timeout`, `ratelimit_headers`, `block` |
 | `upstream_headers` | Each listed header's first value matches; `""` means the header is absent |
 
 **A failing test blocks publish.** The backstop and rate-limit counters depend on the running edges and aren't simulated.
 
-A test stops where the edge would stop the request: a config rule set to block (`rejected: blocked`), a CORS preflight the edge answers (`preflight: true`), required auth with no `jwt_claims` (`rejected: auth`), or a missing rate-limit key under `on_missing_key: reject` (`rejected: rate_limit_key`). Later results are then empty. `upstream_headers` never include client copies of `X-Edge-*` or the deployment's source headers, which the edge strips.
+A test stops where the edge would stop the request: an access rule set to block (`rejected: blocked`), a CORS preflight the edge answers (`preflight: true`), required auth with no `jwt_claims` (`rejected: auth`), or a missing rate-limit key under `on_missing_key: reject` (`rejected: rate_limit_key`). Later results are then empty. `upstream_headers` never include client copies of `X-Edge-*` or the deployment's source headers, which the edge strips.
 
 ## Validation
 
@@ -235,7 +237,7 @@ Expressions have their own [limits](../reference/expressions.md#limits). The res
 |---|---|
 | Rules per phase | 200, counting the [autopilot rules](publishing.md#autopilot-rules) the draft is published with |
 | Config size | 8 MiB |
-| Config tests | 500 |
+| Policy tests | 500 |
 | Names (rule IDs, templates, CORS policies, issuer IDs) | 1 to 64 of `a-z 0-9 - _`, starting with a letter or digit |
 
 Regex matching (`matches`) is off unless the deployment sets `ALLOW_REGEX=true`.

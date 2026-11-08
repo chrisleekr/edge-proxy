@@ -32,7 +32,7 @@ The edge never routes: it forwards every request it allows to one upstream, your
 | JWT validation | `/private/*` returns `401` without a valid token from your identity provider |
 | CORS, header rules, locale detection | Add or strip headers per route; services reached only through the edge get edge headers clients can't forge |
 | Templated responses | A branded HTML `429` page instead of a bare status |
-| Safe changes | Validated on save; config tests must pass to publish; canary to a share of traffic; automatic rollback when the new version raises 5xx rates or a changed rule blocks far more than expected |
+| Safe changes | Validated on save; policy tests must pass to publish; canary to a share of traffic; automatic rollback when the new version raises 5xx rates or a changed rule blocks far more than expected |
 | Audit | Every change is written to a tamper-evident log |
 
 A rule is an expression plus an action. The `login-per-ip` rule from the demo, in short:

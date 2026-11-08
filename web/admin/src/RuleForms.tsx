@@ -60,7 +60,7 @@ export const kindWhen: Record<string, string> = {
   bad_request: 'The request came from outside the trusted proxies or without the ingress secret, has a bad client IP header, a disallowed method or an ambiguous path, sent its body too slowly, or lacks a rate limit key part with Reject.',
   unauthorized: 'A route needs a token and the request has none, or its token does not verify.',
   payload_too_large: 'The request body is over the body limit.',
-  forbidden: 'A config rule set to block matched the request.',
+  forbidden: 'An access rule set to block matched the request.',
   rate_limited: 'A rate limit rule set to block, or the per-IP backstop, found the request over its limit.',
   bad_gateway: 'The upstream could not be reached or failed mid-response.',
   unavailable: 'A rule set to answer 503 could not reach Valkey, the edge has no config loaded yet, or it hit an internal error.',
@@ -429,6 +429,13 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
     <div className="flex flex-col gap-4">
       <p className="text-sm text-body">Anything not set here keeps the value from earlier matching rules or the defaults under Settings.</p>
       <Labeled
+        label="Block"
+        info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Would block in Stats. The block kill switch under Settings turns every block into log only."
+        hint="Start with Log only and watch Stats before you block."
+        issues={at('settings.block')}>
+        <Choice value={s.block as string | undefined} options={choices.block_modes} labels={blockSays} empty={unset} onChange={(x) => set('block', x)} />
+      </Labeled>
+      <Labeled
         label="Token check"
         info="Checks a JWT bearer token against the issuers' keys. Optional lets requests without a token through, but a token that is sent and fails still gets 401. Required answers 401 to any request without a valid token."
         issues={at('settings.auth')}>
@@ -453,13 +460,6 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
           <span className="text-body">Tick none to accept the default issuers from the Issuers page.</span>
         </fieldset>
       )}
-      <Labeled
-        label="Block"
-        info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Would block in Stats. The block kill switch under Settings turns every block into log only."
-        hint="Start with Log only and watch Stats before you block."
-        issues={at('settings.block')}>
-        <Choice value={s.block as string | undefined} options={choices.block_modes} labels={blockSays} empty={unset} onChange={(x) => set('block', x)} />
-      </Labeled>
       <Labeled label="CORS policy" issues={at('settings.cors_policy')}>
         <Choice
           value={s.cors_policy as string | undefined}

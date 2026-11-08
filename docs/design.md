@@ -23,7 +23,7 @@ An admin service with an admin UI manages that policy. The edge does not replace
 | P2 | **Latency first** | The request path does in-memory work only, except one Valkey round trip for shared rate limits and the upstream call. Nothing is parsed, compiled, fetched or locked per request that could be done ahead of time ([§2.2](#22-latency-rules)) |
 | P3 | **Platform-agnostic** | The binaries depend on Valkey, Postgres (admin only), env config and HTTP. CDN, WAF, LB and hosting are deployment choices |
 | P4 | **Nothing invalid goes live** | One validator, run on every save, publish and edge activation ([§12.2](#122-validation-one-validator-everywhere)) |
-| P5 | **Safe change** | Config tests, canary, shadow mode and automatic rollback ([§12.5](#125-before-going-live)–[§12.6](#126-rollback-guard-every-signal-configurable)) |
+| P5 | **Safe change** | Policy tests, canary, shadow mode and automatic rollback ([§12.5](#125-before-going-live)–[§12.6](#126-rollback-guard-every-signal-configurable)) |
 
 ### Decisions taken
 
@@ -32,7 +32,7 @@ An admin service with an admin UI manages that policy. The edge does not replace
 | Scope | Edge, admin service, admin UI. No WAF-log worker |
 | Policy model | Rules: expression + action, grouped in phases ([§3](#3-rules-engine)) |
 | Rate limiting | 4 algorithms chosen per rule. Keys from IP and/or request attributes. Fail-open by default, overridable per rule |
-| JWT | Validated at the edge. Issuers defined once; config rules choose which are accepted |
+| JWT | Validated at the edge. Issuers defined once; access rules choose which are accepted |
 | JWKS | URL set in admin. If keys were never obtained, traffic passes. Once obtained, the latest good set is kept forever |
 | Locale | From `Accept-Language` only. Optional |
 | Admin auth | Username/password now, OIDC later, behind extensible interfaces |
@@ -126,9 +126,9 @@ Steps 8 and 10 do network I/O. The rest run in memory.
 | 1 | **Guards** | Rejects with a fast 503 when concurrent **ordinary** requests exceed the in-flight cap: `MAX_INFLIGHT`, which defaults to `GOMEMLIMIT` ÷ 256 KiB (at most 10,000), lowered by the active policy's `global.max_inflight` when that is smaller. The policy is read with the same `atomic.Pointer.Load` that step 3 pins. Long-lived streams (SSE, WebSocket) have a separate cap, so they can't starve ordinary traffic. `http.Server.MaxHeaderBytes` already capped header size | Shed overload before spending any work on it |
 | 2 | **Client IP + viewer fields** | Checks the ingress secret header if configured. Reads the client IP and trusted viewer metadata (country, ASN, scheme, HTTP version) from the configured CDN headers, **only** if the TCP peer is a trusted proxy ([§10](#10-client-identity-and-viewer-metadata)). Rejects ambiguous path encodings ([§3.2](#32-fields)) | Everything later keys on the real client. Spoofed values must be rejected first |
 | 3 | **Pin snapshot** | One `atomic.Pointer.Load` of the compiled config, which a background poller keeps current. During a canary, picks the active or candidate config by client hash ([§12.5](#125-before-going-live)). No I/O | Keeps one request on one config version even if the poller swaps it mid-request |
-| 4 | **Config phase** | Evaluates config rules ([§3](#3-rules-engine)). Resolves this request's settings: auth, accepted issuers, CORS policy, locale, response templates, body limit, upstream timeout, rate-limit headers. From here on, every edge-generated response carries the request's CORS headers and `Cache-Control: no-store` | Everything after depends on these settings |
+| 4 | **Config phase** | Evaluates access rules ([§3](#3-rules-engine)). Resolves this request's settings: auth, accepted issuers, CORS policy, locale, response templates, body limit, upstream timeout, rate-limit headers. From here on, every edge-generated response carries the request's CORS headers and `Cache-Control: no-store` | Everything after depends on these settings |
 | 4b | **Block setting** | Right after the config phase the edge matches the client IP against `global.client_allowlist` once; a match clears the `block` setting, so the request is never blocked or counted as would block, and skips step 8; step 7 treats a required token as optional. Otherwise, when the resolved `block` setting is `block`, answers 403 with the `forbidden` template; `log` marks the request `would_block` and goes on. `kill_switch.block` turns `block` into `log` | A refused bot costs no backstop slot, JWT check or Valkey call. The config phase already ran, so the 403 has the request's template and CORS headers |
-| 5 | **Local backstop** | In-memory per-IP token bucket | Cheap flood protection before CPU-heavy JWT and network-bound Valkey; works when Valkey is down. It comes after the config phase so its 429 uses the request's template and CORS headers. The cost: a flood still pays for the config rules, about 70 µs per request on a laptop at the limit of 200 rules of 32 conditions (`BenchmarkMatch200Rules`) and under 1 µs for a realistic config |
+| 5 | **Local backstop** | In-memory per-IP token bucket | Cheap flood protection before CPU-heavy JWT and network-bound Valkey; works when Valkey is down. It comes after the config phase so its 429 uses the request's template and CORS headers. The cost: a flood still pays for the access rules, about 70 µs per request on a laptop at the limit of 200 rules of 32 conditions (`BenchmarkMatch200Rules`) and under 1 µs for a realistic config |
 | 6 | **CORS** | Answers preflight when a CORS policy applies. With no policy, preflight is forwarded to the upstream like any request | Preflight needs no auth or quota. Browser JS can read edge 429/401 only with CORS headers (set from step 4) |
 | 7 | **JWT** | Verifies the token if the config phase requires auth. A verified-token cache means most requests skip signature checks. A trusted client (step 4b) on a route that requires a token is treated as optional: no token needed, a presented token is verified | Rate-limit and header rules may use verified claims |
 | 8 | **Rate-limit phase** | Evaluates rate-limit rule expressions in memory. Checks the local penalty cache. Then sends **one pipelined batch** to Valkey for the rules that matched. A trusted client (step 4b) skips this step entirely: no rule, penalty, missing-key reject or Valkey call | The only shared, cross-replica decision, and the only network I/O before the upstream |
@@ -163,7 +163,7 @@ Policy is a set of **rules**: *when incoming requests match **expression**, then
 
 | Phase (UI name) | Runs at | Action | When several rules match |
 |---|---|---|---|
-| `config` (Config rules) | Step 4 | Set request settings (below) | **All apply in order; a later rule overwrites the same setting.** |
+| `config` (Access rules) | Step 4 | Set request settings (below) | **All apply in order; a later rule overwrites the same setting.** |
 | `rate_limit` (Rate limit rules) | Step 8 | Count and possibly block ([§4](#4-rate-limiting)) | Site-wide rules (expression `true`, at most 2) are always evaluated. Other matching rules are evaluated in order, up to 5 per request. Blocked if any `block` rule says no |
 | `request_headers` (Request header rules) | Step 9 | Header operations ([§7](#7-request-header-rules)) | All apply in order |
 
@@ -216,7 +216,7 @@ Every field, its type and its source are listed in the [Expressions reference](r
   - a path parameter on a dot-segment (`..;x`, `.;x`, `..%3Bx`). Tomcat reads it as `..`; nginx, Express and Go read it as a name, so dropping the parameter would match a different path than some upstreams route
 - **Non-uppercase methods are rejected with 400** at step 2. RFC 9110 methods are case-sensitive and every standard one is uppercase, but Go's server accepts any token, so `post` would slip past a rule on `POST` at an upstream that folds case.
 - **Warning** when a rule matches on `http.request.uri` or `http.request.full_uri`. Those fields are raw and not normalized.
-- **Residual risk:** an upstream that normalizes differently can still disagree. Config tests ([§12.5](#125-before-going-live)) should include encoded variants of protected paths.
+- **Residual risk:** an upstream that normalizes differently can still disagree. Policy tests ([§12.5](#125-before-going-live)) should include encoded variants of protected paths.
 
 **List fields** (headers, cookies, args, claims) match if **any** value matches.
 
@@ -274,9 +274,9 @@ Every operator, the types it takes and its text form are in the [Expressions ref
   - Limits exceeded.
 - **Warnings:**
   - Trivially unsatisfiable expressions (`http.host eq "a" and http.host eq "b"`).
-  - A config rule fully overwritten by a later `true` rule.
-  - **Spoofable exclusions:** a rate-limit rule or a config rule with `block: block` that *excludes* traffic using a client-controlled field (header, cookie, query, X-Forwarded-For, User Agent, Referer, client signals, JA4, JA3). Exclude by `ip.src` or a verified claim instead.
-  - A config rule with `block: log` that matches a client-controlled field after an earlier rule sets `block: block`, since the last matching `block` wins.
+  - An access rule fully overwritten by a later `true` rule.
+  - **Spoofable exclusions:** a rate-limit rule or an access rule with `block: block` that *excludes* traffic using a client-controlled field (header, cookie, query, X-Forwarded-For, User Agent, Referer, client signals, JA4, JA3). Exclude by `ip.src` or a verified claim instead.
+  - An access rule with `block: log` that matches a client-controlled field after an earlier rule sets `block: block`, since the last matching `block` wins.
   - An `http.request.version` literal outside `1.0`, `1.1`, `2.0`, `3.0`.
 
 ## 4. Rate limiting
@@ -405,7 +405,7 @@ Notes:
 
 ### 5.1 Issuers
 
-Issuers are defined once. The `auth` setting in a config rule lists which ones are **accepted**. A list, not a single override, supports several IdPs and IdP migrations (accept old and new together). Envoy `jwt_authn` uses the same shape: named providers, plus per-route "any of" requirements.
+Issuers are defined once. The `auth` setting in an access rule lists which ones are **accepted**. A list, not a single override, supports several IdPs and IdP migrations (accept old and new together). Envoy `jwt_authn` uses the same shape: named providers, plus per-route "any of" requirements.
 
 ```yaml
 auth:
@@ -493,7 +493,7 @@ Admin users enter JWKS URLs that admin and edges then fetch, and admin fetches t
 
 ## 6. CORS
 
-- **Built in-house per the Fetch standard.** Named policies are defined globally, and a config rule selects one with `cors_policy`.
+- **Built in-house per the Fetch standard.** Named policies are defined globally, and an access rule selects one with `cors_policy`.
 - **Policy fields:** origins, methods, request headers, exposed headers, credentials, `max_age`.
 - **Preflight** is answered by the edge. It counts against the local backstop only.
 - **Edge-generated responses from step 4 onward carry CORS headers.** Earlier ones can't ([§2.1](#21-steps)).
@@ -532,7 +532,7 @@ The operations, placeholders and reserved headers are listed in [Header rules](u
 - **Reserved headers are never targetable,** because the edge or the transport owns them.
   - **Nor readable,** on every path that names a header: ops, header placeholders, `header:<n>` rate-limit keys and `http.request.headers["<n>"]` in expressions. A client can forge `X-Edge-*` before the edge replaces it (forging `X-Edge-Auth-Sub` into an upstream header would bypass authorization), and source headers can carry the ingress secret. The edge also strips client `X-Edge-*` and source headers from the forwarded request at step 9, before the header rules run.
 - **Warnings:** an allowlist that drops `Authorization`, `Cookie` or `Content-Type`; a copy or rename whose source any forward filter can drop.
-- **Config tests** see `upstream_headers` from the same step 9 code as live traffic (`Simulate`), including the strip of client `X-Edge-*` and source headers, without the deployment-dependent forwarding headers (`X-Forwarded-*`, `X-Edge-Client-IP`, `X-Request-Id`, and the trace context the edge sets when tracing is on).
+- **Policy tests** see `upstream_headers` from the same step 9 code as live traffic (`Simulate`), including the strip of client `X-Edge-*` and source headers, without the deployment-dependent forwarding headers (`X-Forwarded-*`, `X-Edge-Client-IP`, `X-Request-Id`, and the trace context the edge sets when tracing is on).
 
 ## 8. Locale from `Accept-Language`
 
@@ -684,7 +684,7 @@ request_header_rules: [...]
 **`kill_switch`:**
 - `rate_limit: true` turns every rate-limit rule into `action: log`. Counting and stats continue; nothing is blocked. The local backstop stays on.
 - `auth: true` turns every `auth` setting into `none`. Tokens aren't checked and no `X-Edge-Auth-*` headers are sent.
-- `block: true` turns every config rule's `block` setting into `log`.
+- `block: true` turns every access rule's `block` setting into `log`.
 - All three are published like any config change, audited, and shown as a red banner on the dashboard while on.
 
 ### 12.2 Validation (one validator, everywhere)
@@ -725,7 +725,7 @@ request_header_rules: [...]
 **Schema compatibility:**
 - An edge keeps its current snapshot if a new one has a higher major `schema`.
 - A build reads every `schema` from `MinSchema` to its `max_schema`, so a version saved under an older schema still loads on an upgraded edge.
-- A field added in a later schema is omitted from JSON when unset. A config that doesn't use it then encodes exactly as before, so edges not yet upgraded, which reject unknown fields, keep loading snapshots from an admin upgraded first. Tests pin the schema 1, 3 and 4 encodings.
+- A field added in a later schema is omitted from JSON when unset. A config that doesn't use it then encodes exactly as before, so edges not yet upgraded, which reject unknown fields, keep loading snapshots from an admin upgraded first. Tests pin the schema 1, 3, 4 and 5 encodings.
 - A config of any schema may set such a field. `Compile` then reports the schema an edge must read (`NeedsSchema`), and admin publishes it only when every live edge reads that schema. So a stored schema 1 policy can use `global.max_inflight` (schema 3) without migrating. A rate-limit rule's `expires_at` needs schema 5, and `global.client_allowlist` needs schema 6.
 - Schema 2 has no `upstream` config setting and no 421 `misdirected` response kind, because the edge forwards everything to one upstream. Compile reads a schema 1 config by dropping its `misdirected` template choices from a copy, so the stored version is served unchanged; a schema 1 rule that sets `upstream` fails to decode, because its routing can't be kept.
 - Admin won't publish a schema the oldest reporting edge can't read. Each stats report carries the edge's `max_schema`; publish, revert and import return 409 naming the edge while it is live (reported within the last minute).
@@ -744,7 +744,7 @@ Reverts and rollbacks are covered in [§12.7](#127-versions-and-revert).
 ```mermaid
 flowchart LR
     ED["Edit draft"] --> V1["Validate<br/>every save"]
-    V1 --> T1["Config tests<br/>must pass"]
+    V1 --> T1["Policy tests<br/>must pass"]
     T1 --> DF["Diff + impact"]
     DF --> CN["Canary<br/>X% of clients"]
     CN -->|"healthy"| FL["Full rollout"]
@@ -755,14 +755,14 @@ flowchart LR
 | Layer | Catches |
 |---|---|
 | Validation | Malformed or contradictory config |
-| **Config tests** | Valid but wrong config: wrong rules match, a setting or header is missing |
+| **Policy tests** | Valid but wrong config: wrong rules match, a setting or header is missing |
 | Diff + impact | Unintended edits. Shows would-block estimates for changed rules, from shadow-mode stats |
 | Shadow mode | A limit that's too tight (`action: log` first) |
 | **Canary** | Config that passes everything but still hurts real traffic |
 | Guard ([§12.6](#126-rollback-guard-every-signal-configurable)) | Degradation after full rollout |
 | Staging promotion | Export from a staging admin, import to production, where it repeats every layer |
 
-**Config tests** work like Envoy's `router_check_tool`, which checks a route table against expected results:
+**Policy tests** work like Envoy's `router_check_tool`, which checks a route table against expected results:
 
 ```yaml
 tests:
@@ -779,7 +779,7 @@ tests:
 
 They run through the edge's own `Simulate` with the same compiler as the edge, on every save, and a failure **blocks publish**.
 
-- **Request and expectation fields** are in [Config tests](use/policy.md#config-tests). `expect` checks only what it lists, so a test pins the behavior it is about and survives unrelated edits.
+- **Request and expectation fields** are in [Policy tests](use/policy.md#policy-tests). `expect` checks only what it lists, so a test pins the behavior it is about and survives unrelated edits.
 - A test follows the edge's step order and stops where the edge would: a CORS preflight the edge answers, required auth with no `jwt_claims` (`rejected: auth`), or a missing key under `on_missing_key: reject`. The backstop and quotas depend on the running edge and aren't simulated.
 - A failing test doesn't stop a save; it is reported with the save and blocks publish.
 
@@ -825,7 +825,7 @@ guard:
   - During a canary it compares the candidate with active over the same minutes since the step started (at most `window`), and renews the canary's expiry (10-minute lease) once less than half of it, or less than two `evaluate_every` intervals, is left, so edges drop the candidate on their own within 10 minutes if admin goes away. The expiry is part of the snapshot ETag, so renewing on every run would make every edge download and recompile an unchanged snapshot on every guard run (every 30 seconds by default).
   - After full rollout it judges the latest version a person published (or a revert or rollback made), not an autopilot publish: autopilot changes only its own rules. It compares that version's first `window`, with the minutes of the autopilot versions after it but not of a canary aborted since, with every earlier version over the `window` before the publish. Fleet adoption counts edges on that version or an autopilot version after it.
   - Autopilot rules are left out of the rule signals. Each has its own guard ([§13.7](#137-autopilot)), so an autopilot rule blocking an attack never rolls back a person's publish. A rollback restores the version before the judged one with the current autopilot rules.
-  - The rule signals cover rate-limit rules and config rules with a `block` setting. A config rule evaluates every request, so its blocked share is of all the cohort's requests; heavy hitters aren't taken out of it, since stats keep no per-client config counts. The candidate's baseline is the larger of the share the active cohort logged as `would_block` and the share it blocked; above 0, it trips only above that share × `max_vs_shadow`, since blocking what was logged or already blocked is the reviewed intent. Without either, `max_ratio` applies. Rate-limit rules trip on either threshold.
+  - The rule signals cover rate-limit rules and access rules with a `block` setting. An access rule evaluates every request, so its blocked share is of all the cohort's requests; heavy hitters aren't taken out of it, since stats keep no per-client config counts. The candidate's baseline is the larger of the share the active cohort logged as `would_block` and the share it blocked; above 0, it trips only above that share × `max_vs_shadow`, since blocking what was logged or already blocked is the reviewed intent. Without either, `max_ratio` applies. Rate-limit rules trip on either threshold.
   - Both cohorts need `min_requests`, else the outcome is `insufficient_data`. Rule counts leave out the most-limited subjects in each cohort, but only heavy hitters: a subject holding at least 5% of a rule's limited requests in a minute. A subject counts as its top-K estimate less `err`, the count it inherited when it took an evicted subject's slot, so only requests it surely sent make it heavy. Heavy subjects are found minute by minute, but their estimates are summed over the window and left out once, less a sampling allowance of 3·√(16·H) for a sum H: an estimate is 16 per sampled request (`edge.TopSample`), unbiased with a variance of about 16·H. Taken once, one minute's shortfall and another's overshoot cancel; taken per minute with a floor at 0, every shortfall would count as over-blocking. Many clients limited a little each is the over-blocking the guard exists to catch. The cost: an attacker spread over enough IPs that each stays under 5% is counted, and can trip `changed_rule_limited_ratio` on a rule aimed at them. That is accepted: the result is one audited rollback to a known-good version, and a rule published against an ongoing attack should carry a guard override with its reason.
   - The outcome (decision and every signal's value and baseline) is stored on the version. An alert is audited when it starts, not on every run.
   - A tripped `rollback` signal aborts the canary, or publishes the previous version again as `source: guard_rollback` and marks the bad one `rolled_back`, at most `max_auto_rollbacks_per_publish` times. A revert or guard rollback is only ever alerted on.
@@ -870,7 +870,7 @@ Configs are small: they're bounded by the budgets in [§12.2](#122-validation-on
 1. **A revert creates a new version** (N+1) whose content is version K's own rules with the current overlay (see **Overlay** below). History is never rewritten; versions only go up ([§12.3](#123-distribution)).
 2. **It is validated against today's deployment.** An old version can reference something that no longer exists, e.g. a viewer field the CDN no longer sends, or a template since deleted.
    - Validation errors block the revert, and the UI says exactly what's missing.
-   - The old version's own config tests run too, since tests are versioned with config.
+   - The old version's own policy tests run too, since tests are versioned with config.
 3. **JWKS keys are not reverted.** Keys are environmental state, not config. The reverted version embeds the **current** latest-good keys. Restoring old keys could re-accept a key the IdP has revoked.
 4. **Schema:** K reverts as it was saved, since every build reads schemas from `MinSchema` up ([§12.3](#123-distribution)). A version older than `MinSchema` fails validation and the revert is blocked with the reason, so raising `MinSchema` needs admin to upgrade stored versions first.
 5. **Speed:**
@@ -896,11 +896,11 @@ Configs are small: they're bounded by the budgets in [§12.2](#122-validation-on
 
 - Rate-limit rules whose ids start `ap-` are autopilot's **overlay**, placed after the rules people write. There is no overlay table: the current overlay is the active version's `ap-` rules, and every publish path carries it over. `ap-` is reserved: a person's rule with such an id, in any phase, is refused at its `id` on save and check, and migration refuses to upgrade an install whose active version, canary or draft has one, naming the rule.
 - **The draft holds people's rules only.** A save and check compile it merged with the current overlay, so the 200-rule limit and every other check see what the next publish will. A diff of the draft against a version uses the merged config.
-- **Config tests leave the overlay out of `rate_limit_rules`.** The expected list is compared with people's rules only, so a test does not change as autopilot rules come and go.
+- **Policy tests leave the overlay out of `rate_limit_rules`.** The expected list is compared with people's rules only, so a test does not change as autopilot rules come and go.
 - **An overlay publish** (`source: autopilot`, audit `config.overlay_publish`) is the active version's own rules and tests plus the new overlay, through every publish check, except that one which only takes autopilot rules out skips the deployment and schema checks, like a revert. Admin refuses (422) an overlay rule whose id lacks the `ap-` prefix, that has no `expires_at`, or whose `expires_at` is more than 24h ahead, and leaves out one whose `expires_at` has already passed. An overlay rule's content is fixed per id: republishing a live `ap-` id with anything but `action` and `expires_at` changed is refused (422), so a changed rule needs a new id; `action` moves it from log to block, and a later `expires_at` renews it. An id adopted in the draft and no longer live is refused (422), so a new overlay rule needs a new id. It publishes over issuers whose keys admin never fetched, as the active version did, because its people's rules already ran that way, and records its own fixed reason in `override_reason`. It locks the draft row and then the publish lock, like a person's publish, and moves a draft based on the active version onto the new one without changing its content or revision, so the person editing it needs no rebase. It waits for a canary like any publish.
 - **Every publish, revert, guard rollback and import drops expired overlay rules**, those whose `expires_at` has passed.
 - **A person's publish, an import and a guard rollback** keep the current overlay. Import ignores `ap-` rate-limit rules in its input and refuses an `ap-` id in `config_rules` or `request_header_rules` with 422; an export carries the overlay, so a bootstrap edge keeps blocking until the rules expire.
-- **Revert and guard rollback** restore version K's own rules with the current overlay. An `ap-` rule of K comes back too while it has not expired, when its unprefixed id is a rate-limit rule in the current rules but not in K's: restoring K drops the adopted copy, and the attack it answers may still be on. When a revert or a guard rollback is refused with the overlay (validation, the schema the edges can load, or the config tests) but the restored rules alone pass validation and the config tests, admin publishes them with no overlay, so the overlay never blocks either, and the version's audit event records `overlay_dropped: true`. The autopilot rules that were live are retired in the same transaction, so autopilot does not publish them back; for a canary revert their transitions record `waits_for_canary`, since the active version runs them until the canary ends. That fallback skips the schema check: the rules ran before, and an edge too old to read them keeps its snapshot, so the check must not block the way back. A version saved before the upgrade with a person's `ap-` rule, in any phase, loses that rule when restored.
+- **Revert and guard rollback** restore version K's own rules with the current overlay. An `ap-` rule of K comes back too while it has not expired, when its unprefixed id is a rate-limit rule in the current rules but not in K's: restoring K drops the adopted copy, and the attack it answers may still be on. When a revert or a guard rollback is refused with the overlay (validation, the schema the edges can load, or the policy tests) but the restored rules alone pass validation and the policy tests, admin publishes them with no overlay, so the overlay never blocks either, and the version's audit event records `overlay_dropped: true`. The autopilot rules that were live are retired in the same transaction, so autopilot does not publish them back; for a canary revert their transitions record `waits_for_canary`, since the active version runs them until the canary ends. That fallback skips the schema check: the rules ran before, and an edge too old to read them keeps its snapshot, so the check must not block the way back. A version saved before the upgrade with a person's `ap-` rule, in any phase, loses that rule when restored.
 - **Adopt** copies an overlay rule into the draft without its prefix and expiry (409 when the draft already has a rule with that id in any phase, since rule ids are unique across phases, 404 when the overlay has no such rule) and records it in the draft's `adopted` list. The next publish of a draft holding the copy drops the `ap-` rule from the overlay in the same transaction.
 - **Known limit: overlay rules can be capped.** They come after people's rules, so in a request whose people's non-site-wide rules fill the 5 slots, an overlay rule it matches is past the per-request cap: it is counted as `capped` instead of checked. The order keeps people's rules in their slots, and lets the overlay hold more rules than the cap. The edge counts it on `/metrics`, as `edge_ratelimit_rule_total{outcome="capped"}` for the rule and `edge_ratelimit_rules_capped_total`, and in its stats reports, so admin's stats carry each rule's `capped` count.
 
@@ -1215,7 +1215,7 @@ TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
 
 ### 15.2 Stats: push to admin
 
-- **Request path:** `atomic.AddUint64` on fixed per-rule, per-version counters, plus latency histogram buckets. Each finished request is one add in `codes[origin][min(status, 600)]`, where the origin is the edge or the upstream, slot 0 is a request that got no answer and 600 holds any code above 599 (Go accepts any three digits from an upstream). The report derives requests, edge 5xx, upstream 5xx and edge 401s (auth failures) from those counts, so the guard and notifications read the same totals, and carries the non-zero codes since the last report as `status_codes`. An upstream failure adds one to its cause's counter on the error path, and reports carry the non-zero causes as `upstream_errors`. Rate-limit rules count requests checked, limited, would-limit and failed. Config and request-header rules count the requests they matched and how those ended (edge 5xx, upstream 5xx, edge 401), and the config rule whose `block` setting decided counts the request as blocked or would block: one add per matched rule, at the end of the request, on counters padded to their own cache line so a hot rule doesn't slow its neighbours.
+- **Request path:** `atomic.AddUint64` on fixed per-rule, per-version counters, plus latency histogram buckets. Each finished request is one add in `codes[origin][min(status, 600)]`, where the origin is the edge or the upstream, slot 0 is a request that got no answer and 600 holds any code above 599 (Go accepts any three digits from an upstream). The report derives requests, edge 5xx, upstream 5xx and edge 401s (auth failures) from those counts, so the guard and notifications read the same totals, and carries the non-zero codes since the last report as `status_codes`. An upstream failure adds one to its cause's counter on the error path, and reports carry the non-zero causes as `upstream_errors`. Rate-limit rules count requests checked, limited, would-limit and failed. Config and request-header rules count the requests they matched and how those ended (edge 5xx, upstream 5xx, edge 401), and the access rule whose `block` setting decided counts the request as blocked or would block: one add per matched rule, at the end of the request, on counters padded to their own cache line so a hot rule doesn't slow its neighbours.
 - **Top-K most-limited keys:**
   - Updated only on a limit, and **sampled** 1 in 16 so an attack doesn't serialize on its mutex. Counts are estimates (sampled count × 16).
   - **Space-Saving** (Metwally, Agrawal, El Abbadi, 2005) per config version: at most 256 subjects; a new subject replaces the smallest and inherits its count. Any subject above 1/256 of the sampled limits stays tracked, and counts never underestimate. Each report carries the top 20 per version, then starts over.
@@ -1252,7 +1252,7 @@ Routes are built from the access lines the edges already write, so the edge does
 - **Ingest:** `POST /v1/logs/access`, one access line per line (newline-delimited JSON), at most 4 MiB a request. A line over 64 KiB is skipped alone. Lines are counted only once the whole body is read, so a failed request adds nothing. Only the deployment's shipper token (`LOG_INGEST_TOKEN_FILE`) may post, and it may do nothing else; admin refuses to start if it equals the edge token. Two ingests run at once; a third gets 429 and the shipper sends the batch again.
 - **Lines used:** `msg` is `access` and host, method and path are present. Rejections of the request line itself (`path`, `method`) say nothing about a route and are skipped, as is any line with NUL, which Postgres refuses in `jsonb`.
 - **Grouping:** a route is host, method and path template. A segment of digits becomes `{id}`, a UUID `{uuid}`, 16 or more hex digits `{hex}`, and 20 or more letters and digits with both, anything with `@`, or anything longer than 64 characters, `{token}`. Query key names go through the same rules. Other segments are stored as they are and shown to anyone with `stats.read`. Operator patterns, where `*` is one segment, are tried first, host patterns before every-host ones, then the most literal. Admin suggests a pattern when 20 or more literal routes share a parent. Creating one merges the routes it now groups, leaving those a more specific pattern groups, in the same transaction as its audit row; creates run one at a time. Lines still held in memory are grouped with the current patterns when they are flushed.
-- **Counts:** per route and hour: logged requests, status classes and codes, upstream failures by `edge.upstream_error_kind` (the six cause names only), latency buckets (the edge's bounds), decisions, matched config rules, the rate-limit rule, and query shapes (sorted key names). A line counts once, except a sampled line (`edge.sample_rate` below 1), which counts as 1/rate requests, at most 1,000,000, rounded up or down at random so the expected total is exact. The scaled requests are kept as `estimated` so the UI can mark them; rejections and 5xx are always logged and stay exact. Each replica sums in memory and adds its deltas to the shared rows every 10s, in one order on every replica so flushes never deadlock, and rows are never read back and rewritten. On failure the deltas are dropped.
+- **Counts:** per route and hour: logged requests, status classes and codes, upstream failures by `edge.upstream_error_kind` (the six cause names only), latency buckets (the edge's bounds), decisions, matched access rules, the rate-limit rule, and query shapes (sorted key names). A line counts once, except a sampled line (`edge.sample_rate` below 1), which counts as 1/rate requests, at most 1,000,000, rounded up or down at random so the expected total is exact. The scaled requests are kept as `estimated` so the UI can mark them; rejections and 5xx are always logged and stay exact. Each replica sums in memory and adds its deltas to the shared rows every 10s, in one order on every replica so flushes never deadlock, and rows are never read back and rewritten. On failure the deltas are dropped.
 - **Bounds:** 5,000 stored routes and 10,000 route hours between flushes. A route seen only with error answers, such as a login whose every request is rate limited, is stored apart and marked, at most 500 of them, so a scanner's 404s and rejections can't push other routes out; the mark clears on its first 1xx to 3xx answer, which takes a place among the 5,000 or is not grouped, so the two limits bound the table together. Traffic that isn't stored, and templates over 512 characters or 32 segments, are counted as not grouped. Per route and hour, 20 query shapes of at most 256 characters and 200 rule IDs or decisions, with the rest summed under `*`; reads cap the summed range the same way.
 - **Coverage:** lines served under a policy version, divided by the requests the edges reported in `edge_stats_minute`. It falls below 100% when lines are dropped, or when edges sample without saying their rate.
 - **What applies to a route:** admin runs the edge's `Simulate` on a sample of the route, with placeholders filled and the most common query shape. Each rule is then classed as always, never or depends. Conditions on host, method and path are compiled by `internal/expr` and run against several sample paths, including ones built from the condition's own values; a regex on a path with placeholders is unknown. Agreement across samples is evidence, not proof. Conditions on any other field are unknown and named by their label. `and`, `or` and `not` combine these with three-valued logic.

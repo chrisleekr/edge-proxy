@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useState } from 'react';
 import { api, meQuery } from '../api';
-import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Notice, Input, Page, Table, when } from '../ui';
+import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Notice, Input, Page, Table, day, when } from '../ui';
 
 interface User {
   id: string;
@@ -67,7 +67,7 @@ function RoleGuide() {
 // Day shows a date alone, the time on hover, so action buttons stay in view.
 const Day = ({ iso }: { iso: string }) => (
   <time dateTime={iso} title={when(iso)}>
-    {new Date(iso).toLocaleDateString()}
+    {day(iso)}
   </time>
 );
 

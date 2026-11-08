@@ -19,6 +19,7 @@ import { CORS, Issuers, Settings, Templates } from './pages/Sections';
 import { Tests } from './pages/Tests';
 import { Account, Users } from './pages/Users';
 import { Compare, VersionDetail, Versions } from './pages/Versions';
+import { allowed, nav } from './nav';
 import { Link, navigate, usePath } from './router';
 import { ago, Button, CanWrite, Confirm, Crash, ErrorBox, Info, Input, Issues, Modal, NotFound, Pending, when, who, words } from './ui';
 
@@ -27,6 +28,10 @@ export function App() {
   const expired = me.error instanceof Problem && me.error.status === 401;
   if (!me.data) {
     if (expired) return <Login />;
+    // Only a network failure or a gateway status means admin did not answer;
+    // any other Problem is an answer from admin and is shown as such.
+    const silent = me.error && (!(me.error instanceof Problem) || [502, 503, 504].includes(me.error.status));
+    if (silent) return <Unreachable />;
     return (
       <div className="p-6">
         <Pending error={me.error} />
@@ -44,6 +49,20 @@ export function App() {
         </Modal>
       )}
     </>
+  );
+}
+
+// Unreachable replaces the app when admin does not answer at all, so the
+// reader learns traffic is unaffected and is not left with a proxy's error.
+function Unreachable() {
+  return (
+    <main className="grid min-h-screen place-items-center p-4">
+      <div role="alert" className="flex w-full max-w-sm flex-col items-start gap-3 rounded-dialog bg-panel p-8 shadow-card">
+        <h1>Admin is not answering</h1>
+        <p className="text-body">Edges keep serving the version they already have, so traffic is not affected. Policy can't be viewed or changed until admin is back.</p>
+        <Button onClick={() => window.location.reload()}>Try again</Button>
+      </div>
+    </main>
   );
 }
 
@@ -98,40 +117,6 @@ function LoginForm({ username: known }: { username?: string }) {
   );
 }
 
-const nav: { group: string; links: { to: string; label: string; perm: string }[] }[] = [
-  { group: 'Overview', links: [{ to: '/', label: 'Dashboard', perm: '' }] },
-  {
-    group: 'Policy',
-    links: [
-      { to: '/rules', label: 'Rules', perm: 'config.read' },
-      { to: '/templates', label: 'Templates', perm: 'config.read' },
-      { to: '/cors', label: 'CORS', perm: 'config.read' },
-      { to: '/issuers', label: 'Issuers', perm: 'config.read' },
-      { to: '/settings', label: 'Settings', perm: 'config.read' },
-      { to: '/tests', label: 'Tests', perm: 'config.read' },
-    ],
-  },
-  {
-    group: 'Release',
-    links: [
-      { to: '/publish', label: 'Publish', perm: 'config.read' },
-      { to: '/versions', label: 'Versions', perm: 'config.read' },
-    ],
-  },
-  {
-    group: 'Operate',
-    links: [
-      { to: '/routes', label: 'Routes', perm: 'stats.read' },
-      { to: '/fleet', label: 'Fleet', perm: 'stats.read' },
-      { to: '/stats', label: 'Stats', perm: 'stats.read' },
-      { to: '/notifications', label: 'Notifications', perm: 'stats.read' },
-      { to: '/autopilot', label: 'Autopilot', perm: 'autopilot.read' },
-      { to: '/audit', label: 'Audit', perm: 'audit.read' },
-    ],
-  },
-  { group: 'Access', links: [{ to: '/users', label: 'Users', perm: 'users.manage' }] },
-];
-
 // The rule editor brings the rule builder and its drag and drop, which only
 // it uses, so they load when a rule is first opened.
 const RuleEditor = lazy(() => import('./pages/RuleEditor').then((m) => ({ default: m.RuleEditor })));
@@ -139,6 +124,9 @@ const RuleEditor = lazy(() => import('./pages/RuleEditor').then((m) => ({ defaul
 // The section a path belongs to, so nested screens keep their nav link
 // marked: a rule editor is under Rules, a version under Versions.
 const sectionOf = (path: string) => `/${path.split('/')[1] ?? ''}`;
+
+// Cmd on a Mac, Ctrl elsewhere.
+const mac = /Mac|iP(hone|ad)/.test(navigator.platform);
 
 function Shell({ me }: { me: Me }) {
   const path = usePath();
@@ -159,7 +147,6 @@ function Shell({ me }: { me: Me }) {
   // on a Mac stays the text fields' delete to end of line.
   const [finding, setFinding] = useState(false);
   useEffect(() => {
-    const mac = /Mac|iP(hone|ad)/.test(navigator.platform);
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'k' || !(mac ? e.metaKey : e.ctrlKey)) return;
       e.preventDefault();
@@ -182,14 +169,17 @@ function Shell({ me }: { me: Me }) {
             at the top and the nav opens as a drawer. */}
         <header className="sticky top-0 z-30 flex items-center justify-between gap-3 border-b border-line bg-panel/95 px-3 py-2.5 backdrop-blur lg:hidden">
           <Brand />
-          <Button className="inline-flex items-center gap-2" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpenOn(path)}>
-            <span aria-hidden className="flex w-3.5 flex-col gap-[3px]">
-              <span className="h-px bg-current" />
-              <span className="h-px bg-current" />
-              <span className="h-px bg-current" />
-            </span>
-            Menu
-          </Button>
+          <div className="flex gap-2">
+            <Button onClick={() => setFinding(true)}>Find</Button>
+            <Button className="inline-flex items-center gap-2" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpenOn(path)}>
+              <span aria-hidden className="flex w-3.5 flex-col gap-[3px]">
+                <span className="h-px bg-current" />
+                <span className="h-px bg-current" />
+                <span className="h-px bg-current" />
+              </span>
+              Menu
+            </Button>
+          </div>
         </header>
         <dialog
           ref={drawer}
@@ -210,6 +200,10 @@ function Shell({ me }: { me: Me }) {
         </dialog>
         <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col gap-6 overflow-y-auto border-r border-line bg-panel p-4 lg:flex">
           <Brand />
+          <Button className="flex w-full items-center justify-between text-left" onClick={() => setFinding(true)}>
+            Find
+            <kbd className="text-xs font-normal text-muted">{mac ? '⌘K' : 'Ctrl K'}</kbd>
+          </Button>
           <NavLinks path={path} can={can} />
           <UserBar me={me} path={path} />
         </aside>
@@ -239,10 +233,6 @@ function Brand() {
     </Link>
   );
 }
-
-// allowed says whether a role may open a nav section. Users also holds
-// tokens, so tokens.manage alone opens it.
-const allowed = (n: { to: string; perm: string }, can: (p: string) => boolean) => !n.perm || can(n.perm) || (n.to === '/users' && can('tokens.manage'));
 
 // NavLinks is the grouped nav, shared by the sidebar and the drawer.
 function NavLinks({ path, can }: { path: string; can: (p: string) => boolean }) {
@@ -517,6 +507,8 @@ function SaveBar({ path, canWrite }: { path: string; canWrite: boolean }) {
       const is = d.config.auth.issuers?.[Number(i[1])] as { id?: unknown } | undefined;
       return `issuer ${typeof is?.id === 'string' && is.id ? is.id : Number(i[1]) + 1}${rest(i[2]!)}`;
     }
+    const tc = /^config\.global\.client_allowlist(?:\[(\d+)\])?$/.exec(p);
+    if (tc) return tc[1] ? `trusted client ${Number(tc[1]) + 1}` : 'trusted client allowlist';
     const t = /^config\.global\.(responses|cors_policies)\["([^"]+)"\](.*)$/.exec(p);
     if (t) return `${t[1] === 'responses' ? 'template' : 'CORS policy'} ${t[2]}${rest(t[3]!)}`;
     return words(p);

@@ -94,6 +94,9 @@ func TestDocScreenshots(t *testing.T) {
 	}
 	block := "block"
 	full.ConfigRules = append(full.ConfigRules, snapshot.ConfigRule{ID: "block-tools", Expression: blockRule, Settings: snapshot.Settings{Block: &block}})
+	// Outside the route-flow sample IP and the demo's traffic addresses, so
+	// counts don't change; the route flow shows the not-on-the-list note.
+	full.Global.ClientAllowlist = []string{"203.0.113.64/27", "2001:db8:f00::/48"}
 	// The demo's issuers point at its mock IdP; a fake one here, so publish
 	// finds their keys fetched.
 	idp := newFakeJWKS(t, h)

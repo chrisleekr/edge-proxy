@@ -1,6 +1,6 @@
 # Admin API
 
-Everything the UI does goes through this JSON API, so it can be automated. Authenticate with `Authorization: Bearer <token>` (a user token from **Users**) or the UI's session cookie. Cross-origin browser writes are refused. Errors are `application/problem+json` with the failing field and reason.
+Everything the UI does goes through this JSON API, so it can be automated. Authenticate with `Authorization: Bearer <token>` (a user token from **Users and tokens**) or the UI's session cookie. Cross-origin browser writes are refused. Errors are `application/problem+json` with the failing field and reason.
 
 Draft writes and publish use optimistic concurrency: send the `ETag` from the last read as `If-Match`. A stale value gets `412`, and a missing one `428`.
 
@@ -27,7 +27,7 @@ Draft writes and publish use optimistic concurrency: send the `ETag` from the la
 | `GET /api/canary` | `config.read` | Canary state |
 | `POST /api/canary/step`, `POST /api/canary/promote`, `POST /api/canary/abort` | `canary.manage` | Step (`percent`), promote, abort (`reason`) |
 | `GET /api/export` | `config.read` | Export the active version, autopilot rules included, as `{envelope, tests}` (`envelope` is an edge bootstrap file) |
-| `POST /api/import` | `config.publish` | Publish `{config, tests, message, override_reason}` as a new version. `ap-` rate-limit rules in `config` are ignored and this admin's autopilot rules are kept, less those expired. `422` when a config rule or request header rule has an `ap-` id |
+| `POST /api/import` | `config.publish` | Publish `{config, tests, message, override_reason}` as a new version. `ap-` rate-limit rules in `config` are ignored and this admin's autopilot rules are kept, less those expired. `422` when an access rule or request header rule has an `ap-` id |
 | `GET /api/settings/guard` | `config.read` | Default guard settings |
 | `PUT /api/settings/guard` | `settings.manage` | Change them |
 | `GET /api/settings/notifications` | `config.read` | [Notification](../operate/notifications.md) settings: defaults per signal and per-rule settings |
@@ -81,7 +81,7 @@ The six connector tools (`prom_query`, `prom_query_range`, `grafana_annotations`
 |---|---|---|
 | `get_autopilot_state` | `autopilot.read` | What `GET /api/autopilot` returns, with each rule's expression inside an `untrusted` field |
 | `list_cases` | `autopilot.read` | Past cases and verdicts, on one `rule` when set. An ablation run's list leaves out ablation cases and the cases its withheld notes were served to |
-| `list_rules` | `config.read` | The active version's rate-limit and config rules (not request-header rules), people's and the autopilot's, with expressions as text inside `untrusted` fields |
+| `list_rules` | `config.read` | The active version's rate-limit and access rules (not request-header rules), people's and the autopilot's, with expressions as text inside `untrusted` fields |
 | `describe_fields` | `config.read` | Expression fields, rate-limit key kinds and algorithms |
 | `get_stats` | `stats.read` | `GET /api/stats` for `minutes`, in hourly steps past 360 minutes |
 | `get_rule_stats` | `stats.read` | One rate-limit rule's counts per minute (hourly past 360 minutes) and its 50 most-limited subjects |

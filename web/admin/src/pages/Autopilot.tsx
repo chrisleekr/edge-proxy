@@ -5,7 +5,7 @@ import { draftKey, useOptionalDraft } from '../draft';
 import { Decimal } from '../GuardForm';
 import { Amount, Choice, Count, Errors, Labeled, Lines, timeUnits } from '../RuleForms';
 import { Link, navigate, useLeaveGuard, useSearch } from '../router';
-import { Badge, Button, Card, ConfirmButton, ErrorBox, Hint, Input, Modal, NotFound, Notice, Page, Pending, Table, ago, when, who } from '../ui';
+import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Input, Modal, NotFound, Notice, Page, Pending, Table, Tabs, ago, when, who } from '../ui';
 import { count, type Range, RangePicker, ruleCounts, Spark, useRange } from './Fleet';
 import { AdoptButton } from './Rules';
 
@@ -187,6 +187,9 @@ interface Settings {
   model: string;
   sweep_model: string;
   protected_subjects: string[];
+  sweep_enabled: boolean;
+  review_enabled: boolean;
+  anomaly_investigation_enabled: boolean;
   [k: string]: Json;
 }
 
@@ -211,6 +214,13 @@ const settingsQuery = {
   queryKey: ['autopilot', 'settings'],
   queryFn: () => api<Settings>('GET', '/api/settings/autopilot'),
 };
+
+// The cases the autopilot opens on its own, each with a setting that turns it off.
+const triggers = [
+  ['sweep_enabled', 'hourly sweep'],
+  ['review_enabled', 'daily review'],
+  ['anomaly_investigation_enabled', 'anomaly investigation'],
+] as const;
 
 const modes: Record<string, string> = {
   off: 'Off',
@@ -354,44 +364,67 @@ export function Investigate({ target, name }: { target: { rule: string } | { rou
   );
 }
 
+export function AutopilotTabs({ current }: { current: string }) {
+  return (
+    <Tabs
+      label="Autopilot"
+      current={current}
+      tabs={[
+        { to: '/autopilot', label: 'Overview' },
+        { to: '/autopilot?tab=spend', label: 'Spend' },
+        { to: '/autopilot?tab=settings', label: 'Settings' },
+        { to: '/autopilot/notes', label: 'Memory' },
+      ]}
+    />
+  );
+}
+
 export function Autopilot() {
   const q = useQuery(autopilotQuery);
   const can = useCan();
   const [search, setSearch] = useSearch();
   const find = search.get('rule') ?? '';
+  const raw = search.get('tab');
+  // Null is Overview, which an unknown tab value also renders.
+  const tab = raw === 'spend' || raw === 'settings' ? raw : null;
   const stats = can('stats.read');
-  const range = useRange(stats);
+  // Only Overview reads the range.
+  const range = useRange(stats && !tab);
   if (!q.data) return <Pending error={q.error} />;
   const st = q.data;
   return (
     <Page
       title="Autopilot"
       info="Adds short-lived rate limit rules against an attack while it runs. A language model investigates and proposes; admin checks every proposal and your budgets before a rule reaches an edge. Every autopilot rule expires."
-      actions={
-        <>
-          <Link to="/autopilot/notes" className="rounded-control bg-panel px-3.5 py-1.5 text-sm font-medium text-heading shadow-field hover:bg-soft">
-            Memory
-          </Link>
-          {stats && <RangePicker r={range} />}
-        </>
-      }
+      actions={stats && !tab && <RangePicker r={range} />}
     >
-      <Status st={st} canManage={can('settings.manage')} />
-      <Input
-        label="Find an autopilot rule"
-        hint="Part of a live rule's ID, such as login. The cases list shows the cases on that exact rule ID."
-        type="search"
-        className="max-w-md"
-        value={find}
-        onChange={(e) => setSearch({ rule: e.target.value })}
-      />
-      <LiveRules rules={st.rules.filter((r) => r.id.includes(find.trim()))} find={find.trim()} range={stats ? range : undefined} />
-      <Exclusions canManage={can('autopilot.manage')} />
-      <Cases rule={find.trim()} />
-      <SpendCard spend={st.spend} days={st.spend_days} />
-      <Precision rows={st.precision} />
-      <SettingsCard canManage={can('settings.manage')} />
-      <Prices canManage={can('settings.manage')} />
+      <AutopilotTabs current={tab ? `/autopilot?tab=${tab}` : '/autopilot'} />
+      {tab === 'spend' ? (
+        <>
+          <SpendCard spend={st.spend} days={st.spend_days} />
+          <Precision rows={st.precision} />
+        </>
+      ) : tab === 'settings' ? (
+        <>
+          <SettingsCard canManage={can('settings.manage')} />
+          <Prices canManage={can('settings.manage')} />
+        </>
+      ) : (
+        <>
+          <Status st={st} canManage={can('settings.manage')} />
+          <Input
+            label="Find an autopilot rule"
+            hint="Part of a live rule's ID, such as login. The cases list shows the cases on that exact rule ID."
+            type="search"
+            className="max-w-md"
+            value={find}
+            onChange={(e) => setSearch({ rule: e.target.value })}
+          />
+          <LiveRules rules={st.rules.filter((r) => r.id.includes(find.trim()))} find={find.trim()} range={stats ? range : undefined} />
+          <Exclusions canManage={can('autopilot.manage')} />
+          <Cases rule={find.trim()} />
+        </>
+      )}
     </Page>
   );
 }
@@ -423,6 +456,8 @@ function Meter({ label, used, max }: { label: string; used: number; max: number 
 function Status({ st, canManage }: { st: State; canManage: boolean }) {
   const [off, setOff] = useState(false);
   const [done, setDone] = useState(false);
+  const settings = useQuery(settingsQuery);
+  const triggersOff = settings.data ? triggers.filter(([k]) => !settings.data[k]).map(([, name]) => name) : [];
   return (
     <Card
       title="Status"
@@ -441,7 +476,10 @@ function Status({ st, canManage }: { st: State; canManage: boolean }) {
           )}
         </div>
         {done && st.mode === 'off' && <Notice>Autopilot is off. Its rules are retired and leave the edges with the version just published.</Notice>}
-        {st.mode === 'off' && !done && <p className="text-sm text-body">Off: autopilot opens no cases and publishes nothing. Turn it on in the settings below.</p>}
+        {st.mode === 'off' && !done && <p className="text-sm text-body">Off: autopilot opens no cases and publishes nothing. Turn it on in <Link to="/autopilot?tab=settings" className="underline">Settings</Link>.</p>}
+        {st.mode !== 'off' && triggersOff.length > 0 && (
+          <p className="text-sm text-body">Off in settings: {[triggersOff.slice(0, -1).join(', '), triggersOff.at(-1)].filter(Boolean).join(' and ')}.</p>
+        )}
         {st.runners.length > 0 && (
           <ul className="flex flex-col gap-1 text-sm">
             {st.runners.map((r) => (
@@ -699,15 +737,53 @@ function SettingsCard({ canManage }: { canManage: boolean }) {
   const mins = timeUnits.slice(1, 3);
   const fieldErrors = save.error instanceof Problem && save.error.errors.length > 0;
   return (
-    <Card title="Settings" intro="What the autopilot may do. Saved on their own, not with the draft, and audited; they apply from the next run, within 30 seconds.">
+    <Card title="Settings" badge={<Badge tone="amber">Applies when saved</Badge>} intro="What the autopilot may do. Saved on their own, not with the draft, and audited; they apply from the next run, within 30 seconds.">
       <fieldset disabled={!canManage} className="flex flex-col gap-5 text-sm">
         <Labeled
           label="Mode"
           issues={at('mode')}
-          hint={q.data.mode === 'off' ? 'Off: pick observe or auto to turn it on.' : 'To turn it off, use Turn autopilot off above, which asks for a reason.'}
+          hint={q.data.mode === 'off' ? 'Off: pick observe or auto to turn it on.' : 'To turn it off, use Turn autopilot off on Overview, which asks for a reason.'}
         >
           <Choice value={v.mode} options={q.data.mode === 'off' ? ['off', 'observe', 'auto'] : ['observe', 'auto']} labels={modes} onChange={(m) => set('mode', m)} />
         </Labeled>
+        <fieldset className="flex flex-col gap-3 text-sm">
+          <legend className="font-medium text-heading">Cases it opens on its own</legend>
+          <span className="text-body">
+            {v.mode === 'off'
+              ? 'Autopilot is off, so none of these open. Pick observe or auto above to turn it on.'
+              : 'Each needs a connected runner. Turning one off stops new cases of that kind only; cases already queued still run.'}
+          </span>
+          <Check
+            label="Hourly sweep"
+            hint={
+              v.sweep_enabled
+                ? 'On: every hour it looks for routes no rule watches and proposes sensors, while the sensor budget has room.'
+                : "Off: it doesn't go looking for routes no rule watches."
+            }
+            checked={v.sweep_enabled}
+            onChange={(e) => set('sweep_enabled', e.target.checked)}
+          />
+          <Check
+            label="Daily review"
+            hint={
+              v.review_enabled
+                ? 'On: once a day it retires sensors that never fire or keep closing benign, re-checks notes and summarizes the day.'
+                : "Off: sensors aren't retired early to make room, so the hourly sweep waits while the sensor budget is full, and notes on the same topic aren't merged. Admin still re-checks notes daily."
+            }
+            checked={v.review_enabled}
+            onChange={(e) => set('review_enabled', e.target.checked)}
+          />
+          <Check
+            label="Anomaly investigation"
+            hint={
+              v.anomaly_investigation_enabled
+                ? "On: a case opens when traffic, auth failures or a rule's matches surge, and on an autopilot rule's own alerts. A surge alert that isn't critical waits up to 10 minutes for the verdict; an autopilot rule's own alerts aren't sent unless critical, and a person is notified when its case needs one."
+                : "Off: anomalies are recorded and notified with no wait, unless a case is already open on one, and an autopilot rule's own alerts get no case."
+            }
+            checked={v.anomaly_investigation_enabled}
+            onChange={(e) => set('anomaly_investigation_enabled', e.target.checked)}
+          />
+        </fieldset>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <Labeled label="Enforce rules at once" hint="Proposed, logging or blocking, 0 to 50." issues={at('max_enforcing')}>
             <Count value={v.max_enforcing} onChange={(x) => set('max_enforcing', x)} />
@@ -749,7 +825,11 @@ function SettingsCard({ canManage }: { canManage: boolean }) {
           <Labeled label="Model" hint="For cases a person or an anomaly opens. An ID with claude runs on a claude credential, any other on openai." issues={at('model')}>
             <input value={v.model} onChange={(e) => set('model', e.target.value)} />
           </Labeled>
-          <Labeled label="Sweep and review model" hint="For the hourly sweep and the daily review." issues={at('sweep_model')}>
+          <Labeled
+            label="Sweep and review model"
+            hint={v.sweep_enabled || v.review_enabled ? 'For the hourly sweep and the daily review.' : 'For the hourly sweep and the daily review, both off now.'}
+            issues={at('sweep_model')}
+          >
             <input value={v.sweep_model} onChange={(e) => set('sweep_model', e.target.value)} />
           </Labeled>
         </div>

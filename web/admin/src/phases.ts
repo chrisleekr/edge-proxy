@@ -17,8 +17,8 @@ export const phases: {
   {
     phase: 'config',
     key: 'config_rules',
-    title: 'Config rules',
-    intro: 'Choose per-route settings such as auth, CORS and upstream timeout. Every matching rule applies; a later rule overrides an earlier one, setting by setting.',
+    title: 'Access rules',
+    intro: 'Decide who gets in and how each request is handled: blocking, token checks, CORS and timeouts. Every matching rule applies; a later rule overrides an earlier one, setting by setting.',
     info: 'Runs first, before the token is checked and the locale is picked, so these rules cannot match on JWT claims or the locale. The other two phases can.',
     blank: { settings: {} },
     fields: [

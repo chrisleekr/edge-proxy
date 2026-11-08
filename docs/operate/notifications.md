@@ -15,11 +15,13 @@ Set [`ALERTMANAGER_URL`](../deploy/admin.md#variables) to send them. Without it,
 
 ![Notifications](../assets/screenshots/notifications.png)
 
+**Notifications** has two tabs. **Anomalies** lists what admin found in the last 7 days; resolved ones are hidden behind **Show N resolved anomalies** (`?resolved=1`) until you ask. **Settings** (`?tab=settings`, for roles that can read config) holds the defaults and the per-rule settings below.
+
 ## How a check decides
 
 Each minute, admin compares the last **window** (5 minutes) with the **baseline** before it (60 minutes), both whole minutes, summed over every version and edge. The newest 30 seconds are left out, since edges may still be reporting them.
 
-- A signal **trips** when its value passes its thresholds, and only with at least `min_requests` to judge, so a quiet hour can't page anyone. A share of errors also needs at least `min_events` of them (the 5xx or failed token checks), so a handful of errors in a quiet window doesn't trip it. Saved settings keep the thresholds they were saved with, and one missing from a saved signal is 0: only a signal never saved takes the defaults, so set a missing `min_events` on **Notifications**.
+- A signal **trips** when its value passes its thresholds, and only with at least `min_requests` to judge, so a quiet hour can't page anyone. A share of errors also needs at least `min_events` of them (the 5xx or failed token checks), so a handful of errors in a quiet window doesn't trip it. Saved settings keep the thresholds they were saved with, and one missing from a saved signal is 0: only a signal never saved takes the defaults, so set a missing `min_events` on **Notifications → Settings**.
 - An anomaly starts **pending** and notifies (**firing**) after `fire_after` checks in a row trip (2). A blip that trips once is dropped.
 - A firing anomaly **resolves** after `resolve_after` checks in a row pass (5). Admin sends the resolved alert for 5 more minutes, so Alertmanager sends its resolved notification even across a restart; an anomaly never sent firing sends no resolved alert.
 - Turning notifications or a signal off, or removing the rule, resolves its open anomalies at the next check.
@@ -62,7 +64,7 @@ With `autopilot.manage`, each open anomaly on **Notifications** has **Investigat
 | `rule_edge_5xx_ratio` | config, request headers | 5xx the edge sent are over 2 times their baseline share of the rule's requests, over 2 times their share of all requests, and over 1%, with at least 10 of them | warning |
 | `rule_upstream_5xx_ratio` | config, request headers | 5xx from the upstream are over 2 times their baseline share of the rule's requests, over 2 times their share of all requests, and over 5%, with at least 10 of them | warning |
 | `rule_auth_failure_ratio` | config | Failed token checks are over 2 times their baseline share of the rule's requests, over 2 times their share of all requests, and over 10%, with at least 10 of them | warning |
-| `rule_block_spike` | rate limit, config | The rule blocks over 3 times its baseline share of the requests it checks, and over 1%. A config rule checks every request, and blocks with its `block` setting | warning |
+| `rule_block_spike` | rate limit, config | The rule blocks over 3 times its baseline share of the requests it checks, and over 1%. An access rule checks every request, and blocks with its `block` setting | warning |
 | `rule_would_block` | rate limit, config | A rule that isn't blocking (set to log only, or under the rate-limit or block kill switch) would have refused at least one request | info |
 | `rule_fail_mode` | rate limit | Shown as **Valkey down**: at least `min_requests` requests took the rule's `fail_mode` because Valkey did not answer | critical |
 | `rule_subject_dominates` | rate limit | One client got over half of the rule's blocks, with at least 100 blocks: a targeted flood, or one client misbehaving | warning |
@@ -84,7 +86,7 @@ A request matched by a config or request-header rule counts toward that rule's o
 
 Each rule can replace a signal's settings: turn it off, change its severity, or set its own thresholds. A rule's setting replaces the default for that rule and signal only; fleet signals have no per-rule setting. Settings for a rule ID no longer in the policy stay saved and are shown as unused.
 
-Notification settings are saved on their own, apart from the draft, like the rollback guard's: changing them needs `settings.manage`, needs no publish, and takes effect at the next check. Every change is audited (`settings.notifications`).
+Notification settings are saved on their own, apart from the draft, like the rollback guard's, and carry an **Applies when saved** badge: changing them needs `settings.manage`, needs no publish, and takes effect at the next check. Every change is audited (`settings.notifications`).
 
 ## Alerts
 

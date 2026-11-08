@@ -3,6 +3,7 @@ import { useId, useState } from 'react';
 import { api, useCan } from './api';
 import { useOptionalDraft } from './draft';
 import { phases, rulesOf } from './phases';
+import { allowed, nav } from './nav';
 import { navigate } from './router';
 import { Modal } from './ui';
 import { autopilotQuery } from './pages/Autopilot';
@@ -14,7 +15,7 @@ import { useVersions } from './pages/Publish';
 // it, so it must be typed that way: only its case is normalized here.
 const client = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]*:[0-9a-f:.]+\/64|AS\d+)$/i;
 
-// Palette finds a rule, autopilot rule, route, version, user, case or note by name and opens it, from
+// Palette finds a page, settings section, rule, autopilot rule, route, version, user, case or note by name and opens it, from
 // Cmd or Ctrl+K on any screen. It offers only what the role may open.
 // Enter opens the highlighted option, the first unless arrows moved it.
 export function Palette({ onClose }: { onClose: () => void }) {
@@ -44,6 +45,14 @@ export function Palette({ onClose }: { onClose: () => void }) {
     // Rules come first: a rule is what an ID most often names.
     ...(draft
       ? phases.flatMap((p) => rulesOf(draft.config, p.key).map((r) => ({ label: r.id, kind: p.title.toLowerCase().replace(/s$/, ''), to: `/rules/${p.phase}/${encodeURIComponent(r.id)}` })))
+      : []),
+    ...nav.flatMap((g) => g.links.filter((l) => allowed(l, can)).map((l) => ({ label: l.label, kind: 'page', to: l.to }))),
+    ...(can('config.read')
+      ? [
+          { label: 'Kill switch', kind: 'setting', to: '/settings#kill-switch' },
+          { label: 'Trusted client allowlist', kind: 'setting', to: '/settings#trusted-clients' },
+          { label: 'Rollback guard', kind: 'setting', to: '/settings#rollback-guard' },
+        ]
       : []),
     // A live autopilot rule opens the case that made it.
     ...(autopilot.data?.rules ?? []).map((r) => ({ label: r.id, kind: 'autopilot rule', to: `/autopilot/cases/${r.case_id}` })),
@@ -87,7 +96,7 @@ export function Palette({ onClose }: { onClose: () => void }) {
         aria-controls={id}
         aria-autocomplete="list"
         aria-activedescendant={found.length ? `${id}-${cur}` : undefined}
-        placeholder="A rule ID, a route, a version, a user, a case, a note, an IP or an IPv6 /64"
+        placeholder="A page, rule, route, version, user, case, note or IP"
         className="w-full"
         value={text}
         onChange={(e) => (setText(e.target.value), setAt(0))}

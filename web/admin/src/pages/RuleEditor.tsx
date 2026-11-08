@@ -3,7 +3,7 @@ import { useContext, useEffect, useState } from 'react';
 import type { RuleGroupType, RuleType } from 'react-querybuilder';
 import { api, type Checked, type Config, type Issue, type Json, type JsonObject, type Rendered, type Rule, type Schema, useCan } from '../api';
 import { useDraft } from '../draft';
-import { phaseOf, phases, rulesOf } from '../phases';
+import { phaseOf, phases, ruleLink, rulesOf } from '../phases';
 import { Link, navigate, useLeaveGuard } from '../router';
 import { RuleBuilder, toAST, usePreview } from '../RuleBuilder';
 import { Errors, RuleForm } from '../RuleForms';
@@ -21,7 +21,7 @@ function LiveCard({ id }: { id: string }) {
   const anomalies = useQuery(anomaliesQuery);
   const open = (anomalies.data?.anomalies ?? []).filter((a) => a.rule === id && a.state !== 'resolved');
   return (
-    <Card title="Live" region info="Counts from every edge, for the version each request was served by. Every request is counted, not sampled. A rule not yet published shows 0 matched.">
+    <Card title="Traffic" region info="Counts from every edge, for the version each request was served by. Every request is counted, not sampled. A rule not yet published shows 0 matched.">
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           {r.q.data ? <Live r={r} id={id} /> : <ErrorBox error={r.q.error} />}
@@ -148,10 +148,23 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
   const warnings = quiet(mine(check?.checked?.warnings, base));
   const at = (f: string) => errors.filter((i) => i.path === f || i.path.startsWith(`${f}.`) || i.path.startsWith(`${f}[`));
   useLeaveGuard(changed ? 'This rule has changes not applied to the draft. Leave and lose them?' : undefined);
-  if (!p) return <NotFound>There is no phase called “{phase}”.</NotFound>;
+  const back: [string, string] = ['/rules', 'Back to rules'];
+  if (!p) {
+    // Someone typed a rule's ID where the list name goes.
+    const to = ruleLink(d.config, phase);
+    return to ? (
+      <NotFound title="Rule not found" back={back}>
+        <Link to={to} className="font-medium text-heading underline">
+          Open rule {phase}
+        </Link>
+      </NotFound>
+    ) : (
+      <NotFound back={back}>There is no rule list called “{phase}”.</NotFound>
+    );
+  }
   if (id && !existing)
     return (
-      <NotFound title="Rule not found">
+      <NotFound title="Rule not found" back={back}>
         The draft has no {p.title.toLowerCase().replace(/s$/, '')} called “{id}”. It may have been deleted or renamed.
       </NotFound>
     );
@@ -246,6 +259,7 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
       }
     >
       <ReadOnlyNote />
+      {canWrite && <p className="text-sm text-body">Apply to draft keeps this change in your unsaved draft. Save draft, then Publish, puts it live.</p>}
       {existing && stats && <LiveCard id={existing.id} />}
       <Editable>
         {from && (

@@ -98,9 +98,9 @@ test('docs screenshots', async ({ page }) => {
   await shot(page, 'autopilot-note', name);
 
   await page.goto('/tests');
-  // The simulate form below the results loads with the expression schema.
-  // Scrolling before it renders stops short at the page's end, so the
-  // shot's scroll position would depend on which request answers first.
+  // The simulate form above the results loads with the expression schema.
+  // Scrolling before it renders would move the form, so the shot's scroll
+  // position would depend on which request answers first.
   await expect(page.getByRole('combobox', { name: 'Method' })).toBeVisible();
   await page.getByRole('button', { name: 'Run tests on the saved draft' }).click();
   // The results are below the tests' editor.

@@ -816,17 +816,17 @@ func (v *validator) unused() {
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Global.CORSPolicies)) {
 		if !cors[name] {
-			v.warn(fmt.Sprintf("global.cors_policies[%q]", name), `no config rule selects it, so it has no effect; set "cors_policy": %q in a config rule's settings`, name)
+			v.warn(fmt.Sprintf("global.cors_policies[%q]", name), `no access rule selects it, so it has no effect; set "cors_policy": %q in an access rule's settings`, name)
 		}
 	}
 	for i, is := range c.Auth.Issuers {
 		if !issuers[is.ID] {
-			v.warn(fmt.Sprintf("auth.issuers[%d]", i), `no config rule accepts it and it is not in default_accepted, so no request accepts its tokens; add %q to either`, is.ID)
+			v.warn(fmt.Sprintf("auth.issuers[%d]", i), `no access rule accepts it and it is not in default_accepted, so no request accepts its tokens; add %q to either`, is.ID)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Global.Responses)) {
 		if !templates[name] {
-			v.warn(fmt.Sprintf("global.responses[%q]", name), "nothing sends it; name it in global.defaults.responses or in a config rule's responses")
+			v.warn(fmt.Sprintf("global.responses[%q]", name), "nothing sends it; name it in global.defaults.responses or in an access rule's responses")
 		}
 	}
 }

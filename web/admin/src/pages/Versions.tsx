@@ -51,7 +51,16 @@ export function Versions({ can }: { can: (p: string) => boolean }) {
               {v.message}
               {v.change_summary && <div className="text-body">{v.change_summary}</div>}
             </td>
-            <td className="whitespace-normal">{v.guard_outcome && guardSays(v.guard_outcome.decision)}</td>
+            <td className="whitespace-normal">
+              {v.guard_outcome &&
+                (v.guard_outcome.decision === 'insufficient_data' ? (
+                  <span className="text-muted" title={guardSays('insufficient_data')}>
+                    not judged
+                  </span>
+                ) : (
+                  guardSays(v.guard_outcome.decision)
+                ))}
+            </td>
           </tr>
         ))}
       </Table>

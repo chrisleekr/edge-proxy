@@ -64,7 +64,7 @@ make demo-outage
 4. Within a few seconds the edge loads the new version. Run the loop again with a new IP, such as `203.0.113.10`, and `seq 1 7`: five requests get through.
 5. On **Versions**, open the new version and **Revert** it if you want the old limit back. A revert is itself a new version.
 
-Every step you took is on **Audit**.
+Every step you took is on **Audit log**.
 
 ## 4. Clean up
 

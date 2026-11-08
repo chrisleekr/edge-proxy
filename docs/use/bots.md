@@ -10,7 +10,7 @@ The edge has no bot score. It gives rules the facts a score would be built from,
 | Many different paths, IDs or IPs | `distinct` rate limits | Valkey ([Distinct](rate-limiting.md#distinct)) |
 | Many 404s, 401s or 403s | `count_statuses` rate limits | Each edge's memory ([Counting responses](rate-limiting.md#counting-responses)) |
 
-A config rule's `block` setting answers 403; a rate limit answers 429. Every recipe below starts as `log`: watch **Stats** and the access log's `client.signals` and `tls.client.ja4` until only the clients you mean to stop show up, then switch to `block` and publish through a [canary](publishing.md#canary). The [rollback guard](publishing.md#rollback-guard) judges a rule that logged first against its logged share × `max_vs_shadow` (3×); a new rule with no log run rolls back if it blocks over `max_ratio` (5%) of requests. `kill_switch.block` turns every `block` setting back into `log`.
+An access rule's `block` setting answers 403; a rate limit answers 429. Every recipe below starts as `log`: watch **Stats** and the access log's `client.signals` and `tls.client.ja4` until only the clients you mean to stop show up, then switch to `block` and publish through a [canary](publishing.md#canary). The [rollback guard](publishing.md#rollback-guard) judges a rule that logged first against its logged share × `max_vs_shadow` (3×); a new rule with no log run rolls back if it blocks over `max_ratio` (5%) of requests. `kill_switch.block` turns every `block` setting back into `log`.
 
 A signal or fingerprint is a hint, not proof. A careful bot sends a browser's headers and TLS stack, and some real users run privacy tools or old browsers. Keep crawlers you want out of every blocking rule with `not client.verified_bot`.
 
@@ -18,7 +18,7 @@ A signal or fingerprint is a hint, not proof. A careful bot sends a browser's he
 
 ## Refuse tools on pages
 
-A config rule that blocks scripted clients on the site's pages, but not on its API, where tools are expected:
+An access rule that blocks scripted clients on the site's pages, but not on its API, where tools are expected:
 
 ```text
 client.signals in {"ua_missing" "ua_tool" "ua_headless"} and not starts_with(http.request.uri.path, "/api/") and not client.verified_bot
@@ -32,7 +32,7 @@ Browser signals such as `browser_no_sec_fetch` fire for a client that claims a m
 
 ## JSON answers on API paths
 
-The default `forbidden` template is HTML. Add a template named `forbidden-json` with status 403 and content type `application/problem+json` on **Templates**, then map it for the API in a config rule:
+The default `forbidden` template is HTML. Add a template named `forbidden-json` with status 403 and content type `application/problem+json` on **Templates**, then map it for the API in an access rule:
 
 ```text
 starts_with(http.request.uri.path, "/api/")

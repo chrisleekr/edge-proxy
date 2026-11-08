@@ -1,9 +1,9 @@
-import { useQueries, useQuery } from '@tanstack/react-query';
-import { type ReactNode, useId } from 'react';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type ReactNode, useEffect, useId, useRef } from 'react';
 import { api, type VersionDetail } from '../api';
 import { phases, ruleLink, rulesOf } from '../phases';
 import { Link } from '../router';
-import { ErrorBox, Info, Page, Rolling, ago, when, who } from '../ui';
+import { Button, ErrorBox, Info, Page, Rolling, ago, plural, when, who } from '../ui';
 import { type Event, said } from './Audit';
 import { LogLink, useLogSearch } from '../logSearch';
 import { Bars, codeName, type Edge, pct, type Range, RangePicker, type Row, statusCodes, statusOf, sum, Unranked, useMarks, useRange } from './Fleet';
@@ -19,7 +19,7 @@ export function Dashboard({ can }: { can: (p: string) => boolean }) {
   const d = useData(can);
   return (
     <Page title="Dashboard" actions={d.stats && <RangePicker r={d.stats} />}>
-      <Attention d={d} />
+      <Attention d={d} can={can} />
       {/* One source order for every width, so screen readers and Tab follow
           what people see: traffic, what is live and where, then detail.
           From lg the live column sits beside the rest and spans their rows;
@@ -124,7 +124,7 @@ function useData(can: (p: string) => boolean) {
 }
 type Data = ReturnType<typeof useData>;
 
-function Panel({ title, info, link, error, children }: { title: string; info?: ReactNode; link?: [string, string]; error?: unknown; children: ReactNode }) {
+function Panel({ title, info, link, error, children }: { title: string; info?: ReactNode; link?: [string, string] | undefined; error?: unknown; children: ReactNode }) {
   const id = useId();
   return (
     <section aria-labelledby={id} className="flex min-w-0 flex-col gap-4 rounded-card bg-panel p-6 shadow-card">
@@ -186,6 +186,10 @@ function totals(rows: Row[]) {
 }
 
 type Item = {
+  // key names one condition; an ack lasts while the same key is present.
+  key: string;
+  // say is the item in plain text, kept with the ack for the audit log.
+  say: string;
   tone: 'danger' | 'warning' | 'neutral';
   text: ReactNode;
   to: string;
@@ -197,22 +201,34 @@ type Item = {
 // Attention lists states someone should act on or watch, each read from
 // admin: the dashboard sets no thresholds of its own, only the anomaly
 // checks do.
-function Attention({ d }: { d: Data }) {
+type Ack = { key: string; summary: string; actor: string; acked_at: string };
+
+function Attention({ d, can }: { d: Data; can: (p: string) => boolean }) {
+  const qc = useQueryClient();
   const items: Item[] = [];
+  // Every condition that holds, before display cuts and nesting hide some from items.
+  const present = new Set<string>();
+  const acks = useQuery({ queryKey: ['attention-acks'], queryFn: () => api<Ack[]>('GET', '/api/attention/acks'), refetchInterval: 15_000, enabled: can('stats.read') });
+  const ackedKeys = new Set((acks.data ?? []).map((a) => a.key));
   const checked: string[] = [];
   const cfg = d.live?.data?.config;
   // A check counts only once its data is in, so the panel never says
   // nothing needs attention about something it has not read yet. A failed
   // read is settled too, and shows its own error, so it can't wait forever.
   let waiting = false;
+  // unreadable stops acks from being cleared on a read that did not work.
+  let unreadable = false;
   const check = (q: { data?: unknown; isError?: boolean } | undefined, name: string) => {
     if (!q) return;
+    unreadable ||= !!q.isError;
     if (q.data !== undefined) checked.push(name);
     else if (!q.isError) waiting = true;
   };
   check(d.live, 'kill switch');
   if (cfg?.kill_switch.rate_limit)
     items.push({
+      key: 'kill:rate_limit',
+      say: 'Rate limiting is switched off',
       tone: 'danger',
       text: 'Rate limiting is switched off. No request is blocked for going over a limit; every rule only counts what it would have blocked.',
       to: '/settings',
@@ -220,13 +236,17 @@ function Attention({ d }: { d: Data }) {
     });
   if (cfg?.kill_switch.block)
     items.push({
+      key: 'kill:block',
+      say: 'Blocking by access rules is switched off',
       tone: 'danger',
-      text: 'Blocking by config rules is switched off. No request gets a 403 from a block setting; every such rule only logs what it would have blocked.',
+      text: 'Blocking by access rules is switched off. No request gets a 403 from a block setting; every such rule only logs what it would have blocked.',
       to: '/settings',
       action: 'Settings',
     });
   if (cfg?.kill_switch.auth)
     items.push({
+      key: 'kill:auth',
+      say: 'JWT checks are switched off',
       tone: 'danger',
       text: 'JWT checks are switched off. Requests reach upstreams on every route without their token being checked.',
       to: '/settings',
@@ -242,6 +262,8 @@ function Attention({ d }: { d: Data }) {
   const live = vs.find((v) => v.status === 'active');
   if (rb && vs.every((v) => v.version <= rb.version || v.source === 'guard_rollback'))
     items.push({
+      key: `rollback:${rb.version}`,
+      say: rb.abort_reason ? `Version ${rb.version}'s canary was aborted` : `The guard rolled back version ${rb.version}`,
       tone: 'danger',
       text: [
         rb.abort_reason ? `Version ${rb.version}'s canary was aborted: ${rb.abort_reason}.` : `The guard rolled back version ${rb.version}${rb.guard_outcome ? ` ${ago(rb.guard_outcome.at)}` : ''}.`,
@@ -256,6 +278,9 @@ function Attention({ d }: { d: Data }) {
     });
   for (const v of vs.filter((x) => (x.status === 'active' || x.status === 'canary') && x.guard_outcome?.decision === 'alert'))
     items.push({
+      // The time keeps a later alert on the same version apart from this one.
+      key: `guard:${v.version}:${v.guard_outcome!.at.replace(/[^A-Za-z0-9._-]/g, '-')}`,
+      say: `The guard raised an alert on ${v.status === 'canary' ? 'canary' : 'live'} version ${v.version}`,
       tone: 'warning',
       text: [`The guard raised an alert on ${v.status === 'canary' ? 'canary' : 'live'} version ${v.version}, ${ago(v.guard_outcome!.at)}.`, ...outcomeSays(v.guard_outcome!), whyKept(v.guard_outcome!, v.source)].join(' '),
       to: `/versions/${v.version}`,
@@ -264,6 +289,8 @@ function Attention({ d }: { d: Data }) {
   const c = d.canary?.data?.canary;
   if (c)
     items.push({
+      key: `canary:${c.version}`,
+      say: `Version ${c.version} is on trial (canary)`,
       tone: 'neutral',
       text: `Version ${c.version} is on trial (canary) for ${c.percent}% of traffic, started ${ago(c.started_at)}. The rest still gets the live version until you promote or stop it.`,
       to: '/publish',
@@ -275,8 +302,10 @@ function Attention({ d }: { d: Data }) {
   const fallback = edges.filter((e) => e.config_source !== 'admin');
   if (fallback.length)
     items.push({
+      key: 'fallback',
+      say: 'Edges could not get config from admin',
       tone: 'warning',
-      text: `${fallback.length} of ${edges.length} live edges could not get config from admin and run on ${[...new Set(fallback.map((e) => sources[e.config_source] ?? e.config_source))].join(' or ')}. They keep serving, but miss new publishes until they reach admin again.`,
+      text: `${fallback.length} of ${edges.length} reporting edges could not get config from admin and run on ${[...new Set(fallback.map((e) => sources[e.config_source] ?? e.config_source))].join(' or ')}. They keep serving, but miss new publishes until they reach admin again.`,
       to: '/fleet',
       action: 'Fleet',
     });
@@ -284,8 +313,10 @@ function Attention({ d }: { d: Data }) {
     const behind = edges.filter((e) => !e.versions.includes(d.liveVersion!));
     if (behind.length)
       items.push({
+        key: `behind:${d.liveVersion}`,
+        say: `Edges have not loaded version ${d.liveVersion}`,
         tone: 'warning',
-        text: `${behind.length} live ${behind.length === 1 ? 'edge has' : 'edges have'} not loaded version ${d.liveVersion}, so ${behind.length === 1 ? 'it still enforces' : 'they still enforce'} an older policy.`,
+        text: `${behind.length} reporting ${behind.length === 1 ? 'edge has' : 'edges have'} not loaded version ${d.liveVersion}, so ${behind.length === 1 ? 'it still enforces' : 'they still enforce'} an older policy.`,
         to: '/fleet',
         action: 'Fleet',
       });
@@ -298,7 +329,10 @@ function Attention({ d }: { d: Data }) {
   // with its own counts. The lines wait until every version has loaded, so a
   // slow fetch never reads as settings that could not be read.
   let configsLoading = false;
-  for (const q of d.configs?.values() ?? []) if (q && q.data === undefined && !q.isError) configsLoading = true;
+  for (const q of d.configs?.values() ?? []) {
+    if (q && q.data === undefined && !q.isError) configsLoading = true;
+    unreadable ||= !!q?.isError;
+  }
   waiting ||= configsLoading;
   const ruleAt = (version: number, id: string) => {
     const c = d.configs?.get(version)?.data?.config;
@@ -334,6 +368,8 @@ function Attention({ d }: { d: Data }) {
       by.unknown && `${count(by.unknown)} for rules whose settings could not be read`,
     ].filter(Boolean);
     items.push({
+      key: 'valkey',
+      say: 'Valkey did not answer rate limit checks',
       tone: 'warning',
       text: `Valkey did not answer ${count(failed)} rate limit checks in the ${d.span}, counting one check per rule per request. Each rule's "When Valkey cannot answer" setting decided the request: ${parts.join('; ')}.`,
       to: '/stats',
@@ -342,11 +378,13 @@ function Attention({ d }: { d: Data }) {
   }
   // Log only runs without the penalty, so blocking would also stop a key's
   // later requests until its penalty ends.
-  for (const r of [...shadow.values()]
-    .filter((x) => x.over > 0 && !configsLoading)
-    .sort((a, b) => b.over - a.over)
-    .slice(0, 3))
+  const over = [...shadow.values()].filter((x) => x.over > 0).sort((a, b) => b.over - a.over);
+  for (const r of over) present.add(`shadow:${r.id}`);
+  // Acked rules would otherwise take the top slots and hide a newer one.
+  for (const r of configsLoading ? [] : [...over.filter((x) => !ackedKeys.has(`shadow:${x.id}`)).slice(0, 3), ...over.filter((x) => ackedKeys.has(`shadow:${x.id}`))])
     items.push({
+      key: `shadow:${r.id}`,
+      say: `Rule ${r.id} is over its limit while set to log only`,
       tone: 'neutral',
       text: (
         <>
@@ -367,8 +405,12 @@ function Attention({ d }: { d: Data }) {
       {label(k.signal)} for rule <code className="font-medium">{k.rule}</code>: {k.summary}.
     </>
   );
-  for (const { a, under } of groupAnomalies((d.anomalies?.data?.anomalies ?? []).filter((x) => x.state === 'firing')))
+  const firing = (d.anomalies?.data?.anomalies ?? []).filter((x) => x.state === 'firing');
+  for (const a of firing) present.add(`anomaly:${a.id}`);
+  for (const { a, under } of groupAnomalies(firing))
     items.push({
+      key: `anomaly:${a.id}`,
+      say: a.rule ? `${label(a.signal)} for rule ${a.rule}` : a.summary,
       tone: severe[a.severity as keyof typeof severe] ?? 'neutral',
       // A fleet summary names its signal; a rule's needs the rule.
       text: a.rule ? ruleSays(a) : `${a.summary}.`,
@@ -381,11 +423,63 @@ function Attention({ d }: { d: Data }) {
   check(d.verify, 'audit chain');
   if (v?.details?.broken_at)
     items.push({
+      key: `audit:${v.details.broken_at}`,
+      say: 'The audit log failed its tamper check',
       tone: 'danger',
       text: `The audit log failed its tamper check at event ${v.details.broken_at}: an event from there was changed, removed or signed with an unknown key.`,
       to: '/audit',
       action: 'Audit log',
     });
+
+  const canAck = can('attention.ack');
+  const refresh = () => qc.invalidateQueries({ queryKey: ['attention-acks'] });
+  const send = useMutation({
+    mutationFn: (a: { it: Item; undo?: boolean }) =>
+      a.undo ? api('DELETE', `/api/attention/acks?key=${encodeURIComponent(a.it.key)}&reason=undo`) : api('POST', '/api/attention/acks', { key: a.it.key, summary: a.it.say.slice(0, 500) }),
+    onSettled: refresh,
+  });
+  for (const it of items) present.add(it.key);
+  const shown = items.filter((it) => !ackedKeys.has(it.key));
+  const acked = items.filter((it) => ackedKeys.has(it.key));
+  // An ack ends when its item is gone. Only a complete read says so: a
+  // check that failed or is loading, or one this role cannot see, would
+  // otherwise wipe acks. Valkey and log-only items follow the picked range,
+  // so only the default range can tell they are gone.
+  const complete = !waiting && !unreadable && !(d.canaryVersion !== undefined && !d.canary?.data) && !!(d.versions && d.canary && d.fleet && d.stats && d.anomalies && d.verify);
+  // An ack is cleared only by data fetched after this browser first saw it, so
+  // a dashboard older than the ack cannot clear it. Acks in the first response
+  // count from mount, so an ack made between a source's first answer and the
+  // first acks answer can still clear early; a source that is missing keeps it.
+  const mounted = useRef<number>(null);
+  const firstSeen = useRef(new Map<string, number>());
+  const gotAcks = useRef(false);
+  const sentClear = useRef(new Set<string>());
+  const gate = complete && canAck;
+  const candidates = (acks.data ?? []).filter((a) => !present.has(a.key) && (d.stats?.key === '24h' || !(a.key === 'valkey' || a.key.startsWith('shadow:')))).map((a) => a.key);
+  const sourceOf = (k: string) => {
+    const kind = k.split(':')[0];
+    return { kill: d.live, rollback: d.versions, guard: d.versions, canary: d.canaryVersion === undefined ? d.versions : d.canary, fallback: d.fleet, behind: d.fleet, valkey: d.stats?.q, shadow: d.stats?.q, anomaly: d.anomalies, audit: d.verify }[kind!];
+  };
+  // No dependency list: refs are read here, and sentClear stops repeat sends.
+  useEffect(() => {
+    mounted.current ??= Date.now();
+    if (acks.data) {
+      // A key leaves sentClear only once its ack is gone, so a clear that
+      // failed is not resent on every render.
+      for (const k of firstSeen.current.keys())
+        if (!ackedKeys.has(k)) {
+          firstSeen.current.delete(k);
+          sentClear.current.delete(k);
+        }
+      for (const k of ackedKeys) if (!firstSeen.current.has(k)) firstSeen.current.set(k, gotAcks.current ? acks.dataUpdatedAt : mounted.current);
+      gotAcks.current = true;
+    }
+    if (!gate) return;
+    const todo = candidates.filter((k) => !sentClear.current.has(k) && (sourceOf(k)?.dataUpdatedAt ?? 0) > (firstSeen.current.get(k) ?? Infinity));
+    for (const k of todo) sentClear.current.add(k);
+    if (todo.length)
+      void Promise.allSettled(todo.map((k) => api('DELETE', `/api/attention/acks?key=${encodeURIComponent(k)}&reason=cleared`))).then(() => void refresh());
+  });
 
   if (!checked.length && !waiting) return null;
   const mark = {
@@ -396,17 +490,19 @@ function Attention({ d }: { d: Data }) {
   return (
     <Panel
       title="Needs attention"
+      link={d.versions ? ['Kill switch', '/settings#kill-switch'] : undefined}
       info="Each line is read from admin: a state such as a running canary or an edge that cannot reach admin, or an anomaly the notification checks found firing. Red needs action now, amber needs a look, grey is worth knowing."
     >
-      {items.length === 0 ? (
-        <p className="text-body">{waiting ? 'Checking…' : `Nothing needs attention. Checked: ${checked.join(', ')}.`}</p>
+      <ErrorBox error={send.error ?? acks.error} />
+      {shown.length === 0 ? (
+        <p className="text-body">{waiting ? 'Checking…' : acked.length ? 'Nothing else needs attention.' : `Nothing needs attention. Checked: ${checked.join(', ')}.`}</p>
       ) : (
         <ul className="flex flex-col divide-y divide-line">
-          {items.map((it, i) => (
-            <li key={i} className="flex items-baseline gap-3 py-2 first:pt-0 last:pb-0">
+          {shown.map((it) => (
+            <li key={it.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0">
               <span aria-hidden className={`size-2 shrink-0 translate-y-[-1px] rounded-full ${mark[it.tone]}`} />
               <span className="sr-only">{{ danger: 'Urgent:', warning: 'Check:', neutral: 'Note:' }[it.tone]}</span>
-              <span className="min-w-0 flex-1 text-heading">
+              <span className="min-w-[12rem] flex-1 text-heading">
                 {it.text}
                 {!!it.under?.length && (
                   <ul className="mt-1 flex flex-col gap-1 border-l border-line pl-3 text-sm text-body">
@@ -416,12 +512,50 @@ function Attention({ d }: { d: Data }) {
                   </ul>
                 )}
               </span>
-              <Link to={it.to} className="text-sm font-medium whitespace-nowrap text-heading underline">
-                {it.action}
-              </Link>
+              <span className="flex shrink-0 items-baseline gap-3 pl-5 sm:pl-0">
+                <Link to={it.to} className="text-sm font-medium whitespace-nowrap text-heading underline">
+                  {it.action}
+                </Link>
+                {canAck && (
+                  <Button className="!px-2.5 !py-0.5" disabled={send.isPending} onClick={() => send.mutate({ it })}>
+                    Acknowledge
+                  </Button>
+                )}
+              </span>
             </li>
           ))}
         </ul>
+      )}
+      {acked.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-sm font-medium text-heading">{plural(acked.length, 'acknowledged item')}</summary>
+          <ul className="mt-2 flex flex-col divide-y divide-line">
+            {acked.map((it) => {
+              const a = acks.data!.find((x) => x.key === it.key)!;
+              return (
+                <li key={it.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0">
+                  <span className="min-w-[12rem] flex-1 text-heading">
+                    {it.text}
+                    <span className="block text-sm text-muted" title={when(a.acked_at)}>
+                      {who(a.actor)}, {ago(a.acked_at)}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-baseline gap-3">
+                    <Link to={it.to} className="text-sm font-medium whitespace-nowrap text-heading underline">
+                      {it.action}
+                    </Link>
+                    {canAck && (
+                      <Button className="!px-2.5 !py-0.5" disabled={send.isPending} onClick={() => send.mutate({ it, undo: true })}>
+                        Undo
+                      </Button>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-2 text-sm text-muted">Acknowledging hides an item for everyone until it clears. It does not change traffic or stop notifications.</p>
+        </details>
       )}
     </Panel>
   );
@@ -603,7 +737,7 @@ function Fleet({ fleet, liveVersion, canaryVersion }: { fleet: NonNullable<Data[
       ) : (
         <>
           <dl className="grid grid-cols-2 gap-4">
-            <Figure n={fleet.data ? live.length : '…'} label="Live edges" sub={latest && `last report ${ago(latest)}`} />
+            <Figure n={fleet.data ? live.length : '…'} label="Reporting" sub={latest && `last report ${ago(latest)}`} />
             <Figure n={fleet.data ? edges.length - live.length : '…'} label="Gone" sub="no report in a minute" />
           </dl>
           {live.length > 0 && (
@@ -619,7 +753,7 @@ function Fleet({ fleet, liveVersion, canaryVersion }: { fleet: NonNullable<Data[
 }
 
 // Recent changes leaves out what the audit log shows only for the record.
-const quiet = new Set(['auth.login.success', 'auth.login.failure', 'auth.logout', 'audit.verify', 'config.export', 'audit.export', 'anomaly.fire', 'anomaly.resolve']);
+const quiet = new Set(['auth.login.success', 'auth.login.failure', 'auth.logout', 'audit.verify', 'config.export', 'audit.export', 'anomaly.fire', 'anomaly.resolve', 'attention.cleared']);
 
 function Changes({ audit, verify }: { audit: NonNullable<Data['audit']>; verify: Data['verify'] }) {
   const events = (audit.data ?? []).filter((e) => e.action in said && !quiet.has(e.action)).slice(0, 8);

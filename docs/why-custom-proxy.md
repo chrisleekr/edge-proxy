@@ -87,7 +87,7 @@ On a laptop, with no rate-limit rules, the median request took 0.77 ms through E
 
 ## The admin UI
 
-Rules are edited in a web UI. Admin checks each change with the same Go code Edge Proxy runs, runs your config tests against it, and keeps every version. A new version can go to part of the traffic first, and it rolls back on its own if errors rise or a changed rule blocks far more than expected. Every change is recorded in an audit log ([publish and roll back](use/publishing.md)).
+Rules are edited in a web UI. Admin checks each change with the same Go code Edge Proxy runs, runs your policy tests against it, and keeps every version. A new version can go to part of the traffic first, and it rolls back on its own if errors rise or a changed rule blocks far more than expected. Every change is recorded in an audit log ([publish and roll back](use/publishing.md)).
 
 The UI also shows what is happening. **Stats** shows how many requests each rule checked and blocked, and **Routes** lists every route Edge Proxy served, with its traffic and what each rule does to it ([dashboard](use/dashboard.md)).
 

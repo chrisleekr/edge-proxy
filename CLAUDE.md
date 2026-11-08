@@ -165,6 +165,15 @@ How tests must be written:
 - `make capacity-max` (`scripts/capacity-max.sh`): the maximum rate of one 2 vCPU / 2 GiB edge within `BUDGET_MS` added at p99, in front of a mock gateway routing to four mock microservices with network delay (`loadtest/compose.capacity.yaml`). Not a CI gate; run it on a quiet host.
 - **Releases:** GitHub only; GitLab CI never cuts a version, it only pushes a rolling amd64-only `latest` from `main` to its own registry. release-please (`release-please-config.json`) from Conventional Commits; `scripts/ci/publish.sh` pushes the three multi-arch images on a release tag, and release-please writes the version into `autopilot/package.json` and its lock file. Dependency updates come from Renovate (`renovate.json`) as `chore` commits, so they never cut a release.
 
+## Local end-to-end verification
+
+Every change is verified locally, end to end, before it is pushed or an MR is opened. CI confirms; it does not replace this.
+
+- **Run the required commands for what changed**, on this machine: `make lint` and `make test` always; `make ui` for `web/admin`; `make autopilot` for `autopilot`; `make fuzz` (`FUZZTIME=5m` for parser or matcher changes) and `make bench` for request-path code; `make docs` for docs; `make container` and `make load` for build, deploy or edge behavior.
+- **Drive the change in the running system.** A UI change is used in a browser against `make demo` (or the Vite dev server against a local admin): every touched page, at phone and desktop widths, as the roles it affects. An edge or admin change is exercised with real requests through `make demo`, and the outcome is checked where it shows (response, headers, Valkey state, audit row, log line, dashboard).
+- **New tests prove themselves.** A regression test fails with its fix reverted and passes with it.
+- **Report exactly what ran.** The MR lists the commands and flows run locally and their results. Anything that could not run locally (and why) is named, never implied as passed.
+
 ## Quality gates (CI must enforce)
 
 | Gate | What it protects |

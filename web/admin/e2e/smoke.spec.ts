@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page, type Request, test } from '@playwright/test';
+import type { VersionDetail } from '../src/api';
 
 // One admin through the critical flows, in order: sign in, publish the
 // starter draft unchanged, build a rule with And/Or, switch to text and
@@ -20,6 +21,9 @@ test.beforeAll(async ({ browser }) => {
 const nav = (name: string) => page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name, exact: true }).click();
 
 // Actions that change what production serves ask first in a dialog.
+// A tab bar is a navigation of its own, named for its page.
+const tab = (bar: string, name: string) => page.getByRole('navigation', { name: bar, exact: true }).getByRole('link', { name, exact: true }).click();
+
 const confirm = (action: string) => page.getByRole('dialog').getByRole('button', { name: action, exact: true }).click();
 
 async function saveDraft(revision: number) {
@@ -145,6 +149,7 @@ test('a rule gets its own notification setting, which outlives a reload', async 
   };
   await nav('Notifications');
   await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible();
+  await tab('Notifications', 'Settings');
   await expect(page.getByText('No rule has its own settings')).toBeVisible();
   await page.getByRole('combobox', { name: 'Rule', exact: true }).selectOption('login');
   // Only signals that apply to a rate limit rule are offered.
@@ -178,8 +183,8 @@ test('going back two entries from one rule editor shows the other rule', async (
 });
 
 test('a new rule cannot take an ID another phase already uses', async () => {
-  const config = page.getByRole('list', { name: 'Config rules' }).locator('..');
-  await config.getByRole('button', { name: 'Add config rule' }).click();
+  const config = page.getByRole('list', { name: 'Access rules' }).locator('..');
+  await config.getByRole('button', { name: 'Add access rule' }).click();
   await page.getByLabel('Rule ID').fill('login');
   await expect(page.getByText('Rate limit rules already has a rule called “login”')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeDisabled();
@@ -245,7 +250,7 @@ test('a penalty typed in seconds stays in seconds as it passes a whole minute', 
 });
 
 test('a CORS policy explains each typical mistake by its field and keeps Save off until fixed', async () => {
-  await nav('CORS');
+  await nav('CORS policies');
   await page.getByLabel('New policy name').fill('web');
   await page.getByRole('button', { name: 'Add policy' }).click();
   const save = page.getByRole('button', { name: 'Save draft' });
@@ -267,6 +272,33 @@ test('a CORS policy explains each typical mistake by its field and keeps Save of
   await expect(page.getByRole('alert').filter({ hasText: "can't be used with credentials" }).first()).toBeVisible();
   await expect(save).toBeDisabled();
   await page.getByRole('button', { name: 'Remove site 2' }).click();
+  await expect(save).toBeEnabled();
+
+  await page.getByRole('button', { name: 'Discard' }).click();
+  await confirm('Discard changes');
+});
+
+test('a trusted client allowlist shows each mistake by its entry and keeps Save off until fixed', async () => {
+  await nav('Settings');
+  await expect(page.getByText('Routes that require a JWT let these clients in without one.')).toBeVisible();
+  await expect(page.getByText('No trusted clients: every request goes through the full policy.')).toBeVisible();
+  const save = page.getByRole('button', { name: 'Save draft' });
+  await page.getByRole('button', { name: '+ Add a client' }).click();
+  const first = page.getByLabel('Trusted client 1', { exact: true });
+
+  // Host bits set: the server says which range was meant.
+  await first.fill('203.0.113.7/24');
+  await expect(page.getByRole('alert').filter({ hasText: 'write 203.0.113.0/24 for the whole range' }).first()).toBeVisible();
+  await expect(save).toBeDisabled();
+  await first.fill('203.0.113.0/24');
+  await expect(save).toBeEnabled();
+
+  // A second entry inside the first is refused beside the second entry.
+  await page.getByRole('button', { name: '+ Add a client' }).click();
+  await page.getByLabel('Trusted client 2', { exact: true }).fill('203.0.113.7');
+  await expect(page.getByRole('alert').filter({ hasText: 'keep only one of them' }).first()).toBeVisible();
+  await expect(save).toBeDisabled();
+  await page.getByRole('button', { name: 'Remove client 2' }).click();
   await expect(save).toBeEnabled();
 
   await page.getByRole('button', { name: 'Discard' }).click();
@@ -310,7 +342,7 @@ test('a canary cannot be stepped up or promoted before its wait, and can be abor
 
 test('versions compare by rule and setting, and revert makes a new version', async () => {
   await page.goto('/versions/compare?a=2&b=3');
-  await expect(page.getByTestId('diff')).toContainText('kill_switch.rate_limit');
+  await expect(page.getByTestId('diff')).toContainText('Kill switch: disable rate limiting');
 
   await page.goto('/versions/3');
   await page.getByLabel('Reason', { exact: true }).fill('bring the drill back');
@@ -330,7 +362,7 @@ test('revert to previous puts the earlier version back in one step', async () =>
 });
 
 test('an admin adds a user with roles the server offers', async () => {
-  await nav('Users');
+  await nav('Users and tokens');
   await page.getByLabel('Username').fill('vera');
   await page.getByLabel('Initial password').fill('plum orchard lantern seventeen');
   await page.getByRole('group', { name: 'Roles', exact: true }).getByLabel('viewer').uncheck();
@@ -340,7 +372,7 @@ test('an admin adds a user with roles the server offers', async () => {
 });
 
 test('a simulated request becomes a test, and saving it leaves nothing unsaved', async () => {
-  await nav('Tests');
+  await nav('Tests and simulate');
   await page.getByRole('button', { name: 'Simulate', exact: true }).click();
   await page.getByRole('button', { name: 'Add as a test' }).click();
   await page.getByRole('button', { name: 'Save draft' }).click();
@@ -396,7 +428,7 @@ test('a route the upstream refused links its 502 and the cause to the log store,
 });
 
 test('the audit log lists the changes and its chain verifies', async () => {
-  await nav('Audit');
+  await nav('Audit log');
   await expect(page.getByRole('cell', { name: 'config.publish' }).first()).toBeVisible();
   await expect(page.getByRole('cell', { name: 'canary.abort' })).toBeVisible();
   await expect(page.getByRole('cell', { name: 'route_pattern.create' })).toBeVisible();
@@ -417,7 +449,7 @@ test('on a phone the menu is a drawer that closes after a link and on Escape', a
   await expect(page.getByRole('navigation', { name: 'Main' })).toBeHidden();
   await page.getByRole('button', { name: 'Menu' }).click();
   const drawer = page.getByRole('dialog', { name: 'Menu' });
-  await drawer.getByRole('link', { name: 'Audit', exact: true }).click();
+  await drawer.getByRole('link', { name: 'Audit log', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Audit log', exact: true })).toBeVisible();
   await expect(drawer).toBeHidden();
   await page.getByRole('button', { name: 'Menu' }).click();
@@ -433,7 +465,7 @@ test('on a narrow window the draft bar stays below the top bar, so Save draft wo
   // for the top bar instead of the sidebar.
   await page.setViewportSize({ width: 600, height: 800 });
   await page.goto('/settings');
-  const field = page.getByLabel('Most requests in progress per edge');
+  const field = page.getByLabel('Maximum requests in progress per edge');
   const save = async () => {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     // A tap where the button shows, as a person would. locator.click()
@@ -452,10 +484,28 @@ test('on a narrow window the draft bar stays below the top bar, so Save draft wo
   await page.setViewportSize(size);
 });
 
-test('a config rule set to block saves, and the block kill switch saves with it', async () => {
+test('on a phone with unsaved changes a jump link lands on its card clear of the draft bar', async () => {
+  const size = page.viewportSize()!;
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto('/settings');
+  await page.getByLabel('Maximum requests in progress per edge').fill('500');
+  const bar = page.locator('div.sticky', { hasText: 'Unsaved changes to the draft.' });
+  await expect(bar).toBeVisible();
+  await page.getByRole('link', { name: 'Trusted client allowlist' }).click();
+  const heading = page.locator('#trusted-clients').getByRole('heading', { name: 'Trusted client allowlist' });
+  // Below the fold until the jump lands, so wait for that before comparing.
+  await expect.poll(async () => (await heading.boundingBox())!.y).toBeLessThan(400);
+  const b = (await bar.boundingBox())!;
+  expect((await heading.boundingBox())!.y).toBeGreaterThanOrEqual(b.y + b.height);
+  await page.getByRole('button', { name: 'Discard' }).click();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+  await page.setViewportSize(size);
+});
+
+test('an access rule set to block saves, and the block kill switch saves with it', async () => {
   await nav('Rules');
-  const config = page.getByRole('list', { name: 'Config rules' }).locator('..');
-  await config.getByRole('button', { name: 'Add config rule' }).click();
+  const config = page.getByRole('list', { name: 'Access rules' }).locator('..');
+  await config.getByRole('button', { name: 'Add access rule' }).click();
   await page.getByLabel('Rule ID').fill('block-tools');
   await page.getByLabel(/^Block/).selectOption('block');
   await page.getByRole('button', { name: 'Apply to draft' }).click();
@@ -463,11 +513,11 @@ test('a config rule set to block saves, and the block kill switch saves with it'
   await expect(rule).toContainText('blocks with 403');
 
   await nav('Settings');
-  await page.getByText('Disable blocking by config rules').click();
+  await page.getByText('Disable blocking by access rules').click();
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByRole('status').filter({ hasText: /Saved revision \d+/ })).toBeVisible();
   await page.reload();
-  await expect(page.getByLabel('Disable blocking by config rules')).toBeChecked();
+  await expect(page.getByLabel('Disable blocking by access rules')).toBeChecked();
   await nav('Rules');
   await expect(page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'block-tools', exact: true }) })).toContainText('blocks with 403');
 });
@@ -511,12 +561,96 @@ test('a role that reads stats but not config sees Notifications without asking f
   await other.context().close();
 });
 
+test('an acknowledged item leaves the list for the acknowledged items, and undo brings it back', async () => {
+  // Mocked: the seed cannot make an anomaly fire. The ack itself goes to the real admin.
+  const at = new Date().toISOString();
+  await page.route('**/api/anomalies', (r) =>
+    r.fulfill({
+      json: {
+        alertmanager: false,
+        anomalies: [
+          { id: 903, signal: 'traffic_surge', rule: '', phase: '', severity: 'warning', state: 'firing', tripped: 2, passed: 0, started_at: at, fired_at: at, resolved_at: null, notified_at: null, summary: 'Requests surged to test acknowledging', case_id: null },
+        ],
+      },
+    }),
+  );
+  try {
+    await page.goto('/');
+    const attention = page.getByRole('region', { name: 'Needs attention' });
+    const firing = attention.getByRole('listitem').filter({ hasText: 'Requests surged to test acknowledging' });
+    await firing.getByRole('button', { name: 'Acknowledge' }).click();
+    const list = attention.getByRole('group').filter({ hasText: '1 acknowledged item' });
+    await expect(list).toBeVisible();
+    await expect(firing.getByRole('button', { name: 'Acknowledge' })).toHaveCount(0);
+    await list.getByText('1 acknowledged item').click();
+    await expect(list.getByText('Requests surged to test acknowledging')).toBeVisible();
+    await list.getByRole('button', { name: 'Undo' }).click();
+    await expect(firing.getByRole('button', { name: 'Acknowledge' })).toBeVisible();
+    await expect(list).toHaveCount(0);
+  } finally {
+    await page.unroute('**/api/anomalies');
+  }
+});
+
+// Adds, reads or removes acks through the page's own session, as the dashboard does.
+const ackKeys = () => page.evaluate(async () => ((await (await fetch('/api/attention/acks')).json()) as { key: string }[]).map((a) => a.key));
+const dropAck = (key: string) => page.evaluate((k) => fetch(`/api/attention/acks?key=${encodeURIComponent(k)}&reason=undo`, { method: 'DELETE' }).then(() => undefined), key);
+const addAck = (key: string) =>
+  page.evaluate(async (k) => {
+    const r = await fetch('/api/attention/acks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: k, summary: k }) });
+    if (!r.ok) throw new Error(`ack ${k}: ${r.status}`);
+  }, key);
+const anomaly = (id: number, signal: string, rule: string, phase: string, summary: string) => {
+  const at = new Date().toISOString();
+  return { id, signal, rule, phase, severity: 'critical', state: 'firing', tripped: 2, passed: 0, started_at: at, fired_at: at, resolved_at: null, notified_at: null, summary };
+};
+const surge = (id: number, state: 'firing' | 'resolved') => {
+  const at = new Date().toISOString();
+  return { alertmanager: false, anomalies: state === 'firing' ? [{ id, signal: 'traffic_surge', rule: '', phase: '', severity: 'warning', state, tripped: 2, passed: 0, started_at: at, fired_at: at, resolved_at: null, notified_at: null, summary: `Requests surged for ack ${id}`, case_id: null }] : [] };
+};
+
+test('an acknowledged anomaly clears for everyone once it stops firing', async () => {
+  // Mocked: the seed cannot make an anomaly fire. The ack and its clearing go to the real admin.
+  await page.route('**/api/anomalies', (r) => r.fulfill({ json: surge(904, 'firing') }));
+  try {
+    await page.goto('/');
+    const attention = page.getByRole('region', { name: 'Needs attention' });
+    await attention.getByRole('listitem').filter({ hasText: 'Requests surged for ack 904' }).getByRole('button', { name: 'Acknowledge' }).click();
+    await expect(attention.getByText('1 acknowledged item')).toBeVisible();
+    await page.unroute('**/api/anomalies');
+    await page.route('**/api/anomalies', (r) => r.fulfill({ json: surge(904, 'resolved') }));
+    await page.reload();
+    await expect.poll(ackKeys).not.toContain('anomaly:904');
+    await page.goto('/audit');
+    await expect(page.getByRole('row').filter({ hasText: 'noted this has cleared:' }).filter({ hasText: 'Requests surged for ack 904' }).first()).toBeVisible();
+  } finally {
+    await page.unroute('**/api/anomalies');
+    await dropAck('anomaly:904');
+  }
+});
+
+test('an acknowledgement stays when the dashboard cannot read its source', async () => {
+  await page.route('**/api/anomalies', (r) => r.fulfill({ json: surge(905, 'firing') }));
+  try {
+    await page.goto('/');
+    const attention = page.getByRole('region', { name: 'Needs attention' });
+    await attention.getByRole('listitem').filter({ hasText: 'Requests surged for ack 905' }).getByRole('button', { name: 'Acknowledge' }).click();
+    await expect(attention.getByText('1 acknowledged item')).toBeVisible();
+    await page.unroute('**/api/anomalies');
+    await page.route('**/api/anomalies', (r) => r.fulfill({ status: 500, json: { error: 'anomalies are unavailable' } }));
+    const failed = page.waitForResponse((r) => r.url().includes('/api/anomalies') && r.status() === 500);
+    await page.reload();
+    await failed;
+    await page.waitForLoadState('networkidle');
+    expect(await ackKeys()).toContain('anomaly:905');
+  } finally {
+    await page.unroute('**/api/anomalies');
+    await dropAck('anomaly:905');
+  }
+});
+
 test('a rule anomaly for the same signal as a fleet anomaly is listed under it, not on its own', async () => {
   // Mocked: a rule anomaly needs a published config rule, and the seed runs before the flow publishes anything.
-  const at = new Date().toISOString();
-  const anomaly = (id: number, signal: string, rule: string, phase: string, summary: string) => ({
-    id, signal, rule, phase, severity: 'critical', state: 'firing', tripped: 2, passed: 0, started_at: at, fired_at: at, resolved_at: null, notified_at: null, summary,
-  });
   await page.route('**/api/anomalies', (r) =>
     r.fulfill({
       json: {
@@ -542,6 +676,63 @@ test('a rule anomaly for the same signal as a fleet anomaly is listed under it, 
   }
 });
 
+test('an acknowledged rule anomaly listed under a fleet one stays acknowledged while it fires', async () => {
+  // Mocked: the seed cannot make an anomaly fire. 907 has stopped firing, so its
+  // clear shows the dashboard did clear what was gone in the same pass.
+  await page.route('**/api/anomalies', (r) =>
+    r.fulfill({
+      json: {
+        alertmanager: false,
+        anomalies: [
+          anomaly(908, 'upstream_5xx_ratio', '', '', '5xx from the upstream: 10.0% of requests in the last 5 minutes, against 0.0% in the hour before'),
+          anomaly(906, 'rule_upstream_5xx_ratio', 'admin-api', 'config', '100.0% of its requests got a 5xx from the upstream in the last 5 minutes'),
+        ],
+      },
+    }),
+  );
+  try {
+    await addAck('anomaly:906');
+    await addAck('anomaly:907');
+    await page.goto('/');
+    await expect.poll(ackKeys).not.toContain('anomaly:907');
+    // The clears of one pass are sent together; let them all land.
+    await page.waitForLoadState('networkidle');
+    expect(await ackKeys()).toContain('anomaly:906');
+  } finally {
+    await page.unroute('**/api/anomalies');
+    await dropAck('anomaly:906');
+    await dropAck('anomaly:907');
+  }
+});
+
+test('log-only rules that were acknowledged do not take the three places a newer one needs', async () => {
+  // Mocked: the seed has no log-only rule over its limit. Four are added to
+  // version 2's rules and to one stats row it served.
+  const ids = ['shadow-a', 'shadow-b', 'shadow-c', 'shadow-d'];
+  const row = {
+    minute: new Date().toISOString(), version: 2, requests: 1000, edge_5xx: 0, upstream_5xx: 0, auth_failures: 0,
+    rate_limit_rules: ids.map((id, i) => ({ id, evaluated: 1000, limited: 0, would_limit: 400 - i * 100, failed: 0 })),
+    top_limited: [], rules: [], status_codes: {}, upstream_errors: {},
+  };
+  await page.route('**/api/stats?*', (r) => r.fulfill({ json: [row] }));
+  await page.route('**/api/versions/2', async (r) => {
+    const v = (await (await r.fetch()).json()) as VersionDetail;
+    v.config.rate_limit_rules = [...(v.config.rate_limit_rules ?? []), ...ids.map((id) => ({ id, expression: true, action: 'log', limit: 1, period: '1m', key: ['ip.src'] }))];
+    await r.fulfill({ json: v });
+  });
+  try {
+    for (const id of ids.slice(0, 3)) await addAck(`shadow:${id}`);
+    await page.goto('/');
+    const attention = page.getByRole('region', { name: 'Needs attention' });
+    await expect(attention.getByText('3 acknowledged items')).toBeVisible();
+    await expect(attention.getByRole('listitem').filter({ hasText: 'rule shadow-d checked' }).getByRole('button', { name: 'Acknowledge' })).toBeVisible();
+  } finally {
+    await page.unroute('**/api/stats?*');
+    await page.unroute('**/api/versions/2');
+    for (const id of ids) await dropAck(`shadow:${id}`);
+  }
+});
+
 test('the traffic chart marks each publish and the kill switch changes, and a mark opens its version', async () => {
   await page.goto('/');
   const traffic = page.getByRole('region', { name: /^Traffic, / });
@@ -555,6 +746,8 @@ test('the traffic chart marks each publish and the kill switch changes, and a ma
 
 test('Cmd or Ctrl+K finds a rule, a version, a route, a user and an IP, and Enter opens each', async () => {
   await page.goto('/');
+  // Find's key handler is registered by the app shell, so wait for the shell.
+  await expect(page.getByRole('navigation', { name: 'Main' })).toBeVisible();
   const find = async (text: string, option: RegExp) => {
     await page.keyboard.press('ControlOrMeta+k');
     const box = page.getByRole('dialog', { name: 'Find' }).getByRole('combobox', { name: 'Find' });
@@ -582,7 +775,7 @@ test('Cmd or Ctrl+K finds a rule, a version, a route, a user and an IP, and Ente
 
 test('a rule page shows its live counts over the range and its published history', async () => {
   await page.goto('/rules/rate_limit/login');
-  const live = page.getByRole('region', { name: 'Live' });
+  const live = page.getByRole('region', { name: 'Traffic', exact: true });
   await expect(live).toContainText('3,500 matched');
   await expect(live).toContainText('1,120 over limit, log only');
   await expect(page.getByRole('heading', { name: 'Published history' })).toBeVisible();
@@ -627,14 +820,20 @@ test('the autopilot page shows the runner, budgets, spend, precision, settings a
   await expect(page.getByText(/^Runner runner-a 0\.1\.0, credentials for claude/)).toBeVisible();
   await expect(page.getByText('Auto: blocks once the measurements hold').first()).toBeVisible();
   for (const meter of ['Enforce rules', 'Sensors', 'Cases started this hour']) await expect(page.getByText(meter, { exact: true })).toBeVisible();
-  for (const h of ['Status', 'Live rules', 'Cases', 'Spend', 'Precision', 'Settings', 'Model prices'])
-    await expect(page.getByRole('heading', { name: h, exact: true })).toBeVisible();
+  const headings = async (...names: string[]) => {
+    for (const h of names) await expect(page.getByRole('heading', { name: h, exact: true })).toBeVisible();
+  };
+  await headings('Status', 'Live rules', 'Cases');
   await expect(page.getByText('No autopilot rule is live.')).toBeVisible();
+  await tab('Autopilot', 'Spend');
+  await headings('Spend', 'Precision');
   await expect(page.getByText('No enforce rule ended in the last 7 days.')).toBeVisible();
+  await tab('Autopilot', 'Settings');
+  await headings('Settings', 'Model prices');
 });
 
 test('an autopilot setting the server refuses shows its reason by the field, and a valid change saves', async () => {
-  await page.goto('/autopilot');
+  await page.goto('/autopilot?tab=settings');
   // The unit picker sits in the label, so its value ends the name.
   const observe = page.getByRole('spinbutton', { name: /^Log before blocking for/ });
   const field = page.locator('div').filter({ has: observe }).last();
@@ -652,7 +851,49 @@ test('an autopilot setting the server refuses shows its reason by the field, and
   await page.getByRole('button', { name: 'Save autopilot settings' }).click();
   await confirm('Save autopilot settings');
   await expect(page.getByRole('status').filter({ hasText: 'Autopilot settings saved.' })).toBeVisible();
+  await tab('Autopilot', 'Overview');
   await expect(page.getByText('Observe: a person approves each block').first()).toBeVisible();
+});
+
+test('turning the hourly sweep off is saved, shown in the status card, and turned back on', async () => {
+  await page.goto('/autopilot?tab=settings');
+  const triggers = ['Hourly sweep', 'Daily review', 'Anomaly investigation'];
+  for (const name of triggers) await expect(page.getByRole('checkbox', { name })).toBeChecked();
+  await page.getByRole('checkbox', { name: 'Hourly sweep' }).uncheck();
+  await page.getByRole('button', { name: 'Save autopilot settings' }).click();
+  await confirm('Save autopilot settings');
+  await expect(page.getByRole('status').filter({ hasText: 'Autopilot settings saved.' })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole('checkbox', { name: 'Hourly sweep' })).not.toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Daily review' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Anomaly investigation' })).toBeChecked();
+  // The status card is on Overview, the checkboxes on Settings.
+  const status = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Status', exact: true }) }).last();
+  await tab('Autopilot', 'Overview');
+  await expect(status.getByText('Off in settings: hourly sweep.')).toBeVisible();
+  await tab('Autopilot', 'Settings');
+
+  await page.getByRole('checkbox', { name: 'Daily review' }).uncheck();
+  await page.getByRole('button', { name: 'Save autopilot settings' }).click();
+  await confirm('Save autopilot settings');
+  await expect(page.getByRole('status').filter({ hasText: 'Autopilot settings saved.' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('checkbox', { name: 'Hourly sweep' })).not.toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Daily review' })).not.toBeChecked();
+  await tab('Autopilot', 'Overview');
+  await expect(status.getByText('Off in settings: hourly sweep and daily review.')).toBeVisible();
+  await tab('Autopilot', 'Settings');
+
+  // Later tests rely on the sweep and the review.
+  await page.getByRole('checkbox', { name: 'Hourly sweep' }).check();
+  await page.getByRole('checkbox', { name: 'Daily review' }).check();
+  await page.getByRole('button', { name: 'Save autopilot settings' }).click();
+  await confirm('Save autopilot settings');
+  await expect(page.getByRole('status').filter({ hasText: 'Autopilot settings saved.' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('checkbox', { name: 'Hourly sweep' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Daily review' })).toBeChecked();
 });
 
 test('Investigate from a rule opens a case that reads as a story, and Find opens it by its rule', async () => {
@@ -684,6 +925,8 @@ test('Investigate from a rule opens a case that reads as a story, and Find opens
   // Find opens the case that made a live autopilot rule.
   const name = (await rule.getByText(/^ap-login-stuffing-\d+$/).textContent())!;
   await page.goto('/');
+  // Find's key handler is registered by the app shell, so wait for the shell.
+  await expect(page.getByRole('navigation', { name: 'Main' })).toBeVisible();
   await page.keyboard.press('ControlOrMeta+k');
   const box = page.getByRole('dialog', { name: 'Find' }).getByRole('combobox', { name: 'Find' });
   await box.fill(name);
@@ -736,8 +979,8 @@ test("the autopilot's memory lists a note with its trust and claim in words, ope
 });
 
 test("the Autopilot page shows spend by day and model, and a live rule's counts while logging and blocking", async () => {
-  await page.goto('/autopilot');
-  await expect(page.getByRole('link', { name: 'Memory', exact: true })).toHaveAttribute('href', '/autopilot/notes');
+  await page.goto('/autopilot?tab=spend');
+  await expect(page.getByRole('navigation', { name: 'Autopilot', exact: true }).getByRole('link', { name: 'Memory', exact: true })).toHaveAttribute('href', '/autopilot/notes');
   const card = (name: string) => page.locator('section').filter({ has: page.getByRole('heading', { name, exact: true }) }).last();
   const spend = card('Spend');
   await expect(spend.getByRole('heading', { name: 'By day and model', exact: true })).toBeVisible();
@@ -746,6 +989,7 @@ test("the Autopilot page shows spend by day and model, and a live rule's counts 
   const today = spend.getByRole('row').filter({ hasText: new Date().toISOString().slice(0, 10) }).filter({ hasText: 'claude-opus-5-5' });
   await expect(today.getByRole('cell', { name: /^n\/a: \d+ unpriced$/ })).toBeVisible();
   // The rule Investigate made is logging only, until the next test retires it.
+  await tab('Autopilot', 'Overview');
   const live = page.getByRole('list', { name: 'Live autopilot rules' }).getByRole('listitem').filter({ has: page.getByRole('link', { name: /^ap-login-stuffing-\d+$/ }) });
   await expect(live).toContainText(/[\d,]+ while logging/);
   await expect(live).toContainText(/[\d,]+ blocking/);
@@ -779,6 +1023,8 @@ test('Investigate from a route opens a case on that route', async () => {
 
 test('Find opens a case and a note', async () => {
   await page.goto('/');
+  // Find's key handler is registered by the app shell, so wait for the shell.
+  await expect(page.getByRole('navigation', { name: 'Main' })).toBeVisible();
   const find = async (text: string, option: RegExp) => {
     await page.keyboard.press('ControlOrMeta+k');
     const box = page.getByRole('dialog', { name: 'Find' }).getByRole('combobox', { name: 'Find' });
@@ -794,6 +1040,29 @@ test('Find opens a case and a note', async () => {
   await find(`note ${n}`, new RegExp(`^Note ${n}: ${statement}\\s*note$`));
   await expect(page).toHaveURL(new RegExp(`${noted}$`));
   await expect(page.getByRole('heading', { name: `Note ${n}`, exact: true })).toBeVisible();
+});
+
+test('the sidebar groups pages by job', async () => {
+  await page.goto('/');
+  const main = page.getByRole('navigation', { name: 'Main' });
+  // Headings and links in document order, so each link sits under its group.
+  await expect(main.locator('p, a')).toHaveText([
+    'Monitor', 'Dashboard', 'Stats', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
+    'Policy', 'Rules', 'Templates', 'CORS policies', 'Issuers', 'Settings',
+    'Release', 'Tests and simulate', 'Publish', 'Versions',
+    'Admin', 'Audit log', 'Users and tokens',
+  ]);
+});
+
+test('Find opens from its button and reaches the kill switch', async () => {
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Find/ }).click();
+  const box = page.getByRole('dialog', { name: 'Find' }).getByRole('combobox', { name: 'Find' });
+  await box.fill('kill');
+  await expect(page.getByRole('listbox').getByRole('option').first()).toContainText('Kill switch');
+  await box.press('Enter');
+  await expect(page).toHaveURL(/\/settings#kill-switch$/);
+  await expect(page.getByRole('heading', { name: 'Kill switch', exact: true })).toBeInViewport();
 });
 
 test('a case offers Replay with another model as a command', async () => {
@@ -822,12 +1091,14 @@ test('turning autopilot off asks for a reason, and the audit log keeps it', asyn
   await dialog.getByRole('button', { name: 'Turn autopilot off' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Autopilot is off.' })).toBeVisible();
   await expect(page.getByText('No autopilot rule is live.')).toBeVisible();
-  await nav('Audit');
+  await tab('Autopilot', 'Settings');
+  await expect(page.getByText('Autopilot is off, so none of these open.')).toBeVisible();
+  await nav('Audit log');
   await expect(page.getByRole('row').filter({ hasText: 'changed autopilot settings' }).first()).toContainText('Blocking checkout for a partner');
 });
 
 test('a model price with a blank rate is refused at that field, and a full one is added', async () => {
-  await page.goto('/autopilot');
+  await page.goto('/autopilot?tab=settings');
   const form = page.locator('form').filter({ has: page.getByRole('heading', { name: 'Add a price', exact: true }) });
   // Page-rooted, since a has filter looks for it inside each div.
   const rate = (name: string) => page.getByRole('spinbutton', { name: new RegExp(`^${name}`) });
@@ -897,12 +1168,85 @@ test('at 1280 pixels wide no page scrolls sideways or has a serious accessibilit
   await page.setViewportSize(size);
 });
 
+test('a long similar route does not widen the page', async () => {
+  const size = page.viewportSize()!;
+  await page.setViewportSize({ width: 1024, height: 800 });
+  // Mocked: access logs would need a very long host and many paths under it.
+  await page.route(/\/api\/observed-routes\?/, async (r) => {
+    const body = (await (await r.fetch()).json()) as { suggestions: object[] };
+    body.suggestions.push({ host: `${'long-host-label-'.repeat(12)}.example.com`, pattern: `/${'long-path-segment-'.repeat(12)}*`, routes: 12 });
+    await r.fulfill({ json: body });
+  });
+  try {
+    await page.goto('/routes');
+    await expect(page.getByRole('heading', { name: 'Similar routes', exact: true })).toBeVisible();
+    const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(sideways).toBeLessThanOrEqual(0);
+  } finally {
+    await page.unroute(/\/api\/observed-routes\?/);
+    await page.setViewportSize(size);
+  }
+});
+
+test('fleet hides gone edges until asked', async () => {
+  const at = Date.now();
+  const edge = (instance: string, live: boolean, ago: number) => ({
+    instance, live, last_seen: new Date(at - ago).toISOString(), config_source: 'admin', bootstrap_age_seconds: 0, versions: [1], upstream: 'https://lb.example.com',
+  });
+  // Gone edges first, to show the table puts the reporting edge on top.
+  await page.route('**/api/fleet', (r) => r.fulfill({ json: [edge('edge-gone-a', false, 3_600_000), edge('edge-gone-b', false, 7_200_000), edge('edge-live', true, 5_000)] }));
+  try {
+    await page.goto('/fleet');
+    const rows = page.locator('tbody tr');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText('edge-live');
+    await expect(rows.first()).toContainText('reporting');
+    await page.getByRole('button', { name: 'Show 2 gone edges' }).click();
+    await expect(rows).toHaveCount(3);
+    await expect(rows.first()).toContainText('edge-live');
+    await expect(rows.nth(1)).toContainText('gone');
+  } finally {
+    await page.unroute('**/api/fleet');
+  }
+});
+
+test('notifications hide resolved anomalies until asked', async () => {
+  const at = new Date().toISOString();
+  const anomaly = (id: number, state: string, summary: string) => ({
+    id, signal: 'upstream_5xx_ratio', rule: '', phase: '', severity: 'critical', state, tripped: 2, passed: 0, started_at: at, fired_at: at,
+    resolved_at: state === 'resolved' ? at : null, notified_at: null, summary, case_id: null, case_state: null, case_verdict: null, withheld: '',
+  });
+  await page.route('**/api/anomalies', (r) =>
+    r.fulfill({ json: { alertmanager: false, anomalies: [anomaly(911, 'firing', 'Open anomaly summary'), anomaly(912, 'resolved', 'Resolved anomaly summary')] } }),
+  );
+  try {
+    await page.goto('/notifications');
+    await expect(page.getByRole('row').filter({ hasText: 'Open anomaly summary' })).toHaveCount(1);
+    await expect(page.getByRole('row').filter({ hasText: 'Resolved anomaly summary' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Show 1 resolved anomaly' }).click();
+    await expect(page.getByRole('row').filter({ hasText: 'Resolved anomaly summary' })).toHaveCount(1);
+    await expect(page).toHaveURL(/resolved=1/);
+  } finally {
+    await page.unroute('**/api/anomalies');
+  }
+});
+
 test('a draft that fails to load shows the error instead of a blank page', async () => {
   await page.route('**/api/draft', (r) => r.fulfill({ status: 500, contentType: 'application/problem+json', body: JSON.stringify({ title: 'draft store unavailable' }) }));
   await page.reload();
   await expect(page.getByRole('alert')).toContainText(/draft store unavailable/i);
   await page.unroute('**/api/draft');
   await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
+});
+
+test('when admin stops answering the screen says traffic is unaffected, and Try again recovers', async () => {
+  await page.route('**/api/auth/me', (r) => r.fulfill({ status: 502, body: 'Bad Gateway' }));
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Admin is not answering' })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('traffic is not affected');
+  await page.unroute('**/api/auth/me');
+  await page.getByRole('button', { name: 'Try again' }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
 });
 

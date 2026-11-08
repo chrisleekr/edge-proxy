@@ -52,7 +52,8 @@ export function useSearch() {
 export function keep(to: string) {
   const range = new URLSearchParams(window.location.search).get('range');
   if (!range || /[?&]range=/.test(to)) return to;
-  return `${to}${to.includes('?') ? '&' : '?'}range=${encodeURIComponent(range)}`;
+  const [target = '', ...hash] = to.split('#');
+  return `${target}${target.includes('?') ? '&' : '?'}range=${encodeURIComponent(range)}${hash.length ? `#${hash.join('#')}` : ''}`;
 }
 
 // navigate asks every guard first unless force is set, which screens use
@@ -62,7 +63,11 @@ export function navigate(to: string, { force = false } = {}) {
   window.history.pushState(null, '', keep(to));
   shown = here();
   window.dispatchEvent(new PopStateEvent('popstate'));
+  // Reset first so the new screen does not inherit the old offset. A #id card
+  // is scrolled to here if already shown, or by Card when it renders later.
   window.scrollTo(0, 0);
+  const id = to.split('#')[1];
+  if (id) requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView());
 }
 
 // useLeaveGuard asks before leaving the screen, in the app or the browser,
@@ -88,7 +93,8 @@ export function useBeforeUnload(when: boolean) {
 }
 
 // Link marks itself current on its own path; current overrides that for
-// links that stand for a whole section.
+// links that stand for a whole section, and current={false} turns the match
+// off for a tab whose path is shared.
 // Extra props, such as a title or aria-label, go to the <a>.
 export function Link({ to, children, current, ...props }: Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & { to: string; children: ReactNode; current?: boolean }) {
   // Subscribed, so the href follows a range picked after render.
@@ -98,9 +104,9 @@ export function Link({ to, children, current, ...props }: Omit<AnchorHTMLAttribu
     e.preventDefault();
     navigate(to);
   };
-  const exact = window.location.pathname === to.split('?')[0];
+  const exact = window.location.pathname === to.split(/[?#]/)[0];
   return (
-    <a {...props} href={keep(to)} onClick={onClick} aria-current={exact ? 'page' : current ? 'true' : undefined}>
+    <a {...props} href={keep(to)} onClick={onClick} aria-current={current === false ? undefined : exact ? 'page' : current ? 'true' : undefined}>
       {children}
     </a>
   );

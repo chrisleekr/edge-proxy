@@ -4,9 +4,9 @@ import { api, type Json, type JsonObject } from '../api';
 import { useOptionalDraft } from '../draft';
 import { Decimal } from '../GuardForm';
 import { LogLink, useLogSearch } from '../logSearch';
-import { Link, useLeaveGuard } from '../router';
+import { Link, useLeaveGuard, useSearch } from '../router';
 import { Amount, Choice, Count, setField, timeUnits, without } from '../RuleForms';
-import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Notice, Page, Pending, Table, ago, when } from '../ui';
+import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Notice, Page, Pending, Table, Tabs, ago, plural, when } from '../ui';
 import { Investigate } from './Autopilot';
 
 // Notifications shows the anomalies admin found in the edges' stats and
@@ -48,6 +48,11 @@ const num = (s: Signal, k: string) => (typeof s[k] === 'number' ? s[k] : undefin
 const pct = (x: number | undefined) => (x === undefined ? '…' : `${+(x * 100).toFixed(4)}%`);
 const times = (x: number | undefined) => (x === undefined ? '…' : `${x}×`);
 const atLeast = (s: Signal) => num(s, 'min_requests') ?? '…';
+// counted words the threshold: the number may be a placeholder while the field is empty.
+const counted = (s: Signal, one: string, many = `${one}s`) => {
+  const n = num(s, 'min_requests');
+  return typeof n === 'number' ? plural(n, one, many) : `… ${many}`;
+};
 
 const factor = (label: string): Threshold => ({ key: 'factor', label, kind: 'factor' });
 const floor: Threshold = { key: 'floor', label: 'Never below', kind: 'ratio' };
@@ -58,7 +63,7 @@ const withEvents = (s: Signal) => ` With at least ${num(s, 'min_events') ?? 0} o
 const all = ['config', 'rate_limit', 'request_headers'];
 const outcomes = ['config', 'request_headers'];
 const limits = ['rate_limit'];
-// Rules that refuse requests: rate limits, and config rules with a block setting.
+// Rules that refuse requests: rate limits, and access rules with a block setting.
 const blocking = ['config', 'rate_limit'];
 
 // Each signal as the server checks it; when it trips, in words from the
@@ -68,106 +73,106 @@ const signals: { name: string; label: string; scope: Scope; fields: Threshold[];
     name: 'traffic_drop',
     label: 'Traffic dropped',
     scope: 'fleet',
-    fields: [factor('Times fewer'), least('Least requests expected')],
+    fields: [factor('Times fewer'), least('Minimum requests expected')],
     trips: (s) => `Trips when requests fall below 1/${num(s, 'factor') ?? '…'} of the baseline's rate, when the baseline gives at least ${atLeast(s)} for the window.`,
   },
   {
     name: 'traffic_surge',
     label: 'Traffic surged',
     scope: 'fleet',
-    fields: [factor('Times more'), least('Least requests')],
+    fields: [factor('Times more'), least('Minimum requests')],
     trips: (s) => `Trips when requests rise above ${times(num(s, 'factor'))} the baseline's rate, with at least ${atLeast(s)}.`,
   },
   {
     name: 'edge_5xx_ratio',
     label: 'Edge 5xx',
     scope: 'fleet',
-    fields: [factor('Times the baseline share'), floor, least('Least requests'), events('Least 5xx')],
+    fields: [factor('Times the baseline share'), floor, least('Minimum requests'), events('Minimum 5xx')],
     trips: (s) => `Trips when 5xx the edge sends itself are over ${times(num(s, 'factor'))} their baseline share and over ${pct(num(s, 'floor'))} of requests.${withEvents(s)}`,
   },
   {
     name: 'upstream_5xx_ratio',
     label: 'Upstream 5xx',
     scope: 'fleet',
-    fields: [factor('Times the baseline share'), floor, least('Least requests'), events('Least 5xx')],
+    fields: [factor('Times the baseline share'), floor, least('Minimum requests'), events('Minimum 5xx')],
     trips: (s) => `Trips when 5xx from the upstream are over ${times(num(s, 'factor'))} their baseline share and over ${pct(num(s, 'floor'))} of requests.${withEvents(s)}`,
   },
   {
     name: 'auth_failure_ratio',
     label: 'Auth failures',
     scope: 'fleet',
-    fields: [factor('Times the baseline share'), floor, least('Least requests'), events('Least failed checks')],
+    fields: [factor('Times the baseline share'), floor, least('Minimum requests'), events('Minimum failed checks')],
     trips: (s) => `Trips when requests failing their token check are over ${times(num(s, 'factor'))} their baseline share and over ${pct(num(s, 'floor'))} of requests.${withEvents(s)}`,
   },
   {
     name: 'p99_latency',
     label: 'p99 latency',
     scope: 'fleet',
-    fields: [factor('Times the baseline p99'), { key: 'floor_ms', label: 'Never below', kind: 'ms' }, least('Least requests')],
+    fields: [factor('Times the baseline p99'), { key: 'floor_ms', label: 'Never below', kind: 'ms' }, least('Minimum requests')],
     trips: (s) => `Trips when p99 latency is over ${times(num(s, 'factor'))} the baseline's and over ${num(s, 'floor_ms') ?? '…'}ms.`,
   },
   {
     name: 'rule_stopped_matching',
     label: 'Rule stopped matching',
     scope: all,
-    fields: [least('Least matches expected')],
+    fields: [least('Minimum matches expected')],
     trips: (s) => `Trips when a rule matches nothing, though its baseline share of requests gives it at least ${atLeast(s)} for the window.`,
   },
   {
     name: 'rule_match_surge',
     label: 'Rule matches surged',
     scope: all,
-    fields: [factor('Times more'), least('Least matches')],
-    trips: (s) => `Trips when a rule matches over ${times(num(s, 'factor'))} its baseline share of requests, at least ${atLeast(s)} times.`,
+    fields: [factor('Times more'), least('Minimum matches')],
+    trips: (s) => `Trips when a rule matches over ${times(num(s, 'factor'))} its baseline share of requests, at least ${counted(s, 'time')}.`,
   },
   {
     name: 'rule_edge_5xx_ratio',
     label: 'Edge 5xx on a rule',
     scope: outcomes,
-    fields: [factor('Times the baseline share'), floor, least('Least matches'), events('Least 5xx')],
+    fields: [factor('Times the baseline share'), floor, least('Minimum matches'), events('Minimum 5xx')],
     trips: (s) => `Trips when 5xx the edge sends are over ${times(num(s, 'factor'))} their baseline share of a rule's requests, over ${times(num(s, 'factor'))} their share of all requests, and over ${pct(num(s, 'floor'))}.${withEvents(s)}`,
   },
   {
     name: 'rule_upstream_5xx_ratio',
     label: 'Upstream 5xx on a rule',
     scope: outcomes,
-    fields: [factor('Times the baseline share'), floor, least('Least matches'), events('Least 5xx')],
+    fields: [factor('Times the baseline share'), floor, least('Minimum matches'), events('Minimum 5xx')],
     trips: (s) => `Trips when 5xx from the upstream are over ${times(num(s, 'factor'))} their baseline share of a rule's requests, over ${times(num(s, 'factor'))} their share of all requests, and over ${pct(num(s, 'floor'))}.${withEvents(s)}`,
   },
   {
     name: 'rule_auth_failure_ratio',
     label: 'Auth failures on a rule',
     scope: ['config'],
-    fields: [factor('Times the baseline share'), floor, least('Least matches'), events('Least failed checks')],
-    trips: (s) => `Trips when failed token checks are over ${times(num(s, 'factor'))} their baseline share of a config rule's requests, over ${times(num(s, 'factor'))} their share of all requests, and over ${pct(num(s, 'floor'))}.${withEvents(s)}`,
+    fields: [factor('Times the baseline share'), floor, least('Minimum matches'), events('Minimum failed checks')],
+    trips: (s) => `Trips when failed token checks are over ${times(num(s, 'factor'))} their baseline share of an access rule's requests, over ${times(num(s, 'factor'))} their share of all requests, and over ${pct(num(s, 'floor'))}.${withEvents(s)}`,
   },
   {
     name: 'rule_block_spike',
     label: 'Rule blocking more',
     scope: blocking,
-    fields: [factor('Times the baseline share'), floor, least('Least requests checked')],
-    trips: (s) => `Trips when a rate limit rule, or a config rule set to block, blocks over ${times(num(s, 'factor'))} its baseline share of the requests it checks and over ${pct(num(s, 'floor'))}.`,
+    fields: [factor('Times the baseline share'), floor, least('Minimum requests checked')],
+    trips: (s) => `Trips when a rate limit rule, or an access rule set to block, blocks over ${times(num(s, 'factor'))} its baseline share of the requests it checks and over ${pct(num(s, 'floor'))}.`,
   },
   {
     name: 'rule_would_block',
     label: 'Log-only rule would block',
     scope: blocking,
-    fields: [least('Least requests it would block')],
-    trips: (s) => `Trips when a rule that isn't blocking (set to log only, or under the kill switch) would block at least ${atLeast(s)} requests.`,
+    fields: [least('Minimum requests it would block')],
+    trips: (s) => `Trips when a rule that isn't blocking (set to log only, or under the kill switch) would block at least ${counted(s, 'request')}.`,
   },
   {
     name: 'rule_fail_mode',
-    label: 'Rule in fail mode',
+    label: 'Valkey down',
     scope: limits,
-    fields: [least('Least requests')],
-    trips: (s) => `Trips when at least ${atLeast(s)} requests take a rule's fail mode because Valkey did not answer.`,
+    fields: [least('Minimum requests')],
+    trips: (s) => `Trips when Valkey does not answer for at least ${counted(s, 'request')} on a rule.`,
   },
   {
     name: 'rule_subject_dominates',
     label: 'One client gets most blocks',
     scope: limits,
-    fields: [{ key: 'max_share', label: 'Most share for one client', kind: 'ratio' }, least('Least blocks')],
-    trips: (s) => `Trips when one client gets over ${pct(num(s, 'max_share'))} of a rule's blocks, with at least ${atLeast(s)} blocks.`,
+    fields: [{ key: 'max_share', label: 'Largest share for one client', kind: 'ratio' }, least('Minimum blocks')],
+    trips: (s) => `Trips when one client gets over ${pct(num(s, 'max_share'))} of a rule's blocks, with at least ${counted(s, 'block')}.`,
   },
 ];
 
@@ -207,7 +212,7 @@ export const anomaliesQuery = {
 
 const modes = { notify: 'Notify', off: 'Off' };
 const severities = { critical: 'Critical', warning: 'Warning', info: 'Info' };
-const phaseNames: Record<string, string> = { config: 'config', rate_limit: 'rate limit', request_headers: 'request header' };
+const phaseNames: Record<string, string> = { config: 'access', rate_limit: 'rate limit', request_headers: 'request header' };
 
 // where names a settings path in the page's words, for the server's errors.
 function where(path: string) {
@@ -355,7 +360,9 @@ function Settings({ canManage }: { canManage: boolean }) {
       ));
   return (
     <>
+      <p className="max-w-prose text-body">Saved on their own, not with the draft. They apply from the next check, about a minute after you save.</p>
       <Card
+        badge={<Badge tone="amber">Applies when saved</Badge>}
         title="Defaults"
         intro="Every minute, admin compares the last window with the baseline before it and checks each signal below. Saved on its own, not with the draft."
         info="A signal trips only with enough requests to judge. An anomaly notifies after it trips several checks in a row, and resolves after it passes several in a row."
@@ -431,12 +438,17 @@ function LogsOf({ a, now }: { a: Anomaly; now: number }) {
 
 function Anomalies() {
   const q = useQuery(anomaliesQuery);
+  const [search, setSearch] = useSearch();
   if (!q.data) return <Pending error={q.error} />;
+  const showResolved = search.get('resolved') === '1';
+  const groups = groupAnomalies(q.data.anomalies);
+  const open = groups.filter(({ a }) => a.state !== 'resolved');
+  const hidden = groups.length - open.length;
   return (
     <div className="flex flex-col gap-3">
       {!q.data.alertmanager && <Notice tone="amber">ALERTMANAGER_URL is not set, so anomalies are shown here and nowhere else.</Notice>}
-      <Table head={['Anomaly', 'Severity', 'State', 'Started', 'Sent to Alertmanager']} empty="No anomalies in the last 7 days.">
-        {groupAnomalies(q.data.anomalies).map(({ a, under }) => (
+      <Table head={['Anomaly', 'Severity', 'State', 'Started', 'Sent to Alertmanager']} empty={hidden > 0 && !showResolved ? 'No open anomalies.' : 'No anomalies in the last 7 days.'}>
+        {(showResolved ? groups : open).map(({ a, under }) => (
           <tr key={a.id} className="align-top">
             {/* Summaries wrap, so the table fits a laptop screen. */}
             <td className="min-w-72 px-3 py-2.5 whitespace-normal">
@@ -489,16 +501,32 @@ function Anomalies() {
           </tr>
         ))}
       </Table>
+      {(hidden > 0 || showResolved) && (
+        <div>
+          <Button onClick={() => setSearch({ resolved: showResolved ? '' : '1' })}>{showResolved ? 'Hide resolved' : `Show ${plural(hidden, 'resolved anomaly', 'resolved anomalies')}`}</Button>
+        </div>
+      )}
     </div>
   );
 }
 
 export function Notifications({ canRead, canManage }: { canRead: boolean; canManage: boolean }) {
+  const [search] = useSearch();
+  // The page opens for stats.read; the settings need config.read.
+  const settings = canRead && search.get('tab') === 'settings';
   return (
     <Page title="Notifications" info="Anomalies admin found in the edges' stats, and when each signal notifies. Firing anomalies are sent to Alertmanager, which routes them.">
-      <Anomalies />
-      {/* The page opens for stats.read; the settings need config.read. */}
-      {canRead && <Settings canManage={canManage} />}
+      {canRead && (
+        <Tabs
+          label="Notifications"
+          tabs={[
+            { to: '/notifications', label: 'Anomalies' },
+            { to: '/notifications?tab=settings', label: 'Settings' },
+          ]}
+          current={settings ? '/notifications?tab=settings' : '/notifications'}
+        />
+      )}
+      {settings ? <Settings canManage={canManage} /> : <Anomalies />}
     </Page>
   );
 }

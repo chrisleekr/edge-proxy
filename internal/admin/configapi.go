@@ -811,7 +811,7 @@ func (s *Server) publishTx(ctx context.Context, tx pgx.Tx, p *principal, req pub
 		results := runTests(compiled, tests)
 		for _, res := range results {
 			if !res.Pass {
-				return nil, &problem{Status: http.StatusUnprocessableEntity, Title: "Config tests failed", Detail: "fix the config or the tests before publishing", Tests: results}
+				return nil, &problem{Status: http.StatusUnprocessableEntity, Title: "Policy tests failed", Detail: "fix the config or the tests before publishing", Tests: results}
 			}
 		}
 		return results, nil

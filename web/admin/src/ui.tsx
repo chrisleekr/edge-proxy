@@ -75,6 +75,11 @@ export function Page({ title, info, actions, children }: { title: string; info?:
     document.title = `${title} · Edge Policy Admin`;
   }, [title]);
   useEffect(() => h1.current?.focus({ preventScroll: true }), []);
+  // A #id address (a Find result, a Jump link) lands on its card.
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (id) document.getElementById(id)?.scrollIntoView();
+  }, []);
   return (
     <section className="flex w-full max-w-6xl flex-col gap-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -102,8 +107,12 @@ export function Card({
   note,
   info,
   region,
+  id: anchor,
+  badge,
   children,
 }: {
+  id?: string | undefined;
+  badge?: ReactNode;
   title?: string;
   intro?: ReactNode;
   note?: ReactNode;
@@ -112,6 +121,11 @@ export function Card({
   children: ReactNode;
 }) {
   const id = useId();
+  // A card that renders after its data loads mounts after Page and navigate
+  // have already looked for it.
+  useEffect(() => {
+    if (anchor && window.location.hash === `#${anchor}`) document.getElementById(anchor)?.scrollIntoView();
+  }, [anchor]);
   const tip = intro && info ? (
     <>
       {intro} {info}
@@ -120,11 +134,16 @@ export function Card({
     (intro ?? info)
   );
   return (
-    <section aria-labelledby={region ? id : undefined} className="rounded-card bg-panel p-6 shadow-card">
+    // Keeps the sticky bars off a card reached by #id. Below lg the draft bar
+    // sits under the top bar and wraps, so it needs room for both.
+    <section id={anchor} aria-labelledby={region ? id : undefined} className={`rounded-card bg-panel p-6 shadow-card${anchor ? ' scroll-mt-44 lg:scroll-mt-20' : ''}`}>
       {title && (
-        <Title id={id} info={tip} className="mb-3">
-          {title}
-        </Title>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Title id={id} info={tip}>
+            {title}
+          </Title>
+          {badge}
+        </div>
       )}
       {!title && intro && <p className="mb-3 max-w-prose text-body">{intro}</p>}
       {note && <p className="mb-3 max-w-prose text-body">{note}</p>}
@@ -235,6 +254,40 @@ export function NotFound({ title = 'Page not found', back = ['/', 'Back to the d
         </Link>
       </p>
     </Page>
+  );
+}
+
+// Tabs switches between sibling pages. current is the active tab's path; the
+// path-only match in Link is turned off so tabs sharing a path still differ.
+export function Tabs({ label, tabs, current }: { label: string; tabs: { to: string; label: string }[]; current: string }) {
+  return (
+    <nav aria-label={label} className="flex overflow-x-auto border-b border-line whitespace-nowrap">
+      {tabs.map((t) => (
+        <Link
+          key={t.to}
+          to={t.to}
+          current={t.to === current}
+          className="border-b-2 border-transparent px-3 py-2 text-sm font-medium text-body hover:text-heading aria-[current]:border-brand aria-[current]:text-heading"
+        >
+          {t.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+// Jump lists a long page's cards. Plain anchors: the hash is read by Page and
+// the browser, so no router state is involved.
+export function Jump({ links }: { links: [string, string][] }) {
+  return (
+    <nav aria-label="On this page" className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+      <span className="eyebrow text-muted">On this page</span>
+      {links.map(([id, label]) => (
+        <a key={id} href={`#${id}`} className="text-body underline">
+          {label}
+        </a>
+      ))}
+    </nav>
   );
 }
 
@@ -637,7 +690,15 @@ export const who = (actor: string) => (actor.startsWith('user:') ? actor.slice(5
 // active version is the live one.
 export const statusName = (s: string) => ({ active: 'live', superseded: 'replaced', rolled_back: 'rolled back' })[s] ?? s;
 
-export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : '');
+// One format everywhere, with the month spelled out so 06/11 is never read as
+// the wrong day or month.
+const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+const dateOnly = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
+export const when = (iso: string | null | undefined) => (iso ? dateTime.format(new Date(iso)) : '');
+export const day = (iso: string) => dateOnly.format(new Date(iso));
+
+// plural writes a count with its noun: "1 rule", "2,000 rules".
+export const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
 // ago is a time relative to now, for values whose freshness matters more
 // than the exact time ("2 minutes ago"); pair it with when in a title.
