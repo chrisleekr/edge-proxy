@@ -65,6 +65,7 @@ type TestResult struct {
 // SimView is a simulation result as the API returns it.
 type SimView struct {
 	Rejected        string              `json:"rejected,omitempty"`
+	Allowlist       string              `json:"allowlist,omitempty"`
 	ConfigRules     []string            `json:"config_rules"`
 	RateLimitRules  []string            `json:"rate_limit_rules"`
 	RateLimitCapped bool                `json:"rate_limit_capped"`
@@ -100,7 +101,7 @@ func simulate(c *snapshot.Compiled, r TestRequest) (SimView, error) {
 	s := res.Settings
 	s.Accepted = orEmpty(s.Accepted)
 	return SimView{
-		Rejected: res.Rejected, ConfigRules: orEmpty(res.ConfigRules), RateLimitRules: orEmpty(res.RateLimitRules), RateLimitCapped: res.RateLimitCapped, Preflight: res.Preflight,
+		Rejected: res.Rejected, Allowlist: res.Allowlist, ConfigRules: orEmpty(res.ConfigRules), RateLimitRules: orEmpty(res.RateLimitRules), RateLimitCapped: res.RateLimitCapped, Preflight: res.Preflight,
 		Settings:        s,
 		UpstreamHeaders: res.UpstreamHeaders,
 	}, nil

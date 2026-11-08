@@ -889,3 +889,35 @@ func TestAdoptStartsTheDraft(t *testing.T) {
 		t.Fatalf("draft revision %d based on %v, rules %v, adopted %v", d.Revision, d.BaseVersion, rateLimitIDs(d.Config), d.Adopted)
 	}
 }
+
+// An autopilot publish keeps the base version's allowlist, and a client on
+// it still passes an autopilot rule that stops everyone else.
+func TestOverlayPublishKeepsTheClientAllowlist(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	list := []string{"203.0.113.64/27"}
+	c := testConfig()
+	c.Global.ClientAllowlist = list
+	status(t, pub.save(`"0"`, c, adminTest), 200)
+	status(t, pub.publishDraft("v1"), 201)
+
+	v := h.overlayPublish("Autopilot: block a scraper", overlayRule(t, "ap-scraper", "/search", h.now().Add(time.Hour)))
+	if got := pub.version(v).Config.Global.ClientAllowlist; !slices.Equal(got, list) {
+		t.Fatalf("version %d allowlist %v", v, got)
+	}
+	for _, tc := range []struct {
+		name, ip string
+		want     []string
+	}{
+		{"trusted client", "203.0.113.70", []string{}},
+		{"other client", "203.0.113.96", []string{"ap-scraper"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sim := decode[SimView](t, pub.do("POST", "/api/simulate", map[string]any{"version": v, "request": TestRequest{Host: "api.example.com", Path: "/search", IP: tc.ip}}))
+			if !slices.Equal(sim.RateLimitRules, tc.want) {
+				t.Fatalf("rate-limit rules %v, want %v", sim.RateLimitRules, tc.want)
+			}
+		})
+	}
+}

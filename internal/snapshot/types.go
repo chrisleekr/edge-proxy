@@ -77,6 +77,10 @@ type Global struct {
 	// 0 leaves each edge's own. It can't raise the cap: that comes from the
 	// edge's memory. Added in schema 3, omitted when unset.
 	MaxInflight int `json:"max_inflight,omitempty"`
+	// ClientAllowlist holds IPs and CIDR ranges whose requests skip config
+	// blocks and rate limits, and need no token where one is required (a
+	// token sent is still verified). Added in schema 6, omitted when empty.
+	ClientAllowlist []string `json:"client_allowlist,omitempty"`
 }
 
 // Backstop is the per-replica, per-IP token bucket.

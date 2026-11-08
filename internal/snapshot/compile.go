@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -81,6 +82,21 @@ type Compiled struct {
 	// Counts[i] holds the statuses rate-limit rule i counts; empty for a
 	// rule that counts requests.
 	Counts []StatusSet
+	// ClientAllowlist[i] is entry i of Config.Global.ClientAllowlist, parsed.
+	ClientAllowlist []netip.Prefix
+}
+
+// AllowedClient returns the allowlist entry, as written, that contains ip,
+// or "" when none does. ip must be unmapped, as the edge derives it.
+// ponytail: a linear scan, at most MaxListLen entries and no allocation;
+// switch to an IP set if the bound is ever raised.
+func (c *Compiled) AllowedClient(ip netip.Addr) string {
+	for i, p := range c.ClientAllowlist {
+		if p.Contains(ip) {
+			return c.Config.Global.ClientAllowlist[i]
+		}
+	}
+	return ""
 }
 
 // StatusSet is a set of HTTP statuses from 100 to 499, as bits.
@@ -103,7 +119,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema       = 1
-	SupportedSchema = 5
+	SupportedSchema = 6
 	// MaxInflightSchema is the first schema whose edges read
 	// global.max_inflight. A config of any schema may set it; admin then
 	// publishes it only once every live edge reads that schema.
@@ -116,6 +132,10 @@ const (
 	// rule's expires_at. A config of any schema may set it; admin then
 	// waits for edges that read this schema.
 	ExpiresSchema = 5
+	// ClientAllowlistSchema is the first schema whose edges read
+	// global.client_allowlist. A config of any schema may set it; admin
+	// then waits for edges that read this schema.
+	ClientAllowlistSchema = 6
 	// MaxDistinct bounds a distinct rule's limit: the 1024-bit estimate
 	// drifts beyond it.
 	MaxDistinct = 1000
@@ -423,6 +443,8 @@ func (v *validator) global() {
 		v.out.NeedsSchema = max(v.out.NeedsSchema, MaxInflightSchema)
 	}
 
+	v.clientAllowlist(g.ClientAllowlist)
+
 	v.templates(g.Responses)
 	d := g.Defaults
 	if d.BodyLimit < 1 {
@@ -440,6 +462,74 @@ func (v *validator) global() {
 	v.cors(g.CORSPolicies)
 	v.locale(g.Locale, d.Locale)
 	v.forward("global.request_headers.forward", g.RequestHeaders.Forward)
+}
+
+// clientAllowlist checks each entry and compiles the list. An entry the
+// edge can never match, or that another entry already covers, is refused so
+// the list says what it does.
+func (v *validator) clientAllowlist(items []string) {
+	const path = "global.client_allowlist"
+	if len(items) > 0 {
+		v.out.NeedsSchema = max(v.out.NeedsSchema, ClientAllowlistSchema)
+	}
+	prefixes := make([]netip.Prefix, 0, len(items))
+	valid := make([]bool, 0, len(items))
+	v.list(path, items, false, func(s string) string {
+		p, msg := allowPrefix(s)
+		prefixes, valid = append(prefixes, p), append(valid, msg == "")
+		return msg
+	})
+	if len(items) > MaxListLen {
+		return
+	}
+	for i := range items {
+		for j := range i {
+			// An identical entry is already reported as a duplicate.
+			if valid[i] && valid[j] && items[i] != items[j] && prefixes[i].Overlaps(prefixes[j]) {
+				v.err(fmt.Sprintf("%s[%d]", path, i), "overlaps %q, entry %d; keep only one of them", items[j], j)
+				break
+			}
+		}
+	}
+	v.out.ClientAllowlist = prefixes
+}
+
+// allowPrefix parses an allowlist entry, a bare IP or a CIDR range, as the
+// edge matches it: IPv4-mapped IPv6 becomes IPv4, since the edge unmaps
+// client IPs. It returns a problem for an entry that can't match or is too
+// wide. A match skips blocks and rate limits, so one entry should be one
+// site: IPv4 no wider than /24, IPv6 no wider than /48, the end site size of
+// RFC 6177.
+func allowPrefix(s string) (netip.Prefix, string) {
+	if strings.Contains(s, "%") {
+		return netip.Prefix{}, "must not have a zone"
+	}
+	var p netip.Prefix
+	if strings.Contains(s, "/") {
+		var err error
+		if p, err = netip.ParsePrefix(s); err != nil {
+			return p, "is not an IP address or CIDR range"
+		}
+	} else {
+		a, err := netip.ParseAddr(s)
+		if err != nil {
+			return p, "is not an IP address or CIDR range"
+		}
+		p = netip.PrefixFrom(a, a.BitLen())
+	}
+	if a := p.Addr(); a.Is4In6() {
+		if p.Bits() < 96 {
+			return p, "is IPv4-mapped but shorter than /96, so it never matches an IPv4 client; write the IPv4 range"
+		}
+		p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+	}
+	if a := p.Addr(); a.Is4() && p.Bits() < 24 || a.Is6() && p.Bits() < 48 {
+		return p, "is wider than /24 for IPv4 or /48 for IPv6"
+	}
+	if m := p.Masked(); p != m {
+		return p, fmt.Sprintf("has host bits set; write %s for the whole range or %s for the one address", m, p.Addr())
+	}
+	return p, ""
 }
 
 func (v *validator) templates(rs map[string]Response) {

@@ -57,6 +57,17 @@ func FuzzDecodeAndCompile(f *testing.F) {
 		f.Fatalf("expires_at seed doesn't compile: %v", expr.Issues(errs))
 	}
 	f.Add(expiring)
+	// A trusted client allowlist.
+	trusted := validEnvelope()
+	trusted.Active.Global.ClientAllowlist = []string{"203.0.113.7", "198.51.100.0/24", "2001:db8:f00::/48"}
+	if _, errs := CompileEnvelope(trusted, testDeployment); errs != nil {
+		f.Fatalf("allowlist seed doesn't compile: %v", expr.Issues(errs))
+	}
+	tb, err := json.Marshal(trusted)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(tb)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e, err := Decode(bytes.NewReader(data))
 		if err != nil {
@@ -92,6 +103,7 @@ func largestConfig() *Config {
 	}
 	ips := mustParse(`ip.src in {` + strings.Join(cidrs, " ") + `}`)
 	c.ConfigRules, c.RateLimitRules, c.RequestHeaderRules = nil, nil, nil
+	c.Global.ClientAllowlist = allowlistOf(MaxListLen)
 	for i := range MaxRulesPerPhase {
 		c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: fmt.Sprintf("c%d", i), Expression: ips, Settings: Settings{BodyLimit: new(int64(1))}})
 		c.RateLimitRules = append(c.RateLimitRules, RateLimitRule{ID: fmt.Sprintf("r%d", i), Expression: ips, Algorithm: "fixed_window", Limit: 1, Period: dur("1s"), Key: []string{"ip"}, OnMissingKey: "skip", Action: "log", FailMode: "open"})

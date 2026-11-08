@@ -356,3 +356,57 @@ func TestSimulateBlockRule(t *testing.T) {
 		}
 	}
 }
+
+// A client on the allowlist is reported as the live pipeline treats it: the
+// matched entry is named, the block and the rate-limit rules are skipped,
+// and a token is not required, though claims from one it sends still reach
+// the header rules. Anyone else is judged as before.
+func TestSimulateTrustedClient(t *testing.T) {
+	c := allowlistConfig(1, "198.51.100.0/24")
+	c.Auth = snapshot.Auth{Issuers: []snapshot.Issuer{{ID: "corp", Issuer: "https://id/", Audiences: []string{"api"}, JWKSURL: "https://id/jwks", Algorithm: "RS256"}}, DefaultAccepted: []string{"corp"}}
+	c.ConfigRules = append(c.ConfigRules,
+		snapshot.ConfigRule{ID: "private", Expression: mustParse(`starts_with(http.request.uri.path, "/private")`), Settings: snapshot.Settings{Auth: &snapshot.AuthSetting{Mode: "required"}}},
+		snapshot.ConfigRule{ID: "headers", Expression: mustParse("true"), Settings: snapshot.Settings{RateLimitHeaders: new(true)}},
+	)
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule("site", "true", "sliding_window", 10, "ip")}
+	c.RequestHeaderRules = []snapshot.HeaderRule{{ID: "tenant", Expression: mustParse(`http.request.jwt.claims["tenant"] ne ""`),
+		Ops: []snapshot.HeaderOp{{Op: "set", Name: "X-Tenant", Value: "{{jwt_claim:tenant}}"}}}}
+	cc := compiled(t, c)
+	acme := map[string][]string{"tenant": {"acme"}}
+	cases := []struct {
+		name, ip, ua, target string
+		claims               map[string][]string
+		allowlist, rejected  string
+		authMode             string
+		rateLimit            []string
+		rateLimitHeaders     bool
+		tenant               string
+	}{
+		{"trusted client on a block rule", "198.51.100.7", "curl/8.5.0", "/", nil, "198.51.100.0/24", "", "none", nil, false, ""},
+		{"other client on a block rule", "203.0.113.9", "curl/8.5.0", "/", nil, "", "blocked", "none", nil, true, ""},
+		{"trusted client on a route that needs a token", "198.51.100.7", "firefox", "/private/x", nil, "198.51.100.0/24", "", "optional", nil, false, ""},
+		{"trusted client with a verified token", "198.51.100.7", "firefox", "/private/x", acme, "198.51.100.0/24", "", "optional", nil, false, "acme"},
+		{"other client on a route that needs a token", "203.0.113.9", "firefox", "/private/x", nil, "", "auth", "required", nil, true, ""},
+		{"other client with a verified token", "203.0.113.9", "firefox", "/private/x", acme, "", "", "required", []string{"site"}, true, "acme"},
+		{"trusted client on a rate-limited route", "198.51.100.7", "firefox", "/", nil, "198.51.100.0/24", "", "none", nil, false, ""},
+		{"other client on a rate-limited route", "203.0.113.9", "firefox", "/", nil, "", "", "none", []string{"site"}, true, ""},
+		{"trusted client written as mapped IPv6", "::ffff:198.51.100.7", "firefox", "/", nil, "198.51.100.0/24", "", "none", nil, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: tc.target, IP: tc.ip, Headers: map[string][]string{"User-Agent": {tc.ua}}, JWTClaims: tc.claims})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Allowlist != tc.allowlist || got.Rejected != tc.rejected || !slices.Equal(got.RateLimitRules, tc.rateLimit) {
+				t.Fatalf("allowlist %q rejected %q rate limit %v", got.Allowlist, got.Rejected, got.RateLimitRules)
+			}
+			if got.Settings.AuthMode != tc.authMode || got.Settings.RateLimitHeaders != tc.rateLimitHeaders || (tc.allowlist != "" && got.Settings.Block != "") {
+				t.Fatalf("settings %+v", got.Settings)
+			}
+			if tc.rejected == "" && got.UpstreamHeaders.Get("X-Tenant") != tc.tenant {
+				t.Fatalf("X-Tenant %q, want %q", got.UpstreamHeaders.Get("X-Tenant"), tc.tenant)
+			}
+		})
+	}
+}

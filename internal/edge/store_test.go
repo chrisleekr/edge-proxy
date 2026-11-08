@@ -184,6 +184,25 @@ func TestBootstrapWithExpiredRule(t *testing.T) {
 	}
 }
 
+// A cold start from the cache file keeps the allowlist: a trusted client
+// still skips the block rule that stops everyone else.
+func TestStartupFromCacheKeepsTheAllowlist(t *testing.T) {
+	boot := filepath.Join(t.TempDir(), "boot.json")
+	writeEnvelope(t, boot, envelope(allowlistConfig(1, "198.51.100.0/24")))
+
+	h := pollerHarness(t, map[string]string{"BOOTSTRAP_PATH": boot})
+	h.srv.poller.loadInitial(t.Context())
+	if !h.srv.ready() {
+		t.Fatal("not ready from the cache file")
+	}
+	if got := h.statuses(1, "GET", "/", "User-Agent", "curl/8.5.0"); !eqInts(got, 200) {
+		t.Fatalf("trusted client: %v", got)
+	}
+	if got := h.statuses(1, "GET", "/", "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", "203.0.113.9:1"); !eqInts(got, 403) {
+		t.Fatalf("other client: %v", got)
+	}
+}
+
 // With no usable source the edge stays not-ready and says so.
 func TestStartupWithNothing(t *testing.T) {
 	h := pollerHarness(t, map[string]string{"BOOTSTRAP_PATH": filepath.Join(t.TempDir(), "missing.json")})

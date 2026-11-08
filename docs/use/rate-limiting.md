@@ -355,6 +355,10 @@ Before any shared limit, each edge applies a per-IP token bucket in memory (**Se
 
 When its table is full, new IPs pass the backstop untracked rather than share one bucket; the shared limits still apply to them.
 
+## Trusted clients
+
+Clients on the **Settings → Trusted client allowlist** skip every rate-limit rule, including autopilot rules, count rules, penalties already running and `on_missing_key: reject`. No Valkey call is made for them and no counter or quota changes. The local backstop still applies. Removing an entry puts the client back under the rules without resetting its counters. See [Trusted clients](policy.md#trusted-clients).
+
 ## Emergency switch
 
 **Settings → Kill switch → Disable rate limiting** turns every rule into `log`. Save and publish it to stop all rate-limit blocking at once; the backstop still applies. **Disable JWT checks** turns JWT verification off entirely: every route behaves as `auth: none`, claims are empty and `X-Edge-Auth-*` headers are not set. **Disable blocking by config rules** turns every config rule's `block` setting into `log`.

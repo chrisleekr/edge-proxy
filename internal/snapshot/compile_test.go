@@ -104,6 +104,9 @@ func TestStarterCompiles(t *testing.T) {
 	if _, warns, errs := Compile(c, Deployment{}); errs != nil || warns != nil {
 		t.Fatalf("errors %v, warnings %v", errs, warns)
 	}
+	if c.Schema < ClientAllowlistSchema {
+		t.Fatalf("starter is schema %d, want at least %d", c.Schema, ClientAllowlistSchema)
+	}
 	if r := c.Global.Responses["rate_limited"]; r.Status != 429 || r.Body != `{"status":429,"title":"Too Many Requests"}` {
 		t.Fatalf("rate_limited %+v", r)
 	}

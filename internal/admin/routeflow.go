@@ -245,6 +245,8 @@ func (s *Server) routeFlow(w http.ResponseWriter, r *http.Request, _ *principal)
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]" // IPv6 literal
 	}
+	// No IP: the sample client is 192.0.2.1, the config-test default; the
+	// flow says whether it is on the allowlist.
 	req := TestRequest{Method: k.method, Host: host, Path: target}
 	sim, err := simulate(c, req)
 	if err != nil {
