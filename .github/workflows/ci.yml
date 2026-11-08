@@ -93,11 +93,14 @@ jobs:
           node-version: 26.13.0
           cache: npm
           cache-dependency-path: web/admin/package-lock.json
+      # Playwright ships a separate WebKit build per Ubuntu release, and
+      # runner.os doesn't show the release when ubuntu-latest moves.
+      - run: echo "OS_RELEASE=$(. /etc/os-release && echo "$VERSION_ID")" >> "$GITHUB_ENV"
       # The lockfile pins the Playwright version, which pins its browsers.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('web/admin/package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ env.OS_RELEASE }}-${{ hashFiles('web/admin/package-lock.json') }}
       - run: ./scripts/ci/ui.sh
 
   autopilot:
