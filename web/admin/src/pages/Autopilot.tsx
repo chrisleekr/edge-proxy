@@ -384,20 +384,21 @@ export function Autopilot() {
   const can = useCan();
   const [search, setSearch] = useSearch();
   const find = search.get('rule') ?? '';
-  const tab = search.get('tab');
+  const raw = search.get('tab');
+  // Null is Overview, which an unknown tab value also renders.
+  const tab = raw === 'spend' || raw === 'settings' ? raw : null;
   const stats = can('stats.read');
-  // Only Overview reads the range; an unknown tab value renders Overview.
-  const overview = tab !== 'spend' && tab !== 'settings';
-  const range = useRange(stats && overview);
+  // Only Overview reads the range.
+  const range = useRange(stats && !tab);
   if (!q.data) return <Pending error={q.error} />;
   const st = q.data;
   return (
     <Page
       title="Autopilot"
       info="Adds short-lived rate limit rules against an attack while it runs. A language model investigates and proposes; admin checks every proposal and your budgets before a rule reaches an edge. Every autopilot rule expires."
-      actions={stats && overview && <RangePicker r={range} />}
+      actions={stats && !tab && <RangePicker r={range} />}
     >
-      <AutopilotTabs current={tab === 'spend' || tab === 'settings' ? `/autopilot?tab=${tab}` : '/autopilot'} />
+      <AutopilotTabs current={tab ? `/autopilot?tab=${tab}` : '/autopilot'} />
       {tab === 'spend' ? (
         <>
           <SpendCard spend={st.spend} days={st.spend_days} />

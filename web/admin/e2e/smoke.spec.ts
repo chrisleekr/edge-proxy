@@ -484,6 +484,24 @@ test('on a narrow window the draft bar stays below the top bar, so Save draft wo
   await page.setViewportSize(size);
 });
 
+test('on a phone with unsaved changes a jump link lands on its card clear of the draft bar', async () => {
+  const size = page.viewportSize()!;
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto('/settings');
+  await page.getByLabel('Maximum requests in progress per edge').fill('500');
+  const bar = page.locator('div.sticky', { hasText: 'Unsaved changes to the draft.' });
+  await expect(bar).toBeVisible();
+  await page.getByRole('link', { name: 'Trusted client allowlist' }).click();
+  const heading = page.locator('#trusted-clients').getByRole('heading', { name: 'Trusted client allowlist' });
+  // Below the fold until the jump lands, so wait for that before comparing.
+  await expect.poll(async () => (await heading.boundingBox())!.y).toBeLessThan(400);
+  const b = (await bar.boundingBox())!;
+  expect((await heading.boundingBox())!.y).toBeGreaterThanOrEqual(b.y + b.height);
+  await page.getByRole('button', { name: 'Discard' }).click();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+  await page.setViewportSize(size);
+});
+
 test('an access rule set to block saves, and the block kill switch saves with it', async () => {
   await nav('Rules');
   const config = page.getByRole('list', { name: 'Access rules' }).locator('..');

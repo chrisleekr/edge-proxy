@@ -134,8 +134,9 @@ export function Card({
     (intro ?? info)
   );
   return (
-    // scroll-mt-20 keeps the sticky top bar off a card reached by #id.
-    <section id={anchor} aria-labelledby={region ? id : undefined} className={`rounded-card bg-panel p-6 shadow-card${anchor ? ' scroll-mt-20' : ''}`}>
+    // Keeps the sticky bars off a card reached by #id. Below lg the draft bar
+    // sits under the top bar and wraps, so it needs room for both.
+    <section id={anchor} aria-labelledby={region ? id : undefined} className={`rounded-card bg-panel p-6 shadow-card${anchor ? ' scroll-mt-44 lg:scroll-mt-20' : ''}`}>
       {title && (
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Title id={id} info={tip}>
