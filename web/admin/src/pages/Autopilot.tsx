@@ -386,14 +386,16 @@ export function Autopilot() {
   const find = search.get('rule') ?? '';
   const tab = search.get('tab');
   const stats = can('stats.read');
-  const range = useRange(stats);
+  // Only Overview reads the range; an unknown tab value renders Overview.
+  const overview = tab !== 'spend' && tab !== 'settings';
+  const range = useRange(stats && overview);
   if (!q.data) return <Pending error={q.error} />;
   const st = q.data;
   return (
     <Page
       title="Autopilot"
       info="Adds short-lived rate limit rules against an attack while it runs. A language model investigates and proposes; admin checks every proposal and your budgets before a rule reaches an edge. Every autopilot rule expires."
-      actions={stats && <RangePicker r={range} />}
+      actions={stats && overview && <RangePicker r={range} />}
     >
       <AutopilotTabs current={tab === 'spend' || tab === 'settings' ? `/autopilot?tab=${tab}` : '/autopilot'} />
       {tab === 'spend' ? (
