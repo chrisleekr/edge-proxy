@@ -49,7 +49,8 @@ type SimResult struct {
 	Preflight bool
 	Settings  SimSettings
 	// Allowlist is the client allowlist entry the IP matched, or "". The
-	// block, token check and rate-limit rules are then skipped.
+	// block and rate-limit rules are then skipped, and a required token
+	// becomes optional.
 	Allowlist string
 	// UpstreamHeaders are the request's headers after the header phase
 	// (step 9): forward filter, header rules and the locale header. The
