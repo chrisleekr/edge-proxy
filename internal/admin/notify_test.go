@@ -284,6 +284,41 @@ func TestNotifySignals(t *testing.T) {
 	}
 }
 
+// A count of one reads as one request, and the Valkey signal says what
+// happened rather than naming the rule's setting.
+func TestNotifySummariesCountRequests(t *testing.T) {
+	login := func(would, failed uint64) []edge.RuleCounts {
+		return []edge.RuleCounts{{ID: "login", Evaluated: 100, WouldLimit: would, Failed: failed}}
+	}
+	for _, tc := range []struct {
+		name, signal, want string
+		window             minute
+	}{
+		{"one request would have been blocked", "rule_would_block", "Would have blocked 1 request in the last", minute{requests: 1000, rateLimit: login(1, 0)}},
+		{"two requests would have been blocked", "rule_would_block", "Would have blocked 2 requests in the last", minute{requests: 1000, rateLimit: login(2, 0)}},
+		{"Valkey did not answer for one request", "rule_fail_mode", "Valkey did not answer for 1 request in the last", minute{requests: 1000, rateLimit: login(0, 1)}},
+		{"Valkey did not answer for many requests", "rule_fail_mode", "Valkey did not answer for 100 requests in the last", minute{requests: 1000, rateLimit: login(0, 100)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pub, _ := notifyHarness(t)
+			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+			n.FireAfter = 1
+			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+			h.put(65, 6, minute{requests: 1000, rateLimit: login(0, 0)})
+			// One bad minute, so the window's count is the case's count.
+			h.put(5, 5, tc.window)
+			h.put(4, 1, minute{requests: 1000, rateLimit: login(0, 0)})
+			h.check()
+			for _, a := range h.anomalies(pub) {
+				if a.Signal == tc.signal && strings.Contains(a.Summary, tc.want) {
+					return
+				}
+			}
+			t.Fatalf("no %s summary containing %q in %+v", tc.signal, tc.want, h.anomalies(pub))
+		})
+	}
+}
+
 // One cause notifies once. A rise every rule shares is the fleet's, so
 // only the fleet signal fires; a rise concentrated on one rule, or a rule
 // that holds while the fleet moves, still names the rule. Version 1 checks

@@ -31,11 +31,12 @@ func TestLoadConfig(t *testing.T) {
 	e["JWKS_ALLOWED_HOSTS"] = "idp.internal, other.internal"
 	e["ADMIN_TRUSTED_PROXIES"] = "10.0.0.5, 10.1.0.0/16"
 	delete(e, "ADMIN_INTERNAL_ADDR")
+	delete(e, "DRAIN_DELAY")
 	c, err := LoadConfig(env(e))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ListenAddr != ":8081" || c.InternalAddr != ":9091" || c.SessionIdle != 10*time.Minute || c.SessionMaxAge != 12*time.Hour ||
+	if c.DrainDelay != 5*time.Second || c.ListenAddr != ":8081" || c.InternalAddr != ":9091" || c.SessionIdle != 10*time.Minute || c.SessionMaxAge != 12*time.Hour ||
 		!c.Blocklist["password123456789"] || !c.Blocklist["hunter2hunter2hunter2"] || len(c.Blocklist) != 2 ||
 		strings.Join(c.Audit.Order, ",") != "k0,k1" || c.Audit.Current != "k1" || len(c.JWKSAllowedHosts) != 2 || len(c.Deployment.ViewerFields) == 0 ||
 		len(c.TrustedProxies) != 2 || c.TrustedProxies[0] != netip.MustParsePrefix("10.0.0.5/32") {

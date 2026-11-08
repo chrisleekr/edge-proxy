@@ -130,7 +130,7 @@ func TestRuntimeRoleLimits(t *testing.T) {
 func TestRolePermissions(t *testing.T) {
 	_, app := migrated(t)
 	var n int
-	if err := app.QueryRow(t.Context(), "SELECT count(*) FROM role_permissions WHERE role = 'admin'").Scan(&n); err != nil || n != 14 {
+	if err := app.QueryRow(t.Context(), "SELECT count(*) FROM role_permissions WHERE role = 'admin'").Scan(&n); err != nil || n != 15 {
 		t.Fatalf("admin has %d permissions, %v", n, err)
 	}
 	// Every role reads the autopilot; publishers and admins act on it. The
@@ -148,6 +148,10 @@ func TestRolePermissions(t *testing.T) {
 		{"publisher", "autopilot.manage", true},
 		{"admin", "autopilot.manage", true},
 		{"admin", "autopilot.agent", false},
+		{"viewer", "attention.ack", false},
+		{"editor", "attention.ack", true},
+		{"publisher", "attention.ack", true},
+		{"admin", "attention.ack", true},
 	} {
 		t.Run(tc.role+" "+tc.perm, func(t *testing.T) {
 			var held bool

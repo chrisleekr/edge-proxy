@@ -183,11 +183,11 @@ var notifyChecks = map[string]notifyCheck{
 	}),
 	"rule_would_block": minOnly.on(blockPhases, func(s NotifySignal, w, _ *span, id string) (bool, string) {
 		n := w.blocking(id).WouldLimit
-		return n >= s.MinRequests, fmt.Sprintf("Would have blocked %d requests in the last %s: it is set to log only, or the kill switch is on", n, w.length())
+		return n >= s.MinRequests, fmt.Sprintf("Would have blocked %s in the last %s: it is set to log only, or the kill switch is on", requests(n), w.length())
 	}),
 	"rule_fail_mode": minOnly.on(limitOnly, func(s NotifySignal, w, _ *span, id string) (bool, string) {
 		n := w.limit(id).Failed
-		return n >= s.MinRequests, fmt.Sprintf("%d requests took its fail mode in the last %s: Valkey did not answer", n, w.length())
+		return n >= s.MinRequests, fmt.Sprintf("Valkey did not answer for %s in the last %s", requests(n), w.length())
 	}),
 	"rule_subject_dominates": notifyNeeds(func(s NotifySignal) bool { return isRatio(s.MaxShare) && s.MinRequests > 0 },
 		"max_share above 0 and at most 1, min_requests of at least 1").on(limitOnly, func(s NotifySignal, w, _ *span, id string) (bool, string) {
@@ -238,6 +238,14 @@ func outcomeShare(what string, get func(*edge.RuleOutcome) uint64, fleet func(*e
 		return wo.Matched >= s.MinRequests && get(&wo) >= s.MinEvents && now > max(s.Floor, s.Factor*before, s.Factor*all),
 			fmt.Sprintf("%s %s in the last %s, against %s in the %s before and %s of all requests", pct(now), what, w.length(), pct(before), b.length(), pct(all))
 	}
+}
+
+// requests counts requests with the right plural.
+func requests(n uint64) string {
+	if n == 1 {
+		return "1 request"
+	}
+	return fmt.Sprintf("%d requests", n)
 }
 
 func pct(v float64) string { return fmt.Sprintf("%.1f%%", 100*v) }
@@ -827,18 +835,21 @@ type triagedAnomaly struct {
 // sent keeps being sent until it resolves, so Alertmanager sees it end. A
 // benign verdict holds back only info: traffic an attacker shapes could
 // talk the model into one, so a warning is only delayed for the verdict.
-func (a triagedAnomaly) withheld(handles bool, now time.Time) string {
+// handles is whether the autopilot works the cases already open; opens is
+// whether it also opens cases for anomalies, which is what makes it wait for
+// ones it has not opened yet.
+func (a triagedAnomaly) withheld(handles, opens bool, now time.Time) string {
 	open := a.CaseState != nil && (*a.CaseState == "queued" || *a.CaseState == "running")
 	// A case opens for these on the autopilot's next run, which can come
 	// after this send, so one that fired just now waits for it too.
-	coming := a.CaseState == nil && slices.Contains(anomalySignals, a.Signal)
+	coming := opens && a.CaseState == nil && slices.Contains(anomalySignals, a.Signal)
 	switch {
 	case a.NotifiedAt != nil || a.Phase == autopilotPhase:
 		return ""
 	// An autopilot rule's would-block and dominant-subject anomalies are its
 	// own input: it opens a case from them and notifies what it concludes.
 	// A critical one is sent at once.
-	case handles && strings.HasPrefix(a.Rule, overlayPrefix) && a.Severity != "critical" && slices.Contains(overlaySignals, a.Signal):
+	case opens && strings.HasPrefix(a.Rule, overlayPrefix) && a.Severity != "critical" && slices.Contains(overlaySignals, a.Signal):
 		return "own_rule"
 	case handles && a.CaseVerdict != nil && *a.CaseVerdict == "benign" && a.Severity == "info":
 		return "benign"
@@ -849,25 +860,26 @@ func (a triagedAnomaly) withheld(handles bool, now time.Time) string {
 }
 
 // autopilotHandles says whether the autopilot is on with a runner
-// connected, so it works the anomalies it opens cases for.
-func (s *Server) autopilotHandles(ctx context.Context) (bool, error) {
+// connected, so it works the cases that are open, and whether it also opens
+// cases for anomalies, which anomaly investigation switches off.
+func (s *Server) autopilotHandles(ctx context.Context) (handles, opens bool, err error) {
 	set, err := loadAutopilot(ctx, s.db)
 	if err != nil || set.Mode == "off" {
-		return false, err
+		return false, false, err
 	}
 	rs, err := s.runners(ctx, s.db)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	live, _ := s.connected(rs)
-	return len(live) > 0, nil
+	return len(live) > 0, len(live) > 0 && set.AnomalyInvestigationEnabled, nil
 }
 
 // triaged lists the anomalies matching cond, which may end in ORDER BY and
 // LIMIT, ordered by order, each with its newest case and why it is
 // withheld.
 func (s *Server) triaged(ctx context.Context, cond, order string, args ...any) ([]triagedAnomaly, error) {
-	handles, err := s.autopilotHandles(ctx)
+	handles, opens, err := s.autopilotHandles(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -883,7 +895,7 @@ func (s *Server) triaged(ctx context.Context, cond, order string, args ...any) (
 	}
 	now := s.now()
 	for i := range list {
-		list[i].Withheld = list[i].withheld(handles, now)
+		list[i].Withheld = list[i].withheld(handles, opens, now)
 	}
 	return list, nil
 }
@@ -998,7 +1010,7 @@ var signalTitles = map[string]string{
 	"rule_auth_failure_ratio":    "More failed token checks on a rule",
 	"rule_block_spike":           "Rule blocking more",
 	"rule_would_block":           "Log-only rule would block",
-	"rule_fail_mode":             "Rule in fail mode",
+	"rule_fail_mode":             "Valkey down",
 	"rule_subject_dominates":     "One client gets most of a rule's blocks",
 	"autopilot_enforced":         "An autopilot rule is blocking",
 	"autopilot_rolled_back":      "An autopilot rule was rolled back",

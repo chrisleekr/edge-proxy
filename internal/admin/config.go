@@ -38,6 +38,7 @@ type Config struct {
 	// Google's JSON format. Deployment config, like JWKS_ALLOWED_HOSTS: no
 	// admin user can point admin at another URL.
 	VerifiedBotSources []string
+	DrainDelay         time.Duration
 	SessionIdle        time.Duration
 	SessionMaxAge      time.Duration
 	// TrustedProxies are admin's own HTTPS proxies (ADMIN_TRUSTED_PROXIES),
@@ -107,6 +108,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		ListenAddr:         p.Str("LISTEN_ADDR", ":8081"),
 		InternalAddr:       p.Str("ADMIN_INTERNAL_ADDR", ":9091"),
 		DatabaseURL:        getenv("DATABASE_URL"),
+		DrainDelay:         p.Duration("DRAIN_DELAY", 5*time.Second),
 		SessionIdle:        p.Duration("SESSION_IDLE_TIMEOUT", 30*time.Minute),
 		SessionMaxAge:      p.Duration("SESSION_MAX_AGE", 12*time.Hour),
 		Blocklist:          map[string]bool{},

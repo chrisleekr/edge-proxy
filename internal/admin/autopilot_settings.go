@@ -37,6 +37,12 @@ type AutopilotSettings struct {
 	MinPublishInterval snapshot.Duration `json:"min_publish_interval"`
 	Model              string            `json:"model"`
 	SweepModel         string            `json:"sweep_model"`
+	// The cases the autopilot opens on its own, each off on its own. Cases a
+	// person opens, ablations and the cases opened for a retracted note have no
+	// toggle.
+	SweepEnabled                bool `json:"sweep_enabled"`
+	ReviewEnabled               bool `json:"review_enabled"`
+	AnomalyInvestigationEnabled bool `json:"anomaly_investigation_enabled"`
 	// ProtectedSubjects are CIDRs and AS numbers (AS64500) no autopilot
 	// rule may block. They restrict the autopilot only: they are not an edge
 	// exemption.
@@ -49,6 +55,7 @@ func defaultAutopilot() AutopilotSettings {
 		Mode: "auto", MaxEnforcing: 10, MaxSensors: 10, ObserveFor: 5 * m, DefaultTTL: 60 * m, MaxTTL: snapshot.Duration(maxOverlayTTL),
 		MaxLifetime: 7 * 24 * 60 * m, MaxBlockShare: 0.02, CasesPerHour: 20, MinPublishInterval: m,
 		Model: "claude-opus-5-5", SweepModel: "claude-opus-5-5", ProtectedSubjects: []string{},
+		SweepEnabled: true, ReviewEnabled: true, AnomalyInvestigationEnabled: true,
 	}
 }
 
@@ -226,6 +233,9 @@ func (s *Server) putAutopilotSettings(w http.ResponseWriter, r *http.Request, p 
 		AutopilotSettings
 		Reason string `json:"reason"`
 	}
+	// A client written before the triggers existed leaves them out, and must
+	// not turn every one off.
+	in.SweepEnabled, in.ReviewEnabled, in.AnomalyInvestigationEnabled = true, true, true
 	if err := readJSON(w, r, &in); err != nil {
 		return err
 	}

@@ -197,6 +197,11 @@ func TestAutopilotSettings(t *testing.T) {
 		if ps, ok := s["protected_subjects"].([]any); !ok || len(ps) != 0 {
 			t.Errorf("protected_subjects %v", s["protected_subjects"])
 		}
+		for _, k := range autoTriggers {
+			if s[k] != true {
+				t.Errorf("%s %v, want true", k, s[k])
+			}
+		}
 	})
 	many := make([]any, 201)
 	for i := range many {

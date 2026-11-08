@@ -43,6 +43,8 @@ var runtimeGrants = []string{
 	// An exclusion is revoked, never deleted.
 	"GRANT SELECT, INSERT, UPDATE ON autopilot_exclusions TO %[1]s",
 	"GRANT USAGE ON SEQUENCE autopilot_exclusions_id_seq TO %[1]s",
+	// An ack is removed when its condition clears.
+	"GRANT SELECT, INSERT, DELETE ON attention_acks TO %[1]s",
 }
 
 // Migrate applies new migrations in order, each in its own transaction,

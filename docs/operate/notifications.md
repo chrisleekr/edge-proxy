@@ -64,7 +64,7 @@ With `autopilot.manage`, each open anomaly on **Notifications** has **Investigat
 | `rule_auth_failure_ratio` | config | Failed token checks are over 2 times their baseline share of the rule's requests, over 2 times their share of all requests, and over 10%, with at least 10 of them | warning |
 | `rule_block_spike` | rate limit, config | The rule blocks over 3 times its baseline share of the requests it checks, and over 1%. A config rule checks every request, and blocks with its `block` setting | warning |
 | `rule_would_block` | rate limit, config | A rule that isn't blocking (set to log only, or under the rate-limit or block kill switch) would have refused at least one request | info |
-| `rule_fail_mode` | rate limit | A request took the rule's `fail_mode` because Valkey did not answer | critical |
+| `rule_fail_mode` | rate limit | Shown as **Valkey down**: at least `min_requests` requests took the rule's `fail_mode` because Valkey did not answer | critical |
 | `rule_subject_dominates` | rate limit | One client got over half of the rule's blocks, with at least 100 blocks: a targeted flood, or one client misbehaving | warning |
 
 **Autopilot**, from [autopilot](../use/autopilot.md)'s own state while it is on. They have no thresholds: each holds while its condition does.
@@ -111,5 +111,7 @@ While the [autopilot](../use/autopilot.md) is on and a runner was seen in the la
 - **Its own rule:** a `rule_would_block` or `rule_subject_dominates` anomaly on an autopilot rule (`ap-`), sensor or enforce, other than a critical one, is the autopilot's input. It opens a case from it and notifies what it concludes: `autopilot_needs_person` for an unsure verdict, a failed case, or an attack with no enforce rule accepted, or with one waiting for a person's approval in `observe` mode. Its other anomalies, such as `rule_fail_mode`, are treated as any rule's, except `rule_block_spike` and `rule_stopped_matching`, which an autopilot rule trips by design when it starts blocking and when the attack ends: they are not checked on `ap-` rules, and `autopilot_enforced` and `autopilot_rolled_back` report those changes.
 - **Investigating:** an anomaly that opens a case, other than a critical one, waits up to 10 minutes after it fired for the case's verdict, and is then sent with "Autopilot case N: verdict." added to `description`. The case's summary is left out: the model writes it after reading traffic clients control.
 - **Benign:** an `info` anomaly whose case closed `benign` is not sent. A warning closed benign is still sent, with the verdict: traffic an attacker shapes could talk the model into a benign verdict, so the verdict only delays it.
+
+With `anomaly_investigation_enabled` off, admin opens no case for an anomaly, so an autopilot rule's anomalies are not held back as its own rule, and an anomaly waits only for a case already open on it, such as one a person opened.
 
 A critical anomaly is never held back, and nothing is while the autopilot is off or no runner is connected. An anomaly already sent keeps being sent until it resolves, whatever its case concludes.

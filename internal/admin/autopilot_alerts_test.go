@@ -196,6 +196,72 @@ func TestNotifyWithholdsWhatTheAutopilotWorks(t *testing.T) {
 	})
 }
 
+// With anomaly investigation off the autopilot opens no case for an
+// anomaly, so it has nothing to wait for: a person hears the anomaly at
+// once. A case a person opened on one still holds it back.
+func TestNotifyWithAnomalyInvestigationOff(t *testing.T) {
+	off := map[string]any{"anomaly_investigation_enabled": false}
+	firing := func(h *harness, signal string) int {
+		h.t.Helper()
+		var n int
+		if err := h.db.QueryRow(h.t.Context(), "SELECT count(*) FROM anomalies WHERE signal = $1 AND state = 'firing'", signal).Scan(&n); err != nil {
+			h.t.Fatal(err)
+		}
+		return n
+	}
+	t.Run("a fleet anomaly is sent at once while a runner is connected", func(t *testing.T) {
+		h, pub, agent, am := alertHarness(t, 1)
+		pub.setAutopilot(off)
+		agent.seen()
+		loginSurge(h)
+		h.check()
+		if w := withheldOf(t, pub, "rule_match_surge"); w != "" {
+			t.Fatalf("withheld %q", w)
+		}
+		if got := am.sent("rule_match_surge"); len(got) == 0 || firing(h, "rule_match_surge") != 1 {
+			t.Fatalf("sent %+v, firing %d", got, firing(h, "rule_match_surge"))
+		}
+	})
+	t.Run("a sensor's would-block is sent at once while a runner is connected", func(t *testing.T) {
+		h, pub, agent, am := alertHarness(t, 1)
+		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+		pub.setAutopilot(off)
+		ruleMinutes(h, pub, 5, 1_000, 100, 0, 5, id, "[]")
+		h.check()
+		if w := withheldOf(t, pub, "rule_would_block"); w != "" {
+			t.Fatalf("withheld %q", w)
+		}
+		if got := am.sent("rule_would_block"); len(got) == 0 || got[0].Labels["rule"] != id || firing(h, "rule_would_block") != 1 {
+			t.Fatalf("sent %+v, firing %d", got, firing(h, "rule_would_block"))
+		}
+		h.tick()
+		var cases int
+		if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM autopilot_cases WHERE kind = 'anomaly'").Scan(&cases); err != nil || cases != 0 {
+			t.Fatalf("%d anomaly cases, err %v", cases, err)
+		}
+	})
+	t.Run("an anomaly with a case already open on it is still withheld for the verdict", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(off)
+		agent.seen()
+		a := h.firingAnomaly("traffic_surge")
+		status(t, pub.do("POST", "/api/autopilot/cases", map[string]any{"anomaly_id": a}), 201)
+		if w := withheldOf(t, pub, "traffic_surge"); w != "investigating" {
+			t.Fatalf("withheld %q", w)
+		}
+	})
+	t.Run("an anomaly whose case opened before investigation was turned off is still withheld for the verdict", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		agent.seen()
+		h.firingAnomaly("traffic_surge")
+		h.tick()
+		pub.setAutopilot(off)
+		if w := withheldOf(t, pub, "traffic_surge"); w != "investigating" {
+			t.Fatalf("withheld %q", w)
+		}
+	})
+}
+
 // A sensor whose case closed benign is quiet for one renewal; the sweep,
 // which only proposes sensors, waits while the sensor budget is full.
 func TestAutopilotSensorCases(t *testing.T) {

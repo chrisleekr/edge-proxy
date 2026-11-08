@@ -165,7 +165,8 @@ func (s *Server) expireCases(ctx context.Context) error {
 
 // openAutoCases opens cases for firing anomalies, the sweep and review
 // when they are due and ablations of confirmed notes, only while a runner
-// is connected.
+// is connected. The first three each have a setting that turns them off;
+// ablations have none.
 func (s *Server) openAutoCases(ctx context.Context, set AutopilotSettings) error {
 	rs, err := s.runners(ctx, s.db)
 	if err != nil {
@@ -176,25 +177,13 @@ func (s *Server) openAutoCases(ctx context.Context, set AutopilotSettings) error
 	}
 	return dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		now := s.now()
-		// An autopilot rule's anomaly opens no case while one on the same rule
-		// and signal closed benign within max_ttl, one renewal of the sensor:
-		// the verdict stands until then.
-		rows, err := tx.Query(ctx, `SELECT id, signal, rule, summary FROM anomalies a WHERE state = 'firing'
-			AND (signal = ANY($1) OR (signal = ANY($2) AND rule LIKE 'ap-%'
-				AND NOT EXISTS (SELECT 1 FROM autopilot_cases c JOIN anomalies p ON p.id = c.anomaly_id
-					WHERE p.rule = a.rule AND p.signal = a.signal AND c.verdict = 'benign' AND c.closed_at > $3)))
-			AND NOT EXISTS (SELECT 1 FROM autopilot_cases c WHERE c.anomaly_id = a.id) ORDER BY id LIMIT 20`,
-			anomalySignals, overlaySignals, now.Add(-time.Duration(set.MaxTTL)))
-		if err != nil {
-			return err
-		}
-		type firing struct {
-			ID                    int64
-			Signal, Rule, Summary string
-		}
-		list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[firing])
-		if err != nil {
-			return err
+		var list []anomalyToOpen
+		if set.AnomalyInvestigationEnabled {
+			var err error
+			list, err = s.firingWithoutCase(ctx, tx, set, now)
+			if err != nil {
+				return err
+			}
 		}
 		for _, a := range list {
 			c := caseIn{Kind: "anomaly", DedupeKey: fmt.Sprintf("anomaly:%d", a.ID), AnomalyID: &a.ID,
@@ -220,6 +209,9 @@ func (s *Server) openAutoCases(ctx context.Context, set AutopilotSettings) error
 				"flag rules that keep renewing; and summarize the day. " +
 				"Re-check the notes with search_notes, and merge notes on the same topic into one with record_learning merges."},
 		} {
+			if due.kind == "sweep" && !set.SweepEnabled || due.kind == "review" && !set.ReviewEnabled {
+				continue
+			}
 			// A sweep only proposes sensors, so it waits while the sensor
 			// budget is full; the daily review retires sensors to make room.
 			if due.kind == "sweep" && u.Sensors >= set.MaxSensors {
@@ -241,6 +233,28 @@ func (s *Server) openAutoCases(ctx context.Context, set AutopilotSettings) error
 		}
 		return s.openAblations(ctx, tx)
 	}))
+}
+
+type anomalyToOpen struct {
+	ID                    int64
+	Signal, Rule, Summary string
+}
+
+// firingWithoutCase is the firing anomalies a case opens for. An autopilot
+// rule's anomaly opens no case while one on the same rule and signal closed
+// benign within max_ttl, one renewal of the sensor: the verdict stands until
+// then.
+func (s *Server) firingWithoutCase(ctx context.Context, tx pgx.Tx, set AutopilotSettings, now time.Time) ([]anomalyToOpen, error) {
+	rows, err := tx.Query(ctx, `SELECT id, signal, rule, summary FROM anomalies a WHERE state = 'firing'
+		AND (signal = ANY($1) OR (signal = ANY($2) AND rule LIKE 'ap-%'
+			AND NOT EXISTS (SELECT 1 FROM autopilot_cases c JOIN anomalies p ON p.id = c.anomaly_id
+				WHERE p.rule = a.rule AND p.signal = a.signal AND c.verdict = 'benign' AND c.closed_at > $3)))
+		AND NOT EXISTS (SELECT 1 FROM autopilot_cases c WHERE c.anomaly_id = a.id) ORDER BY id LIMIT 20`,
+		anomalySignals, overlaySignals, now.Add(-time.Duration(set.MaxTTL)))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[anomalyToOpen])
 }
 
 // tickRules moves every autopilot rule one step and publishes the overlay
