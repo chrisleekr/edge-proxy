@@ -620,3 +620,22 @@ func TestStatsBucketsByStep(t *testing.T) {
 		})
 	}
 }
+
+// The allowlist came with schema 6. A policy that sets it waits until every
+// live edge reads schema 6, even when the policy itself is an older schema;
+// the same policy without it publishes to those edges as before.
+func TestPublishWithClientAllowlistWaitsForEdgesThatReadIt(t *testing.T) {
+	h, pub := published(t)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "schema-5-edge", MaxSchema: 5, Deployment: h.s.cfg.Deployment.Fingerprint()}), 200)
+	c := testConfig()
+	c.Schema, c.Global.ClientAllowlist = 5, []string{"203.0.113.64/27"}
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	if p := decode[problem](t, pub.publishDraft("trust the office")); p.Status != 409 || !strings.Contains(p.Detail, "edge schema-5-edge reads config schema up to 5") {
+		t.Fatalf("publish: %+v", p)
+	}
+	c.Global.ClientAllowlist = nil
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("same policy without it"), 201)
+}

@@ -70,6 +70,8 @@ type settings struct {
 	// set it, the one whose outcome counts.
 	block     string
 	blockRule int
+	// allowlist is the client allowlist entry that matched, "" if none.
+	allowlist string
 }
 
 // defaults are the settings before any config rule matches. They depend
@@ -86,8 +88,11 @@ func defaults(c *snapshot.Compiled) settings {
 
 // resolve runs the config phase: s holds the defaults, then every matching
 // rule applies in order, a later rule overwriting what an earlier one set.
-// matched receives the indexes of matching rules.
-func resolve(c *snapshot.Compiled, s settings, req expr.Request, matched []int) (settings, []int) {
+// matched receives the indexes of matching rules. A client on the allowlist
+// ends up with no block and no required token (a token it sends is still
+// verified), and serve and Simulate both skip its rate limits, so one place
+// decides what trusted means.
+func resolve(c *snapshot.Compiled, s settings, req expr.Request, ip netip.Addr, matched []int) (settings, []int) {
 	cfg := c.Config
 	for i, m := range c.ConfigRules {
 		if !m(req) {
@@ -129,6 +134,13 @@ func resolve(c *snapshot.Compiled, s settings, req expr.Request, matched []int) 
 	// Availability first: the kill switch stops every block at once.
 	if cfg.KillSwitch.Block && s.block == "block" {
 		s.block = "log"
+	}
+	if s.allowlist = c.AllowedClient(ip); s.allowlist != "" {
+		// Step 8 is skipped, so no RateLimit headers are sent either.
+		s.block, s.rateLimitHeaders = "", false
+		if s.authMode == "required" {
+			s.authMode = "optional"
+		}
 	}
 	return s, matched
 }
@@ -268,8 +280,11 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	// Step 4: config phase.
 	st.fields = newFields(r, &st.client, p)
 	st.fields.bots = &ld.snap.Bots
-	st.set, st.matched = resolve(st.ver.c, st.ver.defaults, &st.fields, st.matchBuf[:0])
+	st.set, st.matched = resolve(st.ver.c, st.ver.defaults, &st.fields, cl.ip, st.matchBuf[:0])
 	st.resolved = true
+	if st.set.allowlist != "" {
+		e.m.allowlisted.Add(1)
+	}
 	st.cors = st.ver.cors[st.set.cors]
 	if st.set.locale {
 		st.fields.loc = st.ver.locale
@@ -299,8 +314,9 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 		return
 	}
 
-	// Step 8: shared rate limits, one Valkey round trip at most.
-	if !e.rateLimit(st) {
+	// Step 8: shared rate limits, one Valkey round trip at most. A trusted
+	// client uses no quota and no Valkey call.
+	if st.set.allowlist == "" && !e.rateLimit(st) {
 		return
 	}
 

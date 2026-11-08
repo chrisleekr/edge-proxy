@@ -533,6 +533,30 @@ func TestRouteFlowExplainsEveryRule(t *testing.T) {
 	status(t, pub.do("GET", "/api/observed-routes/999999/flow", nil), http.StatusNotFound)
 }
 
+// The route flow simulates the config-test default client, 192.0.2.1. When
+// the allowlist has it, the flow says so and shows no rate-limit rule, as
+// that client meets none.
+func TestRouteFlowShowsATrustedSampleClient(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/users/7")), http.StatusAccepted)
+	id := find(h.routes(pub), "GET", "api.example.com", "/users/{id}").ID
+	c := testConfig()
+	c.RateLimitRules = append(c.RateLimitRules, snapshot.RateLimitRule{ID: "users-burst", Expression: mustParse(`starts_with(http.request.uri.path, "/users/")`),
+		Algorithm: "sliding_window", Limit: 5, Period: snapshot.Duration(time.Second), Key: []string{"ip"}, OnMissingKey: "fallback_ip", Action: "block", FailMode: "open"})
+	flow := func() flowView {
+		return decode[flowView](t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=draft", id), nil))
+	}
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	if f := flow(); f.Result.Allowlist != "" || !slices.Equal(f.Result.RateLimitRules, []string{"users-burst"}) {
+		t.Fatalf("flow without the allowlist: %+v", f.Result)
+	}
+	c.Global.ClientAllowlist = []string{"192.0.2.1"}
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	if f := flow(); f.Result.Allowlist != "192.0.2.1" || len(f.Result.RateLimitRules) != 0 {
+		t.Fatalf("flow with the sample client on the allowlist: %+v", f.Result)
+	}
+}
+
 // A new rule can start from a condition that matches the route, and that
 // condition is valid and matches the route's sample.
 func TestRouteConditionStartsANewRule(t *testing.T) {

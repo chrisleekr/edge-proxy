@@ -222,6 +222,35 @@ func TestSchema4EncodingNeverChanges(t *testing.T) {
 	}
 }
 
+// The same holds for schema 5, the last schema before the client allowlist:
+// a schema 5 envelope with a rule that expires encodes byte for byte as it
+// did, so a schema 5 edge still decodes what an upgraded admin serves.
+// Never regenerate testdata/schema5-envelope.json to make this pass.
+func TestSchema5EncodingNeverChanges(t *testing.T) {
+	b, err := os.ReadFile("testdata/schema5-envelope.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, errs := CompileEnvelope(e, botDeployment); errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	got, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want bytes.Buffer
+	if err := json.Compact(&want, b); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("a schema 5 envelope encodes differently, so schema 5 edges would reject it:\n got %s\nwant %s", got, want.Bytes())
+	}
+}
+
 // expires_at came with schema 5. A rate-limit rule of any schema may set
 // it, and then needs edges that read schema 5, so admin holds the publish
 // until every live edge does. Without it a config needs only its own

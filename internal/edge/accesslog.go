@@ -23,19 +23,19 @@ import (
 // accessRecord is copied out of the request, so the writer goroutine never
 // touches request memory.
 type accessRecord struct {
-	method, host, path, query, requestID, cohort, decision, rateLimitRule, auth string
-	userAgent, country, ja4                                                     string
-	status                                                                      int
-	client                                                                      netip.Addr
-	version, asn                                                                int64
-	hasASN, upstream                                                            bool
-	signals                                                                     uint16
-	configRules                                                                 []string
-	duration                                                                    time.Duration
-	traceID                                                                     trace.TraceID
-	spanID                                                                      trace.SpanID
-	upErr                                                                       error
-	cause                                                                       upstreamCause
+	method, host, path, query, requestID, cohort, decision, rateLimitRule, auth, allowlist string
+	userAgent, country, ja4                                                                string
+	status                                                                                 int
+	client                                                                                 netip.Addr
+	version, asn                                                                           int64
+	hasASN, upstream                                                                       bool
+	signals                                                                                uint16
+	configRules                                                                            []string
+	duration                                                                               time.Duration
+	traceID                                                                                trace.TraceID
+	spanID                                                                                 trace.SpanID
+	upErr                                                                                  error
+	cause                                                                                  upstreamCause
 }
 
 // accessLog writes JSON access lines from one goroutine. When
@@ -75,7 +75,7 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 	rec := accessRecord{
 		method: r.Method, requestID: st.requestID, cohort: st.cohort, decision: decision,
 		status: st.sw.status, client: st.client.ip, duration: elapsed, rateLimitRule: st.rlRule, auth: authNames[st.auth],
-		path: st.fields.path, host: r.Host,
+		allowlist: st.set.allowlist, path: st.fields.path, host: r.Host,
 		// Parsed for key names by the writer, off the request path. Values
 		// can carry tokens and are never logged.
 		query:     r.URL.RawQuery,
@@ -209,6 +209,9 @@ func (a *accessLog) emit(rec accessRecord) {
 	}
 	if rec.auth != "" {
 		attrs = append(attrs, slog.String("edge.auth", rec.auth))
+	}
+	if rec.allowlist != "" {
+		attrs = append(attrs, slog.String("edge.allowlist", rec.allowlist))
 	}
 	if rec.rateLimitRule != "" {
 		attrs = append(attrs, slog.String("edge.rate_limit_rule", rec.rateLimitRule))

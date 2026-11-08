@@ -42,6 +42,34 @@ The default `forbidden` template is an HTML page, since a block usually refuses 
 { "settings": { "block": "block", "responses": { "forbidden": "forbidden-json" } } }
 ```
 
+### Trusted clients
+
+**Settings → Trusted client allowlist** (`global.client_allowlist`) lists client IPs and ranges that are exempt from enforcement, so you don't repeat an exception in every rule. The edge matches the client IP it already derived from your trusted proxies, so a header can't add a client to the list, and the list doesn't change which proxies are trusted. It is part of the policy: it takes effect when you save and publish, and a canary applies the list of the version each request is pinned to. An empty list changes nothing.
+
+A matched request skips:
+
+- every config rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block
+- every rate-limit rule, including [autopilot rules](publishing.md#autopilot-rules), count rules, penalties already running and `on_missing_key: reject`. No Valkey call is made and no counter or quota changes
+
+On a route that requires a JWT, a trusted client is treated as `optional`: it needs no token, but a token it sends is still verified. A bad one is refused with 401, and a valid one gives claims and `X-Edge-Auth-*` headers as usual. Claims and those headers come only from a verified token. The kill switch still turns JWT checks off entirely. `ratelimit_headers` is reported false for a trusted client, since no rate-limit rule runs.
+
+It still goes through the load shed, client IP and path checks, the local backstop, CORS, locale, header rules and the edge-managed headers, and the body limit and timeouts. A retained check can still refuse it, and the access log then shows both the match and the refusal.
+
+!!! warning "JWT consequence"
+    A route that requires a JWT lets trusted clients in without one. An upstream that needs to know the caller gets its identity only when the trusted client sends a valid token; without one the request is anonymous.
+
+The list holds up to 100 entries. Each is an IPv4 or IPv6 address or a CIDR range written from its first address, such as `198.51.100.0/24`; a range with host bits set, such as `198.51.100.7/24`, is refused, and the message names both readings: `198.51.100.0/24` for the whole range or `198.51.100.7` for the one address. A range can be no wider than `/24` for IPv4 or `/48` for IPv6, because one entry is meant to be one site. Entries must not overlap, and an address is a range of one, so `203.0.113.7` can't sit beside `203.0.113.0/24`. An IPv4-mapped IPv6 entry such as `::ffff:203.0.113.7` is read as the IPv4 address and matches the IPv4 client. Zones such as `fe80::1%eth0` are refused. It needs schema 6 edges: admin holds the publish while a live edge reads an older schema, naming it.
+
+To block Australia and Singapore but let two partner networks through, add a config rule with the expression below and the setting `"block": "block"`:
+
+```text
+ip.src.country in {"AU" "SG"}
+```
+
+with `198.51.100.0/24` and `2001:db8:f00::/48` on the allowlist. Clients in those networks reach the upstream even when the viewer country is `AU` or `SG`.
+
+To test it, set `ip` in a [config test](#config-tests) and assert `rejected` is `""` and, on a route that requires a JWT, `settings.auth_mode` is `optional`: a trusted client's simulated request skips the block and needs no token. The [Tests page](dashboard.md#tests) shows a **Trusted client** row with the entry it matched.
+
 ## Expressions
 
 Expressions are built in the UI with a rule builder, or typed as text:
@@ -60,7 +88,7 @@ http.request.jwt.claims["tenant"] eq "acme" and http.request.method in {"POST" "
 | Templates | Response bodies for each kind of edge response: `bad_request`, `unauthorized`, `forbidden`, `payload_too_large`, `rate_limited`, `bad_gateway`, `unavailable`, `overloaded`, `gateway_timeout`. JSON, problem+json, HTML or text, with `{{retry_after}}`, `{{request_id}}` and `{{status}}` placeholders |
 | CORS | Named policies: origins, methods, headers, credentials, max age |
 | Issuers | JWT issuers: ID, issuer (the token's `iss`), audiences, JWKS URL (https), algorithm (RS, PS, ES or EdDSA; never HMAC). Config rules say which are accepted |
-| Settings | Kill switch (rate limiting, JWT checks, blocking), local backstop, defaults (body limit and timeouts), locale (supported languages and output header), header forwarding, and the rollback guard |
+| Settings | Kill switch (rate limiting, JWT checks, blocking), trusted client allowlist, local backstop, defaults (body limit and timeouts), locale (supported languages and output header), header forwarding, and the rollback guard |
 
 ## Headers your upstream can trust
 

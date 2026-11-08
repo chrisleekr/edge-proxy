@@ -48,6 +48,9 @@ type SimResult struct {
 	// preflight (step 6), so no later step runs.
 	Preflight bool
 	Settings  SimSettings
+	// Allowlist is the client allowlist entry the IP matched, or "". The
+	// block, token check and rate-limit rules are then skipped.
+	Allowlist string
 	// UpstreamHeaders are the request's headers after the header phase
 	// (step 9): forward filter, header rules and the locale header. The
 	// forwarding headers the edge always sets (X-Forwarded-*,
@@ -115,7 +118,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 		bots := expr.NewIPSet([]netip.Prefix{netip.PrefixFrom(cl.ip, cl.ip.BitLen())})
 		f.bots = &bots
 	}
-	set, matched := resolve(c, defaults(c), f, nil)
+	set, matched := resolve(c, defaults(c), f, cl.ip, nil)
 	if set.locale {
 		f.loc = newLocaleResolver(c)
 	}
@@ -123,6 +126,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	for _, i := range matched {
 		res.ConfigRules = append(res.ConfigRules, c.Config.ConfigRules[i].ID)
 	}
+	res.Allowlist = set.allowlist
 	res.Settings = SimSettings{
 		AuthMode: set.authMode, Accepted: set.accepted, CORSPolicy: set.cors, Locale: set.locale,
 		Responses: map[string]string{}, BodyLimit: set.bodyLimit,
@@ -149,14 +153,17 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 		}
 		f.claims = req.JWTClaims
 	}
-	checks, capped, reject := st.planChecks(&version{c: c, rules: ratelimit.Compile(c.Config.RateLimitRules)}, nil)
-	for _, ch := range checks {
-		res.RateLimitRules = append(res.RateLimitRules, ch.rule.ID)
-	}
-	res.RateLimitCapped = capped
-	if reject {
-		res.Rejected = reasonNames[reasonRateLimitKey]
-		return res, nil
+	// A trusted client skips step 8 but still gets the header phase.
+	if set.allowlist == "" {
+		checks, capped, reject := st.planChecks(&version{c: c, rules: ratelimit.Compile(c.Config.RateLimitRules)}, nil)
+		for _, ch := range checks {
+			res.RateLimitRules = append(res.RateLimitRules, ch.rule.ID)
+		}
+		res.RateLimitCapped = capped
+		if reject {
+			res.Rejected = reasonNames[reasonRateLimitKey]
+			return res, nil
+		}
 	}
 	plan := compileHeaders(c)
 	res.UpstreamHeaders = r.Header.Clone()

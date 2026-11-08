@@ -216,3 +216,29 @@ func TestCanaryPercentNull(t *testing.T) {
 		t.Fatalf("audit %v", got[len(before):])
 	}
 }
+
+// During a canary each version carries its own allowlist in the snapshot
+// edges fetch, so a request pinned to either meets the right one.
+func TestCanarySnapshotCarriesEachVersionsAllowlist(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	active, candidate := []string{"203.0.113.64/27"}, []string{"198.51.100.0/24", "2001:db8:f00::/48"}
+	c := testConfig()
+	c.Global.ClientAllowlist = active
+	status(t, pub.save(`"0"`, c, adminTest), 200)
+	status(t, pub.publishDraft("v1"), 201)
+	c.Global.ClientAllowlist = candidate
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.do("POST", "/api/publish", map[string]any{"message": "new list on 5%", "canary_percent": 5}, "If-Match", pub.revision()), 201)
+
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	env := decode[snapshot.Envelope](t, e.do("GET", "/v1/snapshot", nil))
+	if env.Candidate == nil || !slices.Equal(env.Active.Global.ClientAllowlist, active) || !slices.Equal(env.Candidate.Global.ClientAllowlist, candidate) {
+		t.Fatalf("active %v, candidate %+v", env.Active.Global.ClientAllowlist, env.Candidate)
+	}
+	if _, errs := snapshot.CompileEnvelope(&env, h.s.cfg.Deployment); errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+}

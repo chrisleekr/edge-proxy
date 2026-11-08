@@ -23,7 +23,7 @@ type rejectCase struct {
 func TestCompileRejects(t *testing.T) {
 	cases := []rejectCase{
 		// Top level.
-		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 6 is not supported"},
+		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 7 is not supported"},
 		{"version zero", func(c *Config) { c.Version = 0 }, nil, "version", "at least 1"},
 		{"config over 8 MB", addHugeHeaderRules, nil, "", "bytes as JSON"},
 
@@ -318,6 +318,29 @@ func TestCompileRejects(t *testing.T) {
 		{"distinct path with a name", func(c *Config) {
 			c.RateLimitRules[1].Algorithm, c.RateLimitRules[1].DistinctOf = "distinct", "path:x"
 		}, nil, "rate_limit_rules[1].distinct_of", "path takes no name"},
+
+		// Trusted client allowlist.
+		{"allowlist entry that is not an address", func(c *Config) { c.Global.ClientAllowlist = []string{"office"} }, nil, "global.client_allowlist[0]", "is not an IP address or CIDR range"},
+		{"allowlist range with a prefix length too long", func(c *Config) { c.Global.ClientAllowlist = []string{"203.0.113.0/33"} }, nil, "global.client_allowlist[0]", "is not an IP address or CIDR range"},
+		{"allowlist address with a zone", func(c *Config) { c.Global.ClientAllowlist = []string{"fe80::1%eth0"} }, nil, "global.client_allowlist[0]", "zone"},
+		{"allowlist range with host bits set", func(c *Config) { c.Global.ClientAllowlist = []string{"203.0.113.7/24"} }, nil, "global.client_allowlist[0]", "has host bits set; write 203.0.113.0/24 for the whole range or 203.0.113.7 for the one address"},
+		{"allowlist mapped range with host bits set", func(c *Config) { c.Global.ClientAllowlist = []string{"::ffff:203.0.113.7/120"} }, nil, "global.client_allowlist[0]", "write 203.0.113.0/24 for the whole range or 203.0.113.7 for the one address"},
+		{"allowlist wide range with host bits set is reported as too wide", func(c *Config) { c.Global.ClientAllowlist = []string{"10.1.2.3/8"} }, nil, "global.client_allowlist[0]", "is wider than /24 for IPv4 or /48 for IPv6"},
+		{"allowlist mapped range shorter than /96", func(c *Config) { c.Global.ClientAllowlist = []string{"::ffff:203.0.113.0/80"} }, nil, "global.client_allowlist[0]", "is IPv4-mapped but shorter than /96, so it never matches an IPv4 client; write the IPv4 range"},
+		{"allowlist IPv4 range wider than /24", func(c *Config) { c.Global.ClientAllowlist = []string{"203.0.0.0/16"} }, nil, "global.client_allowlist[0]", "is wider than /24 for IPv4 or /48 for IPv6"},
+		{"allowlist IPv6 range wider than /48", func(c *Config) { c.Global.ClientAllowlist = []string{"2001:db8::/32"} }, nil, "global.client_allowlist[0]", "is wider than /24 for IPv4 or /48 for IPv6"},
+		{"allowlist mapped range wider than /24", func(c *Config) { c.Global.ClientAllowlist = []string{"::ffff:203.0.0.0/112"} }, nil, "global.client_allowlist[0]", "is wider than /24 for IPv4 or /48 for IPv6"},
+		{"allowlist address written twice", func(c *Config) { c.Global.ClientAllowlist = []string{"203.0.113.7", "203.0.113.7"} }, nil, "global.client_allowlist[1]", "duplicate"},
+		{"allowlist address also written as mapped IPv6", func(c *Config) {
+			c.Global.ClientAllowlist = []string{"203.0.113.7", "::ffff:203.0.113.7"}
+		}, nil, "global.client_allowlist[1]", `overlaps "203.0.113.7", entry 0`},
+		{"allowlist address inside another range", func(c *Config) {
+			c.Global.ClientAllowlist = []string{"198.51.100.0/24", "2001:db8::/48", "198.51.100.9"}
+		}, nil, "global.client_allowlist[2]", `overlaps "198.51.100.0/24", entry 0`},
+		{"allowlist range inside another range", func(c *Config) {
+			c.Global.ClientAllowlist = []string{"198.51.100.0/25", "198.51.100.0/24"}
+		}, nil, "global.client_allowlist[1]", `overlaps "198.51.100.0/25", entry 0`},
+		{"more than 100 allowlist entries", func(c *Config) { c.Global.ClientAllowlist = allowlistOf(MaxListLen + 1) }, nil, "global.client_allowlist", "at most 100"},
 	}
 	runRejects(t, cases)
 }

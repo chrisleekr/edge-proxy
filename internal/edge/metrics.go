@@ -63,6 +63,9 @@ type metrics struct {
 	snapshotLoads, snapshotRejected, pollErr atomic.Uint64
 	backgroundPanics                         atomic.Uint64
 
+	// allowlisted counts requests from clients on the allowlist.
+	allowlisted atomic.Uint64
+
 	// Rate limiting.
 	rulesCapped, backstopUntracked, localUntracked atomic.Uint64
 	penaltyHits, penaltyDropped                    atomic.Uint64
@@ -126,6 +129,7 @@ func (m *metrics) writeTo(w io.Writer) {
 	p("# TYPE edge_snapshot_rejected_total counter\nedge_snapshot_rejected_total %d\n", m.snapshotRejected.Load())
 	p("# TYPE edge_snapshot_poll_errors_total counter\nedge_snapshot_poll_errors_total %d\n", m.pollErr.Load())
 	p("# TYPE edge_background_panics_total counter\nedge_background_panics_total %d\n", m.backgroundPanics.Load())
+	p("# TYPE edge_allowlisted_total counter\nedge_allowlisted_total %d\n", m.allowlisted.Load())
 	p("# TYPE edge_ratelimit_rules_capped_total counter\nedge_ratelimit_rules_capped_total %d\n", m.rulesCapped.Load())
 	p("# TYPE edge_backstop_untracked_total counter\nedge_backstop_untracked_total %d\n", m.backstopUntracked.Load())
 	p("# TYPE edge_ratelimit_local_untracked_total counter\nedge_ratelimit_local_untracked_total %d\n", m.localUntracked.Load())

@@ -866,3 +866,160 @@ func TestPublishesAreCounted(t *testing.T) {
 	status(t, pub.do("POST", "/api/import", map[string]any{"config": imported, "tests": []ConfigTest{adminTest}, "message": "Promote from staging"}), 201)
 	want("after an import", counts(2, 1, 1))
 }
+
+// A trusted client allowlist is an ordinary part of the policy: it is saved
+// only when valid, changes nothing live until published, and survives
+// publish, revert, export and import. A policy without one carries no
+// client_allowlist key, which older edges would refuse.
+func TestClientAllowlistLifecycle(t *testing.T) {
+	h, pub := published(t)
+	list := []string{"203.0.113.64/27", "2001:db8:f00::/48"}
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	snapshotOf := func() (snapshot.Envelope, string) {
+		raw := body(e.do("GET", "/v1/snapshot", nil))
+		var env snapshot.Envelope
+		if err := json.Unmarshal([]byte(raw), &env); err != nil {
+			t.Fatal(err)
+		}
+		return env, raw
+	}
+
+	t.Run("each invalid entry is refused at its own path", func(t *testing.T) {
+		bad := testConfig()
+		bad.Global.ClientAllowlist = []string{"203.0.113.7", "not-an-ip", "10.0.0.0/8", "198.51.100.7/24"}
+		before := pub.revision()
+		resp := pub.save(before, bad)
+		p := decode[problem](t, resp)
+		paths := []string{}
+		for _, issue := range p.Errors {
+			paths = append(paths, issue.Path)
+		}
+		slices.Sort(paths)
+		want := []string{"config.global.client_allowlist[1]", "config.global.client_allowlist[2]", "config.global.client_allowlist[3]"}
+		if resp.StatusCode != 422 || !slices.Equal(paths, want) {
+			t.Fatalf("%d, error paths %v", resp.StatusCode, paths)
+		}
+		if pub.revision() != before {
+			t.Fatal("an invalid allowlist changed the draft")
+		}
+	})
+	t.Run("saving does not change what edges are served", func(t *testing.T) {
+		c := testConfig()
+		c.Global.ClientAllowlist = list
+		status(t, pub.save(pub.revision(), c, adminTest), 200)
+		if got := pub.draft().Config.Global.ClientAllowlist; !slices.Equal(got, list) {
+			t.Fatalf("draft allowlist %v", got)
+		}
+		if env, raw := snapshotOf(); env.Active.Version != 1 || strings.Contains(raw, "client_allowlist") {
+			t.Fatalf("a draft reached edges: version %d", env.Active.Version)
+		}
+	})
+	t.Run("publishing serves the list and edges accept it", func(t *testing.T) {
+		status(t, pub.publishDraft("trust the office"), 201)
+		env, _ := snapshotOf()
+		if !slices.Equal(env.Active.Global.ClientAllowlist, list) {
+			t.Fatalf("served allowlist %v", env.Active.Global.ClientAllowlist)
+		}
+		if _, errs := snapshot.CompileEnvelope(&env, h.s.cfg.Deployment); errs != nil {
+			t.Fatal(expr.Issues(errs))
+		}
+	})
+	t.Run("a policy without the list carries no key", func(t *testing.T) {
+		status(t, pub.save(pub.revision(), testConfig(), adminTest), 200)
+		status(t, pub.publishDraft("stop trusting the office"), 201)
+		if env, raw := snapshotOf(); env.Active.Version != 3 || strings.Contains(raw, "client_allowlist") {
+			t.Fatalf("version %d, key in the snapshot: %v", env.Active.Version, strings.Contains(raw, "client_allowlist"))
+		}
+	})
+	t.Run("reverting brings the list back", func(t *testing.T) {
+		status(t, pub.do("POST", "/api/versions/2/revert", map[string]string{"reason": "the office is trusted again"}), 201)
+		if got := pub.version(4).Config.Global.ClientAllowlist; !slices.Equal(got, list) {
+			t.Fatalf("version 4 allowlist %v", got)
+		}
+	})
+	t.Run("export and import keep the list", func(t *testing.T) {
+		out := decode[struct {
+			Envelope json.RawMessage
+			Tests    []ConfigTest
+		}](t, pub.do("GET", "/api/export", nil))
+		exported, err := snapshot.Decode(bytes.NewReader(out.Envelope))
+		if err != nil {
+			t.Fatal(err)
+		}
+		prod := newHarness(t)
+		prod.user("pub", "publisher")
+		p := prod.signedIn("pub")
+		status(t, p.do("POST", "/api/import", map[string]any{"config": exported.Active, "tests": out.Tests, "message": "Promote from staging"}), 201)
+		if got := p.version(1).Config.Global.ClientAllowlist; !slices.Equal(got, list) {
+			t.Fatalf("imported allowlist %v", got)
+		}
+		if got := p.draft().Config.Global.ClientAllowlist; !slices.Equal(got, list) {
+			t.Fatalf("draft after import %v", got)
+		}
+	})
+}
+
+// A simulation of a request from a trusted client names the matched entry
+// and skips blocking, as the edge does; anyone else is judged as before.
+func TestSimulateShowsATrustedClient(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	c := testConfig()
+	c.Global.ClientAllowlist = []string{"203.0.113.64/27"}
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent contains "curl"`), Settings: snapshot.Settings{Block: new("block")}})
+	status(t, ed.save(`"0"`, c, adminTest), 200)
+
+	for _, tc := range []struct {
+		name, ip, rejected, allowlist string
+	}{
+		{"trusted client", "203.0.113.70", "", "203.0.113.64/27"},
+		{"client next to the range", "203.0.113.96", "blocked", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := body(ed.do("POST", "/api/simulate", map[string]any{"request": TestRequest{Host: "api.example.com", Path: "/", IP: tc.ip, Headers: map[string]string{"User-Agent": "curl/8.5.0"}}}))
+			var sim SimView
+			if err := json.Unmarshal([]byte(raw), &sim); err != nil {
+				t.Fatal(err)
+			}
+			if sim.Allowlist != tc.allowlist || sim.Rejected != tc.rejected {
+				t.Fatalf("allowlist %q rejected %q", sim.Allowlist, sim.Rejected)
+			}
+			if has := strings.Contains(raw, `"allowlist"`); has != (tc.allowlist != "") {
+				t.Fatalf("allowlist key present %v in %s", has, raw)
+			}
+		})
+	}
+}
+
+// Config tests state what a trusted client meets: no block, and no token
+// needed on a route that requires one. Another client meets both.
+func TestConfigTestsRunForATrustedClient(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	c := authConfig("https://idp.example.com/jwks")
+	c.Global.ClientAllowlist = []string{"203.0.113.64/27"}
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent contains "curl"`), Settings: snapshot.Settings{Block: new("block")}})
+	test := func(name, ip, path, ua string, rejected string, settings map[string]any) ConfigTest {
+		return ConfigTest{Name: name, Request: TestRequest{Host: "api.example.com", Path: path, IP: ip, Headers: map[string]string{"User-Agent": ua}},
+			Expect: TestExpect{Rejected: &rejected, Settings: settings}}
+	}
+	res := decode[struct {
+		TestResults []TestResult `json:"test_results"`
+	}](t, ed.save(`"0"`, c,
+		test("trusted client needs no token", "203.0.113.70", "/orders/1", "firefox", "", map[string]any{"auth_mode": "optional"}),
+		test("trusted client is not blocked", "203.0.113.70", "/", "curl/8.5.0", "", map[string]any{"block": ""}),
+		test("other client needs a token", "203.0.113.96", "/orders/1", "firefox", "auth", map[string]any{"auth_mode": "required"}),
+		test("other client is blocked", "203.0.113.96", "/", "curl/8.5.0", "blocked", map[string]any{"block": "block"}),
+	))
+	if len(res.TestResults) != 4 {
+		t.Fatalf("results %+v", res.TestResults)
+	}
+	for _, r := range res.TestResults {
+		if !r.Pass {
+			t.Errorf("%s failed: %v", r.Name, r.Failures)
+		}
+	}
+}
