@@ -78,8 +78,8 @@ type Global struct {
 	// edge's memory. Added in schema 3, omitted when unset.
 	MaxInflight int `json:"max_inflight,omitempty"`
 	// ClientAllowlist holds IPs and CIDR ranges whose requests skip config
-	// blocks, edge JWT checks and rate limits. Added in schema 6, omitted
-	// when empty.
+	// blocks and rate limits, and need no token where one is required (a
+	// token sent is still verified). Added in schema 6, omitted when empty.
 	ClientAllowlist []string `json:"client_allowlist,omitempty"`
 }
 
