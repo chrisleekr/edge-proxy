@@ -1,14 +1,27 @@
 import type { Diff, FieldChange, Json } from '../api';
-import { Badge } from '../ui';
+import { phases as phaseList } from '../phases';
+import { Badge, words } from '../ui';
 
 const show = (v: Json) => (v === undefined || v === null ? '—' : typeof v === 'string' ? v : JSON.stringify(v));
+
+// The kill switch as the Settings page names it, since a publish that
+// changes it must read plainly. Other paths are shown as words.
+const switches: Record<string, string> = {
+  'kill_switch.rate_limit': 'Kill switch: disable rate limiting',
+  'kill_switch.auth': 'Kill switch: disable JWT checks',
+  'kill_switch.block': 'Kill switch: disable blocking by access rules',
+};
+const onOff = (v: Json) => (v ? 'on' : 'off');
 
 function Changes({ list }: { list: FieldChange[] }) {
   return (
     <ul className="flex flex-col gap-1">
       {list.map((f) => (
         <li key={f.path} className="text-sm">
-          <code className="font-medium">{f.path}</code>: <del className="text-danger">{show(f.before)}</del> → <ins className="text-success no-underline">{show(f.after)}</ins>
+          <span className="font-medium text-heading" title={f.path}>
+            {switches[f.path] ?? words(f.path)}
+          </span>
+          : <del className="text-danger">{switches[f.path] ? onOff(f.before) : show(f.before)}</del> → <ins className="text-success no-underline">{switches[f.path] ? onOff(f.after) : show(f.after)}</ins>
         </li>
       ))}
     </ul>
@@ -47,7 +60,7 @@ export function DiffView({ diff }: { diff: Diff }) {
       {diff.sections && diff.sections.length > 0 && <Changes list={diff.sections} />}
       {phases.map(([name, p]) => (
         <div key={name}>
-          <h3 className="mb-1 text-sm font-semibold">{(name.charAt(0).toUpperCase() + name.slice(1)).replaceAll('_', ' ')}</h3>
+          <h3 className="mb-1 text-sm font-semibold">{phaseList.find((x) => x.key === name || x.phase === name)?.title ?? name.replaceAll('_', ' ')}</h3>
           <ul className="flex flex-col gap-1 text-sm">
             {p.added?.map((id) => (
               <li key={`+${id}`}>

@@ -61,7 +61,7 @@ Vendor marks link to the vendor's documentation. **AFD** is Azure Front Door Sta
 |---|---|---|---|---|---|---|---|
 | Rule language | ✓ | [✓][cf-lang-ref] | [✓ JSON][aw-rate] | [✓ JSON][az-rules] | [✓ CEL][gc-cel] | [✓ VCL][fa-conditions] | [✓ JSON][ak-behaviors] |
 | Validated before activation | ✓ | ? | ? | ? | ? | [◐ VCL][fa-services] | ? |
-| Config tests block a bad publish | ✓ | [◐ Trace][cf-trace] | ✗ | ✗ | ✗ | [◐ simulator][fa-simulator] | ? |
+| Policy tests block a bad publish | ✓ | [◐ Trace][cf-trace] | ✗ | ✗ | ✗ | [◐ simulator][fa-simulator] | ? |
 | Versions and revert | ✓ | [◐ Enterprise][cf-versions] | ✗ | ✗ | ✗ | [✓][fa-services] | [✓][ak-activation] |
 | Canary of rule changes | ✓ | [◐ Enterprise][cf-versions] | [◐ up to 15%][aw-staging] | ✗ | ✗ | [◐ not NGWAF][fa-staging] | [✓][ak-activation] |
 | Automatic rollback on errors | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | [◐ during rollout][ak-activation] |
@@ -96,7 +96,7 @@ The proxy does none of this by design. Keep a vendor in front.
 - **Explicit failure behaviour:** open, closed or local, chosen per rule.
 - **An upstream header contract** that clients can't spoof, without edge code.
 - **One policy model across clouds.** Moving CDN means changing the trust preset, not rewriting rules.
-- **Tested changes:** a failing config test blocks publish, and the canary and guard roll back degraded policy.
+- **Tested changes:** a failing policy test blocks publish, and the canary and guard roll back degraded policy.
 
 **Both:** basic IP rate limits with penalties and log-only mode, custom error bodies, static CORS headers, simple header edits and path normalization. If your needs stop there, a vendor alone is simpler and cheaper.
 

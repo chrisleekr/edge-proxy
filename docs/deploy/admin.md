@@ -76,4 +76,4 @@ These are not configurable:
 | Anomaly checks | Every minute |
 | Retention | 30 days of per-minute stats, **Routes** hours and resolved anomalies. Edges in **Fleet** and routes not seen for 30 days are removed |
 
-Guard settings are changed in the UI (**Settings → Rollback guard**), notification settings on **Notifications**. A change to `evaluate_every` takes effect when leadership next changes, for example on the next admin restart.
+Guard settings are changed in the UI (**Settings → Rollback guard**), notification settings on **Notifications → Settings**. A change to `evaluate_every` takes effect when leadership next changes, for example on the next admin restart.

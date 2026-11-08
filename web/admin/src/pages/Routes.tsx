@@ -77,6 +77,7 @@ interface Flow {
   sample: { method?: string; host: string; path: string };
   result: {
     rejected?: string;
+    allowlist?: string;
     config_rules: string[];
     rate_limit_rules: string[];
     rate_limit_capped: boolean;
@@ -107,8 +108,8 @@ const OTHER = '*';
 const decisionWords: Record<string, string> = {
   allow: 'Forwarded to the upstream',
   rate_limited: 'Blocked by a rate limit rule',
-  blocked: 'Blocked by a config rule',
-  would_block: 'Forwarded; a log only config rule would block it',
+  blocked: 'Blocked by an access rule',
+  would_block: 'Forwarded; a log only access rule would block it',
   backstop: 'Blocked by the per-edge backstop',
   auth: 'Refused: missing or invalid token',
   rate_limit_key: 'Refused: a rate limit key was missing',
@@ -204,7 +205,7 @@ const flags = [
   ['errors', 'Has 5xx'],
   ['limited', 'Rate limited'],
   ['rejected', 'Refused or shed'],
-  ['norule', 'No config rule matched'],
+  ['norule', 'No access rule matched'],
   ['recent', 'Seen in the last hour'],
 ] as const;
 
@@ -331,52 +332,10 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
     <Page
       title="Routes"
       info="Built from the edges' access logs, which the log shipper posts to admin, so the edge does no extra work for this page. A route is a host, a method and a path where IDs, UUIDs and tokens are replaced by placeholders such as {id}."
-      actions={
-        <>
-          <RangeSelect value={range.key} onChange={range.pick} />
-          {can('routes.manage') && routes && routes.length > 0 && (
-            <ConfirmButton
-              variant="danger"
-              title="Delete every route?"
-              action="Delete all routes"
-              disabled={deleteAll.isPending}
-              onConfirm={() => deleteAll.mutate()}
-              confirm="Their counts and history are deleted. Routes are collected again from new traffic, so live routes reappear within a minute."
-            >
-              Delete all
-            </ConfirmButton>
-          )}
-        </>
-      }
+      actions={<RangeSelect value={range.key} onChange={range.pick} />}
     >
       <ErrorBox error={q.error ?? deleteAll.error ?? group.error} />
       {q.data && <Coverage d={q.data} phrase={phrase} />}
-      {q.data && q.data.suggestions.length > 0 && (
-        <Card
-          title="Similar routes"
-          info="These paths differ only in their last segment, such as article names. Grouping them makes one route whose counts are their sum, and new paths like them join it. Existing history moves with them."
-        >
-          <ul className="flex flex-col gap-2">
-            {q.data.suggestions.map((s) => (
-              <li key={s.host + s.pattern} className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-body">
-                  <span className="font-mono text-heading">
-                    {s.host}
-                    {s.pattern.replace(/\*$/, '')}
-                    <span className="rounded-xs bg-soft px-0.5 text-muted">{'{*}'}</span>
-                  </span>
-                  : {s.routes} routes
-                </span>
-                {can('routes.manage') && (
-                  <Button disabled={group.isPending} onClick={() => group.mutate({ host: s.host, pattern: s.pattern })}>
-                    Group as one route
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-end gap-3">
           <Input label="Search" type="search" className="min-w-56 flex-1" placeholder="Path, host, query key or rule" value={search} onChange={(e) => set({ q: e.target.value })} />
@@ -473,7 +432,51 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
           Show {count(Math.min(page, rows.length - shown))} more of {count(rows.length - shown)}
         </Button>
       )}
+      {q.data && q.data.suggestions.length > 0 && (
+        <Card
+          title="Similar routes"
+          info="These paths differ only in their last segment, such as article names. Grouping them makes one route whose counts are their sum, and new paths like them join it. Existing history moves with them."
+        >
+          <ul className="flex flex-col gap-2">
+            {q.data.suggestions.map((s) => (
+              <li key={s.host + s.pattern} className="flex flex-wrap items-center justify-between gap-2">
+                <span className="min-w-0 text-body">
+                  <span className="font-mono break-all text-heading">
+                    {s.host}
+                    {s.pattern.replace(/\*$/, '')}
+                    <span className="rounded-xs bg-soft px-0.5 text-muted">{'{*}'}</span>
+                  </span>
+                  : {s.routes} routes
+                </span>
+                {can('routes.manage') && (
+                  <Button disabled={group.isPending} onClick={() => group.mutate({ host: s.host, pattern: s.pattern })}>
+                    Group as one route
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+      {q.data && <CoverageNote d={q.data} phrase={phrase} />}
       <Groupings can={can} />
+      {can('routes.manage') && routes && routes.length > 0 && (
+        <Card title="Delete routes">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-body">Deletes every route's counts and history. Routes are collected again from new traffic.</p>
+            <ConfirmButton
+              variant="danger"
+              title="Delete every route?"
+              action="Delete all routes"
+              disabled={deleteAll.isPending}
+              onConfirm={() => deleteAll.mutate()}
+              confirm="Their counts and history are deleted. Routes are collected again from new traffic, so live routes reappear within a minute."
+            >
+              Delete all
+            </ConfirmButton>
+          </div>
+        </Card>
+      )}
     </Page>
   );
 }
@@ -496,14 +499,7 @@ function Coverage({ d, phrase }: { d: RouteList; phrase: string }) {
     );
   const share = d.reported_requests ? Math.min(1, d.logged_requests / d.reported_requests) : 1;
   return (
-    <div className="flex flex-col gap-2">
-      <p className="text-sm text-body">
-        Counted from the access logs: {count(d.logged_requests)} requests
-        {d.reported_requests > 0 && `, ${rate(Math.min(d.logged_requests, d.reported_requests), d.reported_requests)} of the ${count(d.reported_requests)} the edges served ${phrase}`}.{' '}
-        {d.estimated_requests > 0
-          ? `${count(d.estimated_requests)} of them are estimated, marked ≈: the edges log only a share of allowed requests (LOG_SAMPLE_RATE), and each logged one counts for the requests it stands for. Refused requests and 5xx are logged every time, so they are exact.`
-          : 'Counts are exact for what was logged.'}
-      </p>
+    <>
       {share < 0.9 && (
         <Notice tone="amber">
           Fewer requests were logged than the edges served, so the counts here are low. Lines are dropped when an edge's log buffer or the shipper falls behind, and an edge that does not say its
@@ -516,7 +512,21 @@ function Coverage({ d, phrase }: { d: RouteList; phrase: string }) {
           {count(d.max_error_routes)} routes answered only with errors. Delete routes you no longer need, or group similar ones.
         </Notice>
       )}
-    </div>
+    </>
+  );
+}
+
+// CoverageNote says how the counts were made, below the table they fill.
+function CoverageNote({ d, phrase }: { d: RouteList; phrase: string }) {
+  if (d.logged_requests === 0 && d.routes.length === 0) return null;
+  return (
+    <p className="text-sm text-body">
+      Counted from the access logs: {count(d.logged_requests)} requests
+      {d.reported_requests > 0 && `, ${rate(Math.min(d.logged_requests, d.reported_requests), d.reported_requests)} of the ${count(d.reported_requests)} the edges served ${phrase}`}.{' '}
+      {d.estimated_requests > 0
+        ? `${count(d.estimated_requests)} of them are estimated, marked ≈: the edges log only a share of allowed requests (LOG_SAMPLE_RATE), and each logged one counts for the requests it stands for. Refused requests and 5xx are logged every time, so they are exact.`
+        : 'Counts are exact for what was logged.'}
+    </p>
   );
 }
 
@@ -788,7 +798,7 @@ function Figure({ label, value, note, tone }: { label: string; value: string; no
 // starts it with a condition that matches the route.
 function AddRule({ id, onClose }: { id: number; onClose: () => void }) {
   const kinds = [
-    ['config', 'Config rule', 'Set auth, CORS, upstream timeout or body limit for this route.'],
+    ['config', 'Access rule', 'Set auth, CORS, upstream timeout or body limit for this route.'],
     ['rate_limit', 'Rate limit rule', 'Limit how often clients can call this route.'],
     ['request_headers', 'Header rule', 'Change the headers this route’s upstream receives.'],
   ] as const;
@@ -954,7 +964,7 @@ function Matches({
             <Badge tone={m.match === 'always' ? 'green' : m.match === 'depends' ? 'amber' : 'slate'}>
               {m.match === 'always' ? 'Always' : m.match === 'never' ? 'Never' : `Depends on ${m.depends_on?.join(', ')}`}
             </Badge>
-            <Link to={ruleLink(phase, m.id)} className="font-mono text-heading underline">
+            <Link to={ruleLink(phase, m.id)} className="font-mono break-all text-heading underline">
               {m.id}
             </Link>
             <span className="text-body">{describe(m.id)}</span>
@@ -985,6 +995,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
     return x ? summary(x) : '';
   };
   const rejected = flow.result.rejected;
+  const listed = Array.isArray(config.global.client_allowlist) && config.global.client_allowlist.length > 0;
   const d = r.decisions;
   const share = (n: number | undefined) => (n ? `${count(n)} requests (${rate(n, r.requests)})` : undefined);
   const sample = `${flow.sample.method ?? 'GET'} ${flow.sample.host}${flow.sample.path}`;
@@ -1005,10 +1016,20 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
       ),
     },
     {
-      title: 'Config rules choose the settings',
+      title: 'Access rules choose the settings',
       body: (
         <div className="flex flex-col gap-2">
           <Matches phase="config" matches={flow.rules.config} describe={describe(config.config_rules)} observed={r.config_rules} approx={r.estimated > 0} />
+          {listed &&
+            (flow.result.allowlist ? (
+              <Notice tone="amber">
+                The sample client IP is on the trusted client allowlist ({flow.result.allowlist}), so this sample skips blocking by access rules and rate limits and needs no JWT. Header rules, CORS and the backstop still apply.
+              </Notice>
+            ) : (
+              <p className="text-sm text-body">
+                The policy has a trusted client allowlist. Clients on it skip blocking by access rules and rate limits and need no JWT. The sample client IP is not on it, so this shows ordinary traffic.
+              </p>
+            ))}
           <p className="text-sm text-body">
             Result: waiting up to {s.upstream_timeout || 'the default'} for the upstream, body limit{' '}
             {bytes(s.body_limit)}

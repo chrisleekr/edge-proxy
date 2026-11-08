@@ -95,16 +95,21 @@ The same rule with `and ip.src in {"203.0.113.0/24"}` added is refused. Autopilo
 
 ## The Autopilot page
 
-**Autopilot**, under **Operate**, needs `autopilot.read`. It refreshes every 30 seconds. **Memory** opens the autopilot's [notes](#the-memory-pages), and, with `stats.read`, the range picker sets the range of the live rules' counts.
+**Autopilot**, under **Monitor**, needs `autopilot.read`. It refreshes every 30 seconds. Its tabs are **Overview** (the default), **Spend** (`?tab=spend`), **Settings** (`?tab=settings`) and **Memory**, which opens the autopilot's [notes](#the-memory-pages). With `stats.read`, the range picker sets the range of the live rules' counts.
 
 ![Autopilot](../assets/screenshots/autopilot.png)
 
-- **Status:** the mode, how many cases are open, each runner seen in the last day with its version, the providers it holds a credential for and when it was last seen, and any warning, such as a model whose provider no connected runner holds. When no runner was seen in the last 2 minutes it says so: nothing new is investigated, and live rules run until they expire. Three budgets show what is in use: **Enforce rules** (`max_enforcing`), **Sensors** (`max_sensors`) and **Cases started this hour** (`cases_per_hour`). With `settings.manage`, **Turn autopilot off** is the [kill switch](#turning-it-off).
+**Overview** shows:
+
+- **Status:** the mode, how many cases are open, each runner seen in the last day with its version, the providers it holds a credential for and when it was last seen, and any warning, such as a model whose provider no connected runner holds. When no runner was seen in the last 2 minutes it says so: nothing new is investigated, and live rules run until they expire. While the autopilot is on, it also names the [automatic cases](#cases) turned off in the settings. Three budgets show what is in use: **Enforce rules** (`max_enforcing`), **Sensors** (`max_sensors`) and **Cases started this hour** (`cases_per_hour`). With `settings.manage`, **Turn autopilot off** is the [kill switch](#turning-it-off).
 - **Find an autopilot rule** narrows **Live rules** to the rules whose ID contains what you type, and **Cases** to the cases opened on exactly that rule ID. An autopilot rule's ID on **Rules** links here with it filled in.
 - **Live rules:** each proposed, observing or enforcing rule, as a sensor or an enforce rule, with its condition as admin renders it, its limit and key, and when it expires. Once an enforce rule has been measured, it shows the share of the requests it checked that were over its limit while it only logged; the edges count every request, so the share is exact. With `stats.read`, each rule also shows how many requests it found over its limit in the picked range while logging and while blocking, with a sparkline of each; the counts are exact. A rule's ID opens the case that made it.
 - **Exclusions:** the [exclusions](#exclusions) active now and those that ended in the last 30 days, with **Revoke** for an active one with `autopilot.manage`.
 - **Cases:** the latest 20 cases, newest first, with what started each, its state and its verdict.
-- **Settings:** every [setting](#settings), saved on its own outside the draft, with the server's reason for a refused value shown by its field. The mode here offers **Observe** and **Auto**, or **Off** while it is off; turning it off goes through **Turn autopilot off**.
+
+**Spend** shows [Spend](#spend) and [Precision](#precision). **Settings** shows:
+
+- **Settings:** every [setting](#settings), saved on its own outside the draft (it carries an **Applies when saved** badge), with the server's reason for a refused value shown by its field. The mode here offers **Observe** and **Auto**, or **Off** while it is off; turning it off goes through **Turn autopilot off** on **Overview**.
 - **Model prices:** the [price table](#cases), and, with `settings.manage`, **Add a price**. A price is never changed: a new row takes over from its time.
 
 ### Spend
@@ -322,7 +327,7 @@ Notes are kept in `autopilot_notes`, with every change in `autopilot_note_revisi
 
 ### The Memory pages
 
-**Memory**, from the Autopilot page, lists the newest 500 notes, newest first, with their trust, kind, claim in words, statement and when they were written. **Trust** narrows it to one level. A hypothesis has no claim and reads as one about its scope. No person writes notes: they come only from runs, through the gate.
+**Memory**, a tab of the Autopilot page, lists the newest 500 notes, newest first, with their trust, kind, claim in words, statement and when they were written. **Trust** narrows it to one level. A hypothesis has no claim and reads as one about its scope. No person writes notes: they come only from runs, through the gate.
 
 ![Memory](../assets/screenshots/autopilot-memory.png)
 
@@ -358,7 +363,7 @@ It prints a report: the recorded run's provider, model, verdict, tokens and cost
 
 ## Turning it off
 
-On the Autopilot page, **Turn autopilot off** asks for a reason, at most 500 characters, which the audit row of the change keeps as `reason`; the settings don't store it. The API takes the same optional `reason` on `PUT /api/settings/autopilot`. Setting `mode` to `off` retires every autopilot rule, cancels open cases and publishes the active version without autopilot rules, in one transaction. Like every autopilot publish that only takes rules out, it skips the deployment and schema checks, so an edge that is old or runs other deployment settings never holds it back. It is refused (`409`) while a canary runs: promote or abort it first. For the same reason a [rule guard](#the-rule-guard) rollback during a canary keeps the rule on the edges until the canary ends, recorded as `published: false` with `waits_for_canary`. Off, autopilot opens no cases and publishes nothing.
+On the Autopilot page, **Turn autopilot off** asks for a reason, at most 500 characters, which the audit row of the change keeps as `reason`; the settings don't store it. The API takes the same optional `reason` on `PUT /api/settings/autopilot`. Setting `mode` to `off` retires every autopilot rule, cancels open cases and publishes the active version without autopilot rules, in one transaction. Like every autopilot publish that only takes rules out, it skips the deployment and schema checks, so an edge that is old or runs other deployment settings never holds it back. It is refused (`409`) while a canary runs: promote or abort it first. For the same reason a [rule guard](#the-rule-guard) rollback during a canary keeps the rule on the edges until the canary ends, recorded as `published: false` with `waits_for_canary`. Off, autopilot opens no cases and publishes nothing. The three automatic case settings are different: each stops one kind of new case, and the queued cases, the live rules and the active version stay as they are.
 
 ## From Claude Code
 

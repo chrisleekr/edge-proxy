@@ -3,7 +3,7 @@ import { Fragment, type PointerEvent, useEffect, useLayoutEffect, useMemo, useRe
 import { api, useCan } from '../api';
 import { LogLink, useLogSearch } from '../logSearch';
 import { Link, useSearch } from '../router';
-import { Badge, Button, Card, ErrorBox, Page, Rolling, Table, Title, ago, when } from '../ui';
+import { Badge, Button, Card, ErrorBox, Page, Rolling, Table, Title, ago, plural, when } from '../ui';
 import type { Event } from './Audit';
 import { useVersions } from './Publish';
 
@@ -29,18 +29,26 @@ function useRole() {
 export function Fleet() {
   const q = useQuery({ queryKey: ['fleet'], queryFn: () => api<Edge[]>('GET', '/api/fleet'), refetchInterval: 15_000 });
   const role = useRole();
+  const [params, set] = useSearch();
+  const showGone = params.get('gone') === '1';
+  // Reporting edges first, then the newest report; gone ones are hidden
+  // unless asked for, or unless no edge is reporting.
+  const edges = [...(q.data ?? [])].sort((a, b) => Number(b.live) - Number(a.live) || b.last_seen.localeCompare(a.last_seen));
+  const gone = edges.filter((e) => !e.live).length;
+  const toggle = gone > 0 && gone < edges.length;
+  const shown = toggle && !showGone ? edges.filter((e) => e.live) : edges;
   return (
     <Page
       title="Fleet"
-      info="Edges that fetched config from this admin. Live means it reported in the last minute. Versions loaded are the live version and, during a canary, the canary version. Config from says where an edge got the version it serves: admin, its cache file from an earlier run, or the bootstrap file it starts from when admin is unreachable. An edge on cache or bootstrap keeps serving; it switches to admin once it can reach it. Upstream is the edge's UPSTREAM_URL, the load balancer or gateway it forwards every request to. It is set in the edge's deployment, not here."
+      info="Edges that fetched config from this admin. Reporting means it reported in the last minute. Versions loaded are the live version and, during a canary, the canary version. Config from says where an edge got the version it serves: admin, its cache file from an earlier run, or the bootstrap file it starts from when admin is unreachable. An edge on cache or bootstrap keeps serving; it switches to admin once it can reach it. Upstream is the edge's UPSTREAM_URL, the load balancer or gateway it forwards every request to. It is set in the edge's deployment, not here."
     >
       <ErrorBox error={q.error} />
       <Table head={['Edge', 'State', 'Versions loaded', 'Upstream', 'Config from', 'Last report']} empty={q.data && 'No edge has reported to this admin yet. Edges report once they fetch a snapshot.'}>
-        {q.data?.map((e) => (
+        {q.data && shown.map((e) => (
           <tr key={e.instance}>
             <td className="font-mono">{e.instance}</td>
             <td>
-              <Badge tone={e.live ? 'green' : 'slate'}>{e.live ? 'live' : 'gone'}</Badge>
+              <Badge tone={e.live ? 'green' : 'slate'}>{e.live ? 'reporting' : 'gone'}</Badge>
             </td>
             <td className="tabular-nums">{e.versions.map(role).join(', ')}</td>
             <td className="font-mono break-all">{e.upstream || 'not reported'}</td>
@@ -56,6 +64,11 @@ export function Fleet() {
           </tr>
         ))}
       </Table>
+      {toggle && (
+        <Button className="self-start" onClick={() => set({ gone: showGone ? '' : '1' })}>
+          {showGone ? 'Hide gone edges' : `Show ${plural(gone, 'gone edge')}`}
+        </Button>
+      )}
     </Page>
   );
 }
@@ -219,7 +232,7 @@ export function useRange(enabled = true) {
 export type Range = ReturnType<typeof useRange>;
 
 // RangePicker is the page's time control: the range, and while zoomed a way
-// back to it. Live says the figures refresh on their own.
+// back to it. Auto-refresh says the figures refresh on their own.
 export function RangePicker({ r }: { r: Range }) {
   return (
     <div className="flex items-center gap-3">
@@ -228,7 +241,7 @@ export function RangePicker({ r }: { r: Range }) {
       ) : (
         <span className="eyebrow flex items-center gap-1.5 text-body" title={`Updates every ${r.minutes <= 1440 ? '10 seconds' : 'minute'}`}>
           <span aria-hidden className={`size-1.5 rounded-full ${r.q.error ? 'bg-danger' : 'animate-pulse bg-success motion-reduce:animate-none'}`} />
-          {r.q.error ? 'Not updating' : 'Live'}
+          {r.q.error ? 'Not updating' : 'Auto-refresh'}
         </span>
       )}
       <RangeSelect value={r.key} onChange={r.pick} />
@@ -474,7 +487,7 @@ export function Stats() {
   const top = new Map<string, NonNullable<Row['top_limited']>[number]>();
   const blocks = new Map<string, { id: string; matched: number; blocked: number; would_block: number }>();
   for (const x of rows) {
-    // Only config rules with a block setting decide blocks; the rest would be rows of zeros.
+    // Only access rules with a block setting decide blocks; the rest would be rows of zeros.
     for (const o of x.rules ?? []) {
       if (o.phase !== 'config' || o.blocked + o.would_block === 0) continue;
       const t = blocks.get(o.id) ?? { id: o.id, matched: 0, blocked: 0, would_block: 0 };
@@ -576,11 +589,11 @@ export function Stats() {
       </Table>
       <Title
         className="-mb-2"
-        info="Config rules with a block setting. Matched: requests the rule matched. Blocked: requests it answered with 403. Would block, log only: requests a log only rule matched and let through, or that the block kill switch let through."
+        info="Access rules with a block setting. Matched: requests the rule matched. Blocked: requests it answered with 403. Would block, log only: requests a log only rule matched and let through, or that the block kill switch let through."
       >
-        Blocking config rules
+        Blocking access rules
       </Title>
-      <Table head={['Rule', 'Matched', 'Blocked', 'Would block, log only']} num={[1, 2, 3]} empty={q.data && `No config rule blocked a request ${r.phrase}.`}>
+      <Table head={['Rule', 'Matched', 'Blocked', 'Would block, log only']} num={[1, 2, 3]} empty={q.data && `No access rule blocked a request ${r.phrase}.`}>
         {[...blocks.values()].map((x) => (
           <tr key={x.id}>
             <td className="font-mono">{x.id}</td>

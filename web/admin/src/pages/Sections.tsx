@@ -5,7 +5,7 @@ import { useDraft } from '../draft';
 import { useLeaveGuard } from '../router';
 import { GuardForm, guardWhere } from '../GuardForm';
 import { Amount, Choice, Count, Errors, kindWhen, Labeled, Lines, setField, sizeUnits, timeUnits, without } from '../RuleForms';
-import { Button, CanWrite, Card, Check, CodeEditor, ConfirmButton, Editable, ErrorBox, type Field, Hint, Input, JsonEditor, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
+import { Badge, Button, CanWrite, Card, Check, CodeEditor, ConfirmButton, Editable, ErrorBox, type Field, Hint, Input, JsonEditor, Jump, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
 
 // The section forms edit the draft directly. The draft's own check, run by
 // the server on every edit, puts each problem under its field and keeps
@@ -28,8 +28,10 @@ function Section<T>({
   set,
   intro,
   info,
+  id,
   children,
 }: {
+  id?: string | undefined;
   title: string;
   label: string;
   get: (c: Config) => T;
@@ -42,7 +44,7 @@ function Section<T>({
   const canWrite = useContext(CanWrite);
   const [asJSON, setAsJSON] = useState(false);
   return (
-    <Card title={title} intro={intro} info={info}>
+    <Card id={id} title={title} intro={intro} info={info}>
       {asJSON ? (
         <JsonEditor key={d.discards} label={label} value={get(d.config)} onChange={(v) => d.setConfig((c) => set(c, v))} onValidity={(ok) => d.markInvalid(label, !ok)} />
       ) : (
@@ -141,7 +143,7 @@ function Entry({
   );
 }
 
-// configRules lists the config rules with their settings, for "used by".
+// configRules lists the access rules with their settings, for "used by".
 const configRules = (c: Config) => (c.config_rules ?? []).map((r) => ({ id: r.id, settings: r.settings ?? {} }));
 
 type Templates = Record<string, JsonObject>;
@@ -166,7 +168,7 @@ export function Templates() {
         label="Response templates"
         get={(c) => c.global.responses}
         set={(c, v) => ({ ...c, global: { ...c.global, responses: v } })}
-        intro="Responses the edge sends itself, such as the 429 for a rate limit. Name one for each kind below, or in a config rule's response templates."
+        intro="Responses the edge sends itself, such as the 429 for a rate limit. Name one for each kind below, or in an access rule's response templates."
         info="The edge answers some requests without asking the upstream: bad requests, missing tokens, rate limits, timeouts. A template sets the status, content type and body of that answer. Every one is sent with Cache-Control: no-store."
       >
         {names.length === 0 && <p className="text-body">No templates yet.</p>}
@@ -215,7 +217,7 @@ export function Templates() {
         label="Default responses"
         get={(c) => c.global.defaults.responses}
         set={(c, v) => ({ ...c, global: { ...c.global, defaults: { ...c.global.defaults, responses: v } } })}
-        intro="Which template each kind of edge response uses unless a config rule picks another. Every kind needs one; only templates with the kind's status are offered."
+        intro="Which template each kind of edge response uses unless an access rule picks another. Every kind needs one, and only templates with the kind's status are offered, so add a template with that status first."
       >
         <div className="grid gap-3 text-sm sm:grid-cols-[minmax(0,28rem)_minmax(0,1fr)] sm:items-center">
           {kinds.map(({ name: k, status }) => (
@@ -226,12 +228,15 @@ export function Templates() {
                 </span>
                 <span className="text-body">{kindWhen[k]}</span>
               </span>
+              <span className="flex flex-col gap-1">
               <Choice
                 value={defaults[k]}
                 options={names.filter((n) => all[n]!.status === status)}
                 labels={{}}
                 onChange={(v) => d.setConfig((c) => ({ ...c, global: { ...c.global, defaults: { ...c.global.defaults, responses: setField(defaults, k, v) } } }))}
               />
+              {!names.some((n) => all[n]!.status === status) && <span className="text-body">No {status} template yet. Add one above.</span>}
+              </span>
             </label>
           ))}
         </div>
@@ -253,7 +258,7 @@ export function CORS() {
   return (
     <Page
       title="CORS policies"
-      info="CORS tells a browser which other sites may call this API from their pages. A config rule picks a policy for its routes; a policy no rule picks has no effect. The edge answers preflight requests itself."
+      info="CORS tells a browser which other sites may call this API from their pages. An access rule picks a policy for its routes; a policy no rule picks has no effect. The edge answers preflight requests itself."
     >
       <ReadOnlyNote />
       <Section
@@ -261,7 +266,7 @@ export function CORS() {
         label="CORS policies"
         get={(c) => c.global.cors_policies}
         set={(c, v) => ({ ...c, global: { ...c.global, cors_policies: v } })}
-        intro="Which other sites may call the API from a browser. A policy does nothing until a config rule picks it under CORS policy."
+        intro="Which other sites may call the API from a browser. A policy does nothing until an access rule picks it under CORS policy."
       >
         {names.length === 0 && <p className="text-body">No policies yet.</p>}
         {names.map((name) => {
@@ -420,7 +425,7 @@ export function Issuers() {
         </div>
         <fieldset className="flex flex-col gap-1 border-t border-line pt-4 text-sm">
           <legend className="font-medium text-heading">Accepted by default</legend>
-          <span className="text-body">Issuers a config rule accepts when it ticks none of its own.</span>
+          <span className="text-body">Issuers an access rule accepts when it ticks none of its own.</span>
           {[...new Set([...ids, ...accepted])].map((id) => (
             <Check
               key={id}
@@ -449,6 +454,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
   const backstop = part('backstop');
   const setBackstop = (k: string, v: Json) => setPart('backstop', setField(backstop, k, v));
   const defaults = g.defaults;
+  const allowlist = Array.isArray(g.client_allowlist) ? (g.client_allowlist as string[]) : [];
   const setDefault = (k: string, v: Json) => d.setConfig((c) => ({ ...c, global: { ...c.global, defaults: setField(c.global.defaults, k, v) } }));
   const locale = part('locale');
   const setLocale = (k: string, v: Json) => setPart('locale', setField(locale, k, v));
@@ -458,10 +464,23 @@ export function Settings({ canManage }: { canManage: boolean }) {
   return (
     <Page title="Settings">
       <ReadOnlyNote />
+      <p className="max-w-prose text-body">Everything on this page saves to the draft and goes live when you publish, except Rollback guard, which applies as soon as you save it.</p>
+      <Jump
+        links={[
+          ['kill-switch', 'Kill switch'],
+          ['trusted-clients', 'Trusted client allowlist'],
+          ['backstop', 'Backstop'],
+          ['requests-in-progress', 'Requests in progress'],
+          ['defaults', 'Defaults'],
+          ['locale', 'Locale'],
+          ['request-headers', 'Request headers'],
+          ['rollback-guard', 'Rollback guard'],
+        ]}
+      />
       <Card
+        id="kill-switch"
         title="Kill switch"
-        note="Turns enforcement off for every edge once published. Use it in an incident, not as configuration."
-        info="Like any change, it takes effect when you save and publish."
+        note="Turns enforcement off for every edge. Use it in an incident, not as configuration. It takes effect only after Save draft and Publish, and Publish ships the whole draft, including anyone else's unpublished edits."
       >
         <Editable>
           <div className="flex flex-col gap-3">
@@ -478,10 +497,36 @@ export function Settings({ canManage }: { canManage: boolean }) {
               onChange={() => toggle('auth')}
             />
             <Check
-              label="Disable blocking by config rules"
-              hint="Every config rule set to block only logs: Stats still shows what it would block, but none gets a 403."
+              label="Disable blocking by access rules"
+              hint="Every access rule set to block only logs: Stats still shows what it would block, but none gets a 403."
               checked={ks.block ?? false}
               onChange={() => toggle('block')}
+            />
+          </div>
+        </Editable>
+      </Card>
+      <Card
+        id="trusted-clients"
+        title="Trusted client allowlist"
+        note="Requests from these client IPs skip blocking by access rules and rate limits, and need no JWT. The edge matches the client IP it already takes from your trusted proxies, so a header can't add a client to this list, and the list doesn't change which proxies are trusted. The backstop, CORS, header rules, body limits and timeouts still apply."
+        info="Like any change, it takes effect when you save and publish."
+      >
+        <Editable>
+          <div className="flex flex-col gap-3">
+            <Notice tone="amber">
+              Routes that require a JWT let these clients in without one. A token they do send is still checked: a bad one is refused, and a valid one reaches the upstream with its X-Edge-Auth-* headers as usual. Without a token, the upstream sees an anonymous request.
+            </Notice>
+            {!allowlist.length && <p className="text-sm text-body">No trusted clients: every request goes through the full policy.</p>}
+            <Lines
+              label="Client IPs and ranges"
+              item="Trusted client"
+              noun="client"
+              values={g.client_allowlist}
+              onChange={(v) => d.setConfig((c) => ({ ...c, global: { ...setField(c.global, 'client_allowlist', v.length ? v : undefined), defaults: c.global.defaults } }))}
+              at={d.at}
+              path="global.client_allowlist"
+              placeholder="such as 203.0.113.7 or 198.51.100.0/24"
+              hint="IPv4 or IPv6 addresses and CIDR ranges, up to 100. A range can be no wider than /24 for IPv4 or /48 for IPv6, and ranges must not overlap."
             />
           </div>
         </Editable>
@@ -489,6 +534,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
       {/* Two columns on wide screens: these blocks are short and narrow. */}
       <div className="grid gap-5 xl:grid-cols-2 [&>*]:min-w-0">
         <Section
+          id="backstop"
           title="Backstop"
           label="Backstop"
           get={(c) => c.global.backstop}
@@ -525,13 +571,14 @@ export function Settings({ canManage }: { canManage: boolean }) {
           </Labeled>
         </Section>
         <Card
+          id="requests-in-progress"
           title="Requests in progress"
           intro="How many requests each edge works on at once before it answers the rest with the overloaded response."
           info="Each edge's own limit comes from its memory. A number here can only lower it, for example to shed load sooner while an upstream struggles. A larger number has no effect."
         >
           <Editable>
             <Labeled
-              label="Most requests in progress per edge"
+              label="Maximum requests in progress per edge"
               hint="Leave empty to use each edge's own limit. Streams (WebSocket and SSE) have their own limit and don't count here."
               issues={d.at('global.max_inflight')}
             >
@@ -545,12 +592,13 @@ export function Settings({ canManage }: { canManage: boolean }) {
           </Editable>
         </Card>
         <Section
+          id="defaults"
           title="Defaults"
           label="Defaults"
           get={(c) => without(c.global.defaults, 'responses')}
           // Responses are edited under Templates.
           set={(c, v) => ({ ...c, global: { ...c.global, defaults: { ...v, responses: c.global.defaults.responses } } })}
-          intro="What applies when no config rule says otherwise."
+          intro="What applies when no access rule says otherwise."
         >
           <Labeled label="Largest request body" hint="Such as 1 MiB. Larger bodies get the payload too large response." issues={d.at('global.defaults.body_limit')}>
             <Amount value={defaults.body_limit} units={sizeUnits} fallback="MiB" duration={false} onChange={(v) => setDefault('body_limit', v)} />
@@ -568,6 +616,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
           </div>
         </Section>
         <Section
+          id="locale"
           title="Locale"
           label="Locale"
           get={(c) => c.global.locale}
@@ -597,6 +646,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
           />
         </Section>
         <Section
+          id="request-headers"
           title="Request headers"
           label="Request headers"
           get={(c) => c.global.request_headers}
@@ -637,7 +687,7 @@ export const guardFields: Field[] = [
   ['min_requests', 'No decision is made on fewer requests than this in the window.'],
   ['evaluate_every', 'How often the guard checks, at least "1s".'],
   ['max_auto_rollbacks_per_publish', 'Automatic rollbacks allowed per publish.'],
-  ['step_min_time', 'Least time each canary step runs before the next.'],
+  ['step_min_time', 'Minimum time each canary step runs before the next.'],
   ['signals', 'fleet_adoption, edge_5xx_ratio, upstream_5xx_ratio, changed_rule_limited_ratio, unchanged_rule_limited_ratio, p99_latency and auth_failure_ratio.'],
   ['signals.<name>.mode', 'rollback, alert or off.'],
   [
@@ -664,6 +714,8 @@ function Guard({ canManage }: { canManage: boolean }) {
   if (!q.data) return <Pending error={q.error} />;
   return (
     <Card
+      id="rollback-guard"
+      badge={<Badge tone="amber">Applies when saved</Badge>}
       title="Rollback guard"
       intro="Watches a canary, or a version just published, and rolls back or alerts when a signal trips. Saved on its own, not with the draft."
       info="For the first minutes after a publish (10 by default), or during a canary, it compares the new version with the old one. Signals only a config change can cause, such as more 5xx, roll back. Signals an attack can also cause, such as more auth failures, only alert."

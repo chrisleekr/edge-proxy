@@ -4,6 +4,7 @@ import { api, type Json, Problem, useCan } from '../api';
 import { LogLink, useLogSearch } from '../logSearch';
 import { Link, useSearch } from '../router';
 import { Badge, Button, Card, ErrorBox, Modal, NotFound, Notice, Page, Pending, Table, ago, when, who } from '../ui';
+import { AutopilotTabs } from './Autopilot';
 import { ranges, type RangeKey } from './Fleet';
 
 // The autopilot's memory: the notes its runs recorded and admin checked.
@@ -116,11 +117,7 @@ export function Memory() {
       title="Memory"
       info="What the autopilot's runs learned and recorded, newest first. Admin checks each claim on its own stats before a note is kept, and serves a note to later runs only while it holds."
     >
-      <p className="-mt-3">
-        <Link to="/autopilot" className="text-sm text-body underline">
-          Autopilot
-        </Link>
-      </p>
+      <AutopilotTabs current="/autopilot/notes" />
       <label className="flex max-w-xs flex-col gap-1 text-sm">
         <span className="font-medium text-heading">Trust</span>
         <select value={trust} onChange={(e) => setSearch({ trust: e.target.value })}>

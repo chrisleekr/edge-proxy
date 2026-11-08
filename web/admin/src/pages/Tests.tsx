@@ -8,7 +8,7 @@ import { useVersions } from './Publish';
 
 const testFields: Field[] = [
   ['name', 'What the test checks, shown in results.'],
-  ['request', 'The request to send. Same fields as Simulate below: method, host, path, ip, headers, country, asn, ssl, http_version, ja4, ja3, verified_bot, jwt_claims.'],
+  ['request', 'The request to send. Same fields as Simulate above: method, host, path, ip, headers, country, asn, ssl, http_version, ja4, ja3, verified_bot, jwt_claims.'],
   ['expect.rejected', 'The check that stops the request, such as auth or rate_limit_key.'],
   ['expect.preflight', 'true when the edge answers it as a CORS preflight.'],
   ['expect.config_rules, rate_limit_rules', 'Exactly the IDs of the rules that match, in order. [] means none.'],
@@ -19,6 +19,7 @@ const testFields: Field[] = [
 // Sim is the result of /api/simulate; settings and headers are shown as given.
 interface Sim {
   rejected?: string;
+  allowlist?: string;
   config_rules: string[];
   rate_limit_rules: string[];
   rate_limit_capped: boolean;
@@ -138,17 +139,24 @@ function SimResult({ r }: { r: Sim }) {
             <Badge tone="green">sent to the upstream</Badge>
           )}
         </dd>
-        <dt className="text-body">Config rules</dt>
+        {r.allowlist && (
+          <>
+            <dt className="text-body">Trusted client</dt>
+            <dd>Yes, matches {r.allowlist} on the allowlist</dd>
+          </>
+        )}
+        <dt className="text-body">Access rules</dt>
         <dd className="font-mono">{ids(r.config_rules)}</dd>
         <dt className="text-body">Rate limit rules</dt>
-        <dd className="font-mono">
-          {ids(r.rate_limit_rules)}
+        <dd className={r.allowlist ? undefined : 'font-mono'}>
+          {r.allowlist ? 'Skipped, trusted client' : ids(r.rate_limit_rules)}
           {r.rate_limit_capped && <span className="font-sans text-warning"> (more rules matched than the edge counts per request; the rest were skipped)</span>}
         </dd>
         <dt className="text-body">Auth</dt>
         <dd>
           {say[s.auth_mode] ?? s.auth_mode}
           {s.auth_mode !== 'none' && `, from ${ids(s.accepted)}`}
+          {r.allowlist && s.auth_mode === 'optional' && ' (a trusted client needs no token)'}
         </dd>
         <dt className="text-body">Upstream timeout</dt>
         <dd>{s.upstream_timeout}</dd>
@@ -187,6 +195,7 @@ const rejections: Record<string, string> = {
   method: 'rejected with 400: the method is not in upper case',
   path: 'rejected with 400: the path is malformed or has an ambiguous encoding such as %2F',
   auth: 'rejected with 401: the route requires a valid token',
+  blocked: 'rejected with 403: an access rule blocks the request',
   rate_limit_key: 'rejected with 400: a rate limit rule needs a key part the request lacks',
 };
 
@@ -212,46 +221,6 @@ export function Tests({ canTest, canWrite }: { canTest: boolean; canWrite: boole
   const unsavedConfig = d.config !== d.draft.config;
   return (
     <Page title="Tests and simulate">
-      <Card
-        title="Config tests"
-        info="Tests run through the edge's own code, so they check what will really happen. They run on the saved draft, so save first to test new edits."
-        intro="Each test is a request and what the draft must do with it; expect checks only what it lists. Publishing is blocked while any test fails.">
-        <JsonEditor key={d.discards} label="Tests" value={d.tests} onChange={d.setTests} onValidity={(ok) => d.markInvalid('Tests', !ok)} />
-        <Reference
-          fields={testFields}
-          open={d.tests.length === 0}
-          example={[
-            {
-              name: 'private pages need a token',
-              request: { method: 'GET', host: 'api.example.com', path: '/private/x' },
-              expect: { rejected: 'auth', config_rules: ['private-needs-auth'], settings: { auth_mode: 'required' } },
-            },
-            {
-              name: 'login is limited per IP',
-              request: { method: 'POST', host: 'api.example.com', path: '/login', ip: '203.0.113.7' },
-              expect: { rate_limit_rules: ['login'], upstream_headers: { 'x-debug': '' } },
-            },
-          ]}
-        />
-        <div className="mt-3 flex flex-col items-start gap-2">
-          <Button disabled={!canTest || d.dirty || run.isPending} onClick={() => run.mutate()}>
-            {run.isPending ? 'Running…' : 'Run tests on the saved draft'}
-          </Button>
-          <Hint>{!canTest ? 'Your role cannot run tests.' : d.dirty ? 'Save the draft first: tests run on the saved draft.' : undefined}</Hint>
-        </div>
-        <ErrorBox error={run.error} />
-        {run.data?.length === 0 && <p className="mt-2 text-body">The draft has no tests yet.</p>}
-        {!!run.data?.length && (
-          <ul className="mt-3 flex flex-col gap-1 text-sm" aria-label="Test results">
-            {run.data.map((t) => (
-              <li key={t.name}>
-                <Badge tone={t.pass ? 'green' : 'red'}>{t.pass ? 'pass' : 'fail'}</Badge> {t.name}
-                {t.failures && <span className="text-danger">: {t.failures.join('; ')}</span>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
       <Card
         title="Simulate a request"
         info="Pick the saved draft or any published version. Unsaved edits are not in the result. Simulating against the saved draft lets you add the request as a test that expects the same outcome."
@@ -323,14 +292,54 @@ export function Tests({ canTest, canWrite }: { canTest: boolean; canWrite: boole
             </Button>
             <Hint>
               {added
-                ? `Added “${added}” to Config tests above. Save the draft to keep it.`
+                ? `Added “${added}” to Policy tests below. Save the draft to keep it.`
                 : d.invalid.includes('Tests')
                   ? 'Fix the JSON in Tests first.'
                   : unsavedConfig
                     ? 'Save the draft and simulate again first: this result is from the saved draft, so a test made from it might fail once your changes are saved.'
-                    : 'Adds this request to Config tests, expecting this outcome and exactly these rules.'}
+                    : 'Adds this request to Policy tests, expecting this outcome and exactly these rules.'}
             </Hint>
           </div>
+        )}
+      </Card>
+      <Card
+        title="Policy tests"
+        info="Tests run through the edge's own code, so they check what will really happen. They run on the saved draft, so save first to test new edits."
+        intro="Each test is a request and what the draft must do with it; expect checks only what it lists. Publishing is blocked while any test fails.">
+        <JsonEditor key={d.discards} label="Tests" value={d.tests} onChange={d.setTests} onValidity={(ok) => d.markInvalid('Tests', !ok)} />
+        <Reference
+          fields={testFields}
+          open={d.tests.length === 0}
+          example={[
+            {
+              name: 'private pages need a token',
+              request: { method: 'GET', host: 'api.example.com', path: '/private/x' },
+              expect: { rejected: 'auth', config_rules: ['private-needs-auth'], settings: { auth_mode: 'required' } },
+            },
+            {
+              name: 'login is limited per IP',
+              request: { method: 'POST', host: 'api.example.com', path: '/login', ip: '203.0.113.7' },
+              expect: { rate_limit_rules: ['login'], upstream_headers: { 'x-debug': '' } },
+            },
+          ]}
+        />
+        <div className="mt-3 flex flex-col items-start gap-2">
+          <Button disabled={!canTest || d.dirty || run.isPending} onClick={() => run.mutate()}>
+            {run.isPending ? 'Running…' : 'Run tests on the saved draft'}
+          </Button>
+          <Hint>{!canTest ? 'Your role cannot run tests.' : d.dirty ? 'Save the draft first: tests run on the saved draft.' : undefined}</Hint>
+        </div>
+        <ErrorBox error={run.error} />
+        {run.data?.length === 0 && <p className="mt-2 text-body">The draft has no tests yet.</p>}
+        {!!run.data?.length && (
+          <ul className="mt-3 flex flex-col gap-1 text-sm" aria-label="Test results">
+            {run.data.map((t) => (
+              <li key={t.name}>
+                <Badge tone={t.pass ? 'green' : 'red'}>{t.pass ? 'pass' : 'fail'}</Badge> {t.name}
+                {t.failures && <span className="text-danger">: {t.failures.join('; ')}</span>}
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
     </Page>

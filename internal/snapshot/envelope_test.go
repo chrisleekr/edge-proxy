@@ -48,10 +48,10 @@ func TestCompileWarns(t *testing.T) {
 		}, "config_rules[0].expression", "can never all be true"},
 		{"CORS policy no rule selects", func(c *Config) {
 			c.ConfigRules[0].Settings.CORSPolicy = nil
-		}, `global.cors_policies["app"]`, "no config rule selects it"},
+		}, `global.cors_policies["app"]`, "no access rule selects it"},
 		{"issuer no rule accepts", func(c *Config) {
 			c.ConfigRules[0].Settings.Auth.Accepted = []string{"corp"}
-		}, "auth.issuers[1]", "no config rule accepts it"},
+		}, "auth.issuers[1]", "no access rule accepts it"},
 		{"template no response kind uses", func(c *Config) {
 			c.ConfigRules[1].Settings.Responses = nil
 		}, `global.responses["rate_limited_html"]`, "nothing sends it"},

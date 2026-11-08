@@ -25,10 +25,10 @@ const signals: { name: string; label: string; fields: Threshold[]; trips: (s: Si
     name: 'fleet_adoption',
     label: 'Edges loading the version',
     fields: [
-      { key: 'min_ratio', label: 'Least share of edges', kind: 'ratio' },
+      { key: 'min_ratio', label: 'Minimum share of edges', kind: 'ratio' },
       { key: 'after', label: 'Allowed time to load', kind: 'duration' },
     ],
-    trips: (s) => `Trips when under ${pct(num(s, 'min_ratio'))} of live edges have loaded the version once the allowed time has passed.`,
+    trips: (s) => `Trips when under ${pct(num(s, 'min_ratio'))} of reporting edges have loaded the version once the allowed time has passed.`,
   },
   {
     name: 'edge_5xx_ratio',
@@ -125,7 +125,7 @@ function Field({ label, hint, children }: { label: string; hint: string; childre
 export function guardWhere(path: string) {
   const sig = signals.find((x) => path === `signals.${x.name}` || path.startsWith(`signals.${x.name}.`));
   if (sig) return sig.label;
-  return { window: 'Watch for, Check every or Least time per canary step', min_requests: 'Least requests or Automatic rollbacks' }[path] ?? path;
+  return { window: 'Watch for, Check every or Minimum time per canary step', min_requests: 'Minimum requests or Automatic rollbacks' }[path] ?? path;
 }
 
 // guardWords names one guard setting and its value as the form shows them,
@@ -133,9 +133,9 @@ export function guardWhere(path: string) {
 const top: Record<string, string> = {
   enabled: 'Watch new versions',
   window: 'Watch for',
-  min_requests: 'Least requests to judge',
+  min_requests: 'Minimum requests to judge',
   evaluate_every: 'Check every',
-  step_min_time: 'Least time per canary step',
+  step_min_time: 'Minimum time per canary step',
   max_auto_rollbacks_per_publish: 'Automatic rollbacks per publish',
 };
 export function guardWords(path: string, value: string | undefined) {
@@ -163,13 +163,13 @@ export function GuardForm({ value, onChange, disabled }: { value: JsonObject; on
         <Field label="Watch for" hint="After a full publish, how long the guard watches it; during a canary, how much recent traffic each check looks at.">
           <Amount value={value.window} units={short} fallback="m" duration onChange={(v) => set('window', v)} />
         </Field>
-        <Field label="Least requests to judge" hint="No decision until the new and the old version each have this many requests.">
+        <Field label="Minimum requests to judge" hint="No decision until the new and the old version each have this many requests.">
           <Count value={value.min_requests} min={1} onChange={(v) => set('min_requests', v)} />
         </Field>
         <Field label="Check every" hint="How often the guard compares the two versions.">
           <Amount value={value.evaluate_every} units={short} fallback="s" duration onChange={(v) => set('evaluate_every', v)} />
         </Field>
-        <Field label="Least time per canary step" hint="How long each canary step runs before you can step up or promote.">
+        <Field label="Minimum time per canary step" hint="How long each canary step runs before you can step up or promote.">
           <Amount value={value.step_min_time} units={short} fallback="m" duration onChange={(v) => set('step_min_time', v)} />
         </Field>
         <Field label="Automatic rollbacks per publish" hint="After this many, a check set to roll back only alerts. A revert is never rolled back.">

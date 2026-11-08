@@ -280,7 +280,7 @@ sequenceDiagram
 
 ## Rules that expire
 
-A rule with `expires_at` stops running at that time, with no second publish. From then on every edge skips it: it takes no slot among the 5 rules a request runs, a client serving its penalty is let through, and `/metrics` counts the request as `expired` for the rule. Config tests judge the expiry at the time they run.
+A rule with `expires_at` stops running at that time, with no second publish. From then on every edge skips it: it takes no slot among the 5 rules a request runs, a client serving its penalty is let through, and `/metrics` counts the request as `expired` for the rule. Policy tests judge the expiry at the time they run.
 
 - **Each edge uses its own clock.** Edges whose clocks differ end the rule that much apart; run NTP on every host.
 - **It needs schema 5 edges.** Admin holds the publish while a live edge reads an older schema, naming it.
@@ -347,7 +347,7 @@ Every rule then follows its `fail_mode`.
 ## Response headers
 
 - **`Retry-After`** is on every 429, in whole seconds, rounded up.
-- **`RateLimit-Policy` and `RateLimit`** (IETF draft) are sent when a config rule sets `ratelimit_headers: true`. There is one item per blocking rule, named by its ID, for example `RateLimit-Policy: "login";q=5;w=60` and `RateLimit: "login";r=2;t=41`. `log` rules are left out.
+- **`RateLimit-Policy` and `RateLimit`** (IETF draft) are sent when an access rule sets `ratelimit_headers: true`. There is one item per blocking rule, named by its ID, for example `RateLimit-Policy: "login";q=5;w=60` and `RateLimit: "login";r=2;t=41`. `log` rules are left out.
 
 ## Local backstop
 
@@ -361,4 +361,4 @@ Clients on the **Settings → Trusted client allowlist** skip every rate-limit r
 
 ## Emergency switch
 
-**Settings → Kill switch → Disable rate limiting** turns every rule into `log`. Save and publish it to stop all rate-limit blocking at once; the backstop still applies. **Disable JWT checks** turns JWT verification off entirely: every route behaves as `auth: none`, claims are empty and `X-Edge-Auth-*` headers are not set. **Disable blocking by config rules** turns every config rule's `block` setting into `log`.
+**Settings → Kill switch → Disable rate limiting** turns every rule into `log`. Save and publish it to stop all rate-limit blocking at once; the backstop still applies. **Disable JWT checks** turns JWT verification off entirely: every route behaves as `auth: none`, claims are empty and `X-Edge-Auth-*` headers are not set. **Disable blocking by access rules** turns every access rule's `block` setting into `log`.

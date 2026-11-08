@@ -76,6 +76,9 @@ export const said: Record<string, string> = {
   'settings.notifications': 'changed notification settings',
   'anomaly.fire': 'found an anomaly on',
   'anomaly.resolve': 'resolved an anomaly on',
+  'attention.ack': 'acknowledged',
+  'attention.undo': 'undid the acknowledgement of',
+  'attention.cleared': 'noted this has cleared:',
 };
 
 // The categories the log narrows to, each a list of actions.
@@ -83,7 +86,7 @@ const categories: [string, string[]][] = [
   ['Releases', ['config.publish', 'config.revert', 'config.rollback', 'config.import', 'config.overlay_publish', 'canary.step', 'canary.promote', 'canary.abort', 'guard.rollback', 'guard.canary_abort', 'guard.alert']],
   ['Draft', ['config.save', 'config.rebase', 'config.copy_to_draft', 'config.adopt', 'config.export']],
   ['Settings', ['settings.guard', 'settings.notifications', 'settings.autopilot', 'settings.autopilot_price']],
-  ['Anomalies', ['anomaly.fire', 'anomaly.resolve']],
+  ['Anomalies', ['anomaly.fire', 'anomaly.resolve', 'attention.ack', 'attention.undo', 'attention.cleared']],
   ['Users and tokens', ['user.create', 'user.disable', 'user.roles', 'token.create', 'token.revoke', 'auth.password.change']],
   ['Sign-ins', ['auth.login.success', 'auth.login.failure', 'auth.logout']],
   ['Routes', ['route.delete', 'route.delete_all', 'route_pattern.create', 'route_pattern.delete']],

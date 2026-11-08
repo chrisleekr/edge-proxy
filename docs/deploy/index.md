@@ -104,7 +104,7 @@ Or add `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD_FILE` to `admin.
 
 ### 5. Edge token and first publish
 
-1. Sign in, open **Users**, and create a token of kind **edge**. Store it as a secret.
+1. Sign in, open **Users and tokens**, and create a token of kind **edge**. Store it as a secret.
 2. Save the starter draft with **Save draft** in the bar at the top, then publish it from **Publish**. Until something is published, edges have nothing to load and stay not ready.
 
 For an automated install, skip both: give admin and the edges the same `EDGE_SERVICE_TOKEN_FILE`, and set `BOOTSTRAP_PUBLISH_DEFAULT=true` on admin, which publishes the starter policy (no rules, a per-IP backstop of 100 requests a second) at first start. See [Admin settings](admin.md#variables).
