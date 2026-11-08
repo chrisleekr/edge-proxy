@@ -39,7 +39,7 @@ var testAuditKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef012
 func baseEnv(dsn string) map[string]string {
 	return map[string]string{
 		"DATABASE_URL": dsn, "AUDIT_HMAC_KEY_ID": "k1", "AUDIT_HMAC_KEY": testAuditKey,
-		"CLIENT_IP_SOURCE": "cloudfront", "ADMIN_INTERNAL_ADDR": "127.0.0.1:0",
+		"CLIENT_IP_SOURCE": "cloudfront", "ADMIN_INTERNAL_ADDR": "127.0.0.1:0", "DRAIN_DELAY": "1ms",
 	}
 }
 

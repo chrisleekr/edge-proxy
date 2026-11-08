@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,94 @@ func runServer(t *testing.T, s *Server) (addr, internal string, stop func() erro
 			t.Fatal("Serve did not return after shutdown")
 			return nil
 		}
+	}
+}
+
+// drainSignal is a log writer that closes seen once a line contains "draining".
+type drainSignal struct {
+	once sync.Once
+	seen chan struct{}
+}
+
+func (d *drainSignal) Write(b []byte) (int, error) {
+	if strings.Contains(string(b), `"draining"`) {
+		d.once.Do(func() { close(d.seen) })
+	}
+	return len(b), nil
+}
+
+// After SIGTERM, whatever routes to admin keeps sending new connections for
+// a moment. An edge poll that lands then is answered, not refused.
+func TestServerAnswersDuringDrainDelay(t *testing.T) {
+	h, pub := published(t)
+	h.s.cfg.DrainDelay = 3 * time.Second
+	d := &drainSignal{seen: make(chan struct{})}
+	h.s.log = slog.New(slog.NewJSONHandler(d, nil))
+	addr, _, stop := runServer(t, h.s)
+	token := h.edgeToken(pub)
+	// The poll runs off the test goroutine, so it reports through a channel
+	// instead of calling t.Fatal.
+	polled := make(chan error, 1)
+	go func() {
+		select {
+		case <-d.seen:
+		case <-time.After(10 * time.Second):
+			polled <- fmt.Errorf("admin never started draining")
+			return
+		}
+		req, _ := http.NewRequest("GET", "http://"+addr+"/v1/snapshot", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			polled <- err
+			return
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != 200 {
+			err = fmt.Errorf("answered %d", resp.StatusCode)
+		}
+		polled <- err
+	}()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-polled:
+		if err != nil {
+			t.Fatalf("poll during the drain delay: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("poll during the drain delay did not finish")
+	}
+	if c, err := net.Dial("tcp", addr); err == nil {
+		_ = c.Close()
+		t.Fatal("listener still accepts after shutdown")
+	}
+}
+
+// A server that already failed has nothing to drain, so Serve does not wait
+// out the delay.
+func TestFailedServerSkipsDrainDelay(t *testing.T) {
+	h := newHarness(t)
+	h.s.cfg.DrainDelay = time.Minute
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.s.Serve(t.Context(), l, in) }()
+	_ = l.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a failed listener returned no error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve waited out the drain delay after a listener failed")
 	}
 }
 

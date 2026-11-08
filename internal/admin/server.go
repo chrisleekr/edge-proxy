@@ -457,7 +457,8 @@ func (s *Server) trusted(a netip.Addr) bool {
 }
 
 // Serve runs the API on l and /metrics on internal until ctx ends or a
-// server fails. Either way both servers stop and buffered stats are written.
+// server fails. After ctx ends, admin keeps serving for DrainDelay. Both
+// servers then stop and buffered stats are written.
 func (s *Server) Serve(ctx context.Context, l, internal net.Listener) error {
 	newServer := func(h http.Handler) *http.Server {
 		return &http.Server{
@@ -496,6 +497,13 @@ func (s *Server) Serve(ctx context.Context, l, internal net.Listener) error {
 		case <-ctx.Done():
 			running = false
 		}
+	}
+	// Whatever routes to admin keeps sending new connections briefly after
+	// SIGTERM, and a closed listener fails those edge polls. Skipped when a
+	// server already failed: Serve is exiting on that error, not on a signal.
+	if serveErr == nil {
+		s.log.Info("draining", "delay", s.cfg.DrainDelay.String())
+		time.Sleep(s.cfg.DrainDelay)
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -139,7 +139,7 @@ A case's page reads top to bottom as the case happened. It refreshes every 2 sec
 
 ## Settings
 
-`GET` and `PUT /api/settings/autopilot` (`settings.manage` to change). `PUT` replaces every setting: send the whole object from `GET`, since a setting left out is saved as zero or empty where its range allows it, such as `max_enforcing: 0`. Every change is audited (`settings.autopilot`) and takes effect on the next run.
+`GET` and `PUT /api/settings/autopilot` (`settings.manage` to change). `PUT` replaces every setting: send the whole object from `GET`, since a setting left out is saved as zero or empty where its range allows it, such as `max_enforcing: 0`. The exceptions are `sweep_enabled`, `review_enabled` and `anomaly_investigation_enabled`: left out, each is saved as `true`. Every change is audited (`settings.autopilot`) and takes effect on the next run.
 
 A rule is renewed only in the last quarter of its TTL, on a 30 second run that publishes at most once every `min_publish_interval`, so `default_ttl` and `max_ttl` must be at least 4 times (30s plus `min_publish_interval`): 6m at the default `min_publish_interval` of 1m. A `PUT` below that is refused with `422`. Stored settings below it are raised to it when read, as is `max_lifetime`. An enforce rule logs only for `observe_for` first, so `default_ttl`, and an enforce proposal's own `ttl`, must also be over `observe_for` plus `min_publish_interval` and 30s (6m30s at the defaults); a shorter one would expire before it blocks.
 
@@ -155,7 +155,10 @@ A rule is renewed only in the last quarter of its TTL, on a 30 second run that p
 | `max_block_share` | 0.02 | 0.001 to 0.2 | The most of the fleet's requests one autopilot rule may block besides its heavy subjects, each at least 5% of a minute's blocks: the collateral. See [Rule states](#rule-states) |
 | `cases_per_hour` | 20 | 1 to 200 | Runs started in the last hour |
 | `min_publish_interval` | 1m | 30s to 15m | Least time from the last autopilot publish of any kind to one that adds or renews rules. Removals don't wait |
-| `model`, `sweep_model` | `claude-opus-5-5` | a model id | The model for cases, and for sweeps and reviews. A model id containing `claude` runs on a runner's `claude` credential; any other on `openai` |
+| `sweep_enabled` | `true` | `true`, `false` | Whether admin opens the hourly sweep. See [Cases](#cases) |
+| `review_enabled` | `true` | `true`, `false` | Whether admin opens the daily review. Off, sensors are not retired to make room for the sweep and notes are not merged; admin still re-checks every note's claim daily |
+| `anomaly_investigation_enabled` | `true` | `true`, `false` | Whether admin opens a case for a firing anomaly. Off, no case opens for an anomaly, so a notification waits only for a case already open on it; see [what the autopilot holds back](../operate/notifications.md#what-the-autopilot-holds-back) |
+| `model`, `sweep_model` | `claude-opus-5-5` | a model id | The model for cases, and for sweeps and reviews. While `sweep_enabled` and `review_enabled` are both `false` and no sweep or review is queued, a missing credential for `sweep_model` raises no warning. A model id containing `claude` runs on a runner's `claude` credential; any other on `openai` |
 | `protected_subjects` | none | up to 200 IPs, CIDRs or AS numbers | Subjects no autopilot rule may block. Each autopilot rule leaves the networks out of its expression on the edges; your own rules still apply to them. Together with the active exclusions, as `not ip.src in {...}`, they must fit in half of an expression (2,000 characters). An AS number is accepted but not yet matched: the stats name subjects by address. Subjects are checked only for a rule whose key includes `ip`, which admin puts first in the key; a rule keyed on a JWT claim alone is not checked |
 
 ## Cases
@@ -167,6 +170,8 @@ A case is one question for the model. Admin opens one:
 - **Review,** daily: retire sensors that never fire or whose cases keep closing benign, and summarize the day.
 - **Investigate** (`POST /api/autopilot/cases`, `autopilot.manage`): a person asks about a rule, route or anomaly, with an optional question, or asks a question alone. Admin also opens one on each rule still enforcing on a note that was [retracted](#re-checks).
 - **Ablation:** a re-run of a case with a confirmed [note](#memory) withheld.
+
+The anomaly cases, the sweep and the review each have a setting that turns them off: `anomaly_investigation_enabled`, `sweep_enabled` and `review_enabled`. Turning one off stops new cases of that kind only. It cancels no case, retires no rule and removes nothing from the active version. Investigate cases, ablations and the cases opened for a retracted note have no setting.
 
 Admin opens cases only while a runner was seen in the last 2 minutes, at most one per target at a time and 100 open at most. A case still queued an hour after it was opened, or after it was last queued again, is cancelled at the next run. A runner takes the oldest queued case whose model's provider it holds a credential for. It holds a case on a 10 minute lease it renews by heartbeat. When the lease lapses, or the run reports `error` or `timeout`, the case is queued again once, then fails. A case that fails or ends `unsure` raises [`autopilot_needs_person`](../operate/notifications.md#signals), and so does one that ends `attack` with no enforce rule accepted, or with one accepted in `observe` mode that no person has approved yet, unless the case's rule is an autopilot rule that already enforces.
 

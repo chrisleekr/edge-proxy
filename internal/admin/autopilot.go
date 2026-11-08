@@ -352,7 +352,20 @@ func (s *Server) autopilotState(ctx context.Context) (*autopilotState, error) {
 	live, creds := s.connected(rs)
 	st := &autopilotState{Mode: set.Mode, AgentConnected: len(live) > 0, Runners: orEmpty(rs), Credentials: creds, Warnings: []string{}, Rules: []ruleView{}}
 	if st.AgentConnected {
-		for _, m := range slices.Compact([]string{set.Model, set.SweepModel}) {
+		models := []string{set.Model}
+		// Only sweeps and reviews run on the sweep model. One queued from
+		// before the setting went off still does, and is refused without the
+		// credential until it is cancelled after an hour.
+		queued := false
+		if !set.SweepEnabled && !set.ReviewEnabled {
+			if err := s.db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM autopilot_cases WHERE kind IN ('sweep', 'review') AND state = 'queued')").Scan(&queued); err != nil {
+				return nil, err
+			}
+		}
+		if set.SweepEnabled || set.ReviewEnabled || queued {
+			models = append(models, set.SweepModel)
+		}
+		for _, m := range slices.Compact(models) {
 			if p := providerOf(m); !creds[p] {
 				st.Warnings = append(st.Warnings, fmt.Sprintf("model %s needs a %s credential, which no connected runner has; cases for it are refused", m, p))
 			}

@@ -18,6 +18,7 @@ Environment variables only. The image's commands:
 | `AUDIT_HMAC_PREVIOUS_KEYS` | none | `id=base64,...` of retired keys, so older rows still verify |
 | `LISTEN_ADDR` | `:8081` | |
 | `ADMIN_INTERNAL_ADDR` | `:9091` | Serves only `GET /metrics` ([Admin metrics](../operate/monitoring.md#admin-metrics)), with no authentication. Never expose it publicly; let only your metrics scraper reach it. Admin exits at start if it can't listen here |
+| `DRAIN_DELAY` | `5s` | After SIGTERM, how long admin keeps serving before it stops accepting connections, so whatever routes to it (a Service, a load balancer) stops sending new ones first. Edge polls that land on a closed listener fail. Must be above zero |
 | `SESSION_IDLE_TIMEOUT` | `30m` | Sign-out after inactivity |
 | `SESSION_MAX_AGE` | `12h` | Sign-out regardless of activity |
 | `PASSWORD_BLOCKLIST_PATH` | none | File of refused passwords, one per line, matched case-insensitively |
@@ -70,6 +71,7 @@ These are not configurable:
 | User token lifetime | At most 365 days |
 | Background jobs | Run on one replica, chosen by a Postgres advisory lock. A second replica takes over within about 10 seconds after the leader's database connection closes |
 | JWKS refresh | Every 10 minutes |
+| Shutdown | On SIGTERM admin keeps serving for `DRAIN_DELAY` (5s), then in-flight requests get up to 10 seconds and buffered stats up to 5 seconds to be written. Set the termination grace period above the sum, plus `TRACE_SHUTDOWN_TIMEOUT` (5s) with tracing on |
 | Audit verification | Incremental every 5 minutes, full every 24 hours |
 | Anomaly checks | Every minute |
 | Retention | 30 days of per-minute stats, **Routes** hours and resolved anomalies. Edges in **Fleet** and routes not seen for 30 days are removed |
