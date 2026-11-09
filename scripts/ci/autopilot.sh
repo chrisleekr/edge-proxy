@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 (
   cd autopilot
   npm ci
-  npx eslint .
+  npx oxlint .
   npx tsc
   npm test
 )

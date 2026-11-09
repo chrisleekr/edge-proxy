@@ -86,7 +86,7 @@ function useRuleCheck(config: Config, key: PhaseKey | undefined, index: number, 
       clearTimeout(t);
     };
     // stamp stands for rule and text, which are new objects every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [stamp, config, key, index]);
   return res?.stamp === stamp && res.config === config ? res : undefined;
 }
@@ -120,7 +120,6 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
   const [query, setQuery] = useState<RuleGroupType>(() => asGroup(existing?.expression ?? start ?? { combinator: 'and', rules: [] }));
   const [rest, setRest] = useState<JsonObject>(() => {
     if (!existing) return p?.blank ?? {};
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { id: _, expression: __, ...r } = existing;
     return r;
   });

@@ -1124,9 +1124,7 @@ Versions compare with the semantic diff; the raw view shows both JSON documents 
   - compare versions
   - revert
   - read the audit log
-- TypeScript strict mode and ESLint in CI.
-
-TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
+- TypeScript strict mode and oxlint in CI.
 
 **Cost to accept:**
 

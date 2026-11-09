@@ -5,6 +5,16 @@ import { Link } from './router';
 // Edges are 1px shadows, not borders, so a button and a field in a row
 // line up exactly. danger is subtle so a row of destructive actions stays quiet; the
 // confirm dialog's final button is the solid one.
+// Render must not read the clock. The tick also keeps expiry labels and countdowns current between fetches.
+export function useNow(ms = 60_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
+
 export function Button({
   variant = 'default',
   className = '',

@@ -6,7 +6,7 @@ import { api, etag, type Json, type Phase, Problem, type Rule, useCan } from '..
 import { draftKey, useDraft, useOptionalDraft } from '../draft';
 import { phases, rulesOf } from '../phases';
 import { Link, navigate } from '../router';
-import { Badge, Button, CanWrite, Card, Editable, ErrorBox, Input, Page, ReadOnlyNote, when } from '../ui';
+import { Badge, Button, CanWrite, Card, Editable, ErrorBox, Input, Page, ReadOnlyNote, useNow, when } from '../ui';
 import { countWords, type Range, RangePicker, ruleCounts, Spark, useRange } from './Fleet';
 
 // Durations arrive as Go writes them ("1m0s"); trailing zero units are noise.
@@ -100,6 +100,7 @@ export function Live({ r, id }: { r: Range; id: string }) {
 }
 
 function Row({ rule, to, phase, live }: { rule: Rule; to: string; phase: Phase; live?: Range | undefined }) {
+  const now = useNow();
   // The condition, rendered by the server, so the list says what each rule
   // matches without opening it. Rendering is deterministic, so it never goes stale.
   const rendered = useQuery({
@@ -120,7 +121,7 @@ function Row({ rule, to, phase, live }: { rule: Rule; to: string; phase: Phase; 
           {rule.id}
         </Link>
         {logOnly(rule) && <Badge tone="amber">log only</Badge>}
-        {expires && <Badge tone="amber">{`${new Date(expires) <= new Date() ? 'expired' : 'expires'} ${when(expires)}`}</Badge>}
+        {expires && <Badge tone="amber">{`${new Date(expires).getTime() <= now ? 'expired' : 'expires'} ${when(expires)}`}</Badge>}
         <span className="text-sm text-body">{summary(rule)}</span>
         {live && (
           <span className="basis-full">
@@ -180,6 +181,7 @@ export function AdoptButton({ id }: { id: string }) {
 // not hold them, so they can't be edited; adopting one copies it into the
 // draft as a rule of your own.
 function AutopilotRules() {
+  const now = useNow();
   const d = useDraft();
   const write = useCan()('config.write');
   const overlay = d.draft.overlay;
@@ -200,7 +202,7 @@ function AutopilotRules() {
                 {rule.id}
               </Link>
               <Badge>autopilot</Badge>
-              {expires && <Badge tone="amber">{`${new Date(expires) <= new Date() ? 'expired' : 'expires'} ${when(expires)}`}</Badge>}
+              {expires && <Badge tone="amber">{`${new Date(expires).getTime() <= now ? 'expired' : 'expires'} ${when(expires)}`}</Badge>}
               <span className="text-sm text-body">{summary(rule)}</span>
               <AdoptButton id={rule.id} />
             </li>

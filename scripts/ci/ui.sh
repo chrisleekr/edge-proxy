@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 (
   cd web/admin
   npm ci
-  npx eslint .
+  npx oxlint .
   npm run build
   npx playwright install --with-deps chromium firefox webkit
 )

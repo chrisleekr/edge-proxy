@@ -111,7 +111,7 @@ configs:
 services:
   # Receives the edges' spans and counts them; nothing is stored.
   collector:
-    image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
+    image: otel/opentelemetry-collector-contrib:0.165.0@sha256:e40d61f10c9a617cca1ffd1be4d7e2b3a4b0f0001798ff07e58cabe82e618cea
     configs: [{ source: collector, target: /etc/otelcol-contrib/config.yaml }]
 
   postgres:
@@ -119,7 +119,7 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+        FROM postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
         COPY postgres-init.sql /docker-entrypoint-initdb.d/init.sql
     environment: { POSTGRES_PASSWORD: postgres }
     healthcheck:

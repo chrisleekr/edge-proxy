@@ -70,7 +70,7 @@ export default function CodeEditor({ value, onChange, label, language }: { value
     });
     return () => view.current?.destroy();
     // The editor is created once; value changes are applied below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-deps
   }, []);
   useEffect(() => {
     const v = view.current;
