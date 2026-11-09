@@ -5,7 +5,7 @@ import { draftKey, useOptionalDraft } from '../draft';
 import { Decimal } from '../GuardForm';
 import { Amount, Choice, Count, Errors, Labeled, Lines, timeUnits } from '../RuleForms';
 import { Link, navigate, useLeaveGuard, useSearch } from '../router';
-import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Input, Modal, NotFound, Notice, Page, Pending, Table, Tabs, ago, when, who } from '../ui';
+import { Badge, Button, Card, Check, ConfirmButton, ErrorBox, Hint, Input, Modal, NotFound, Notice, Page, Pending, Table, Tabs, ago, useNow, when, who } from '../ui';
 import { count, type Range, RangePicker, ruleCounts, Spark, useRange } from './Fleet';
 import { AdoptButton } from './Rules';
 
@@ -294,15 +294,6 @@ const short = (d: string) => d.replace(/(\D)0s$/, '$1').replace(/(\D)0m$/, '$1')
 const json = (v: Json) => JSON.stringify(v, null, 2);
 const seconds = (x: number) => (x % 3600 === 0 ? `${x / 3600}h` : x % 60 === 0 ? `${x / 60}m` : `${x}s`);
 
-// useTick re-renders every interval, so countdowns move between fetches.
-function useTick(ms: number) {
-  const [, set] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => set((x) => x + 1), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-}
-
 // target says what a case is about, linked where it has a page.
 function Target({ c }: { c: CaseRow }) {
   if (c.rule) return <span>rule {c.rule}</span>;
@@ -550,7 +541,7 @@ function KillSwitch({ onClose, onDone }: { onClose: () => void; onDone: () => vo
 }
 
 function LiveRules({ rules, find, range }: { rules: RuleView[]; find: string; range: Range | undefined }) {
-  useTick(15_000);
+  const now = useNow(15_000);
   return (
     <Card
       title="Live rules"
@@ -578,7 +569,7 @@ function LiveRules({ rules, find, range }: { rules: RuleView[]; find: string; ra
               </span>
               {range && <LiveCounts r={range} id={r.id} />}
               {r.expires_at && (
-                <span className={new Date(r.expires_at) <= new Date() ? 'text-warning' : 'text-body'}>
+                <span className={new Date(r.expires_at).getTime() <= now ? 'text-warning' : 'text-body'}>
                   Expires <time title={when(r.expires_at)}>{ago(r.expires_at)}</time>
                 </span>
               )}
@@ -1421,9 +1412,10 @@ const exclusionsQuery = { queryKey: ['autopilot', 'exclusions'], queryFn: () => 
 // Exclusions lists the clients people found legitimate, active and ended
 // in the last 30 days, with Revoke for the active ones.
 function Exclusions({ canManage }: { canManage: boolean }) {
+  const now = useNow();
   const q = useQuery(exclusionsQuery);
   const [revoking, setRevoking] = useState<Exclusion>();
-  const ended = (e: Exclusion) => e.revoked_at !== null || (e.expires_at !== null && new Date(e.expires_at) <= new Date());
+  const ended = (e: Exclusion) => e.revoked_at !== null || (e.expires_at !== null && new Date(e.expires_at).getTime() <= now);
   return (
     <Card
       title="Exclusions"

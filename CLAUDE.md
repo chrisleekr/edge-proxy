@@ -148,8 +148,8 @@ How tests must be written:
 - `make vuln` (`scripts/ci/vuln.sh`): govulncheck.
 - `make fuzz` (`scripts/ci/fuzz.sh`): every fuzz target for `FUZZTIME` (default 20s). Use `FUZZTIME=5m` before merging parser or matcher changes.
 - `make bench` (`scripts/ci/bench.sh`): every benchmark, briefly, so they keep compiling and passing.
-- `make ui` (`scripts/ci/ui.sh`): admin UI `npm ci`, ESLint, typecheck and build, then the Playwright smoke tests against a real admin and Postgres (`TestUISmoke`, run only with `UI_SMOKE=1`) and the edge's SSE, streamed fetch and WebSocket tests in Chromium, Firefox and WebKit (`TestBrowserStreams`, run only with `BROWSER_SMOKE=1`).
-- `make autopilot` (`scripts/ci/autopilot.sh`): runner `npm ci`, ESLint, typecheck and unit tests, then `TestAutopilotRunner` (run only with `AUTOPILOT_RUNNER=1`): the real runner with a scripted adapter against a real admin and Postgres.
+- `make ui` (`scripts/ci/ui.sh`): admin UI `npm ci`, oxlint, typecheck and build, then the Playwright smoke tests against a real admin and Postgres (`TestUISmoke`, run only with `UI_SMOKE=1`) and the edge's SSE, streamed fetch and WebSocket tests in Chromium, Firefox and WebKit (`TestBrowserStreams`, run only with `BROWSER_SMOKE=1`).
+- `make autopilot` (`scripts/ci/autopilot.sh`): runner `npm ci`, oxlint, typecheck and unit tests, then `TestAutopilotRunner` (run only with `AUTOPILOT_RUNNER=1`): the real runner with a scripted adapter against a real admin and Postgres.
 - `make screenshots` (`scripts/ci/screenshots.sh`): renders the admin pages shown in the docs from fixed data in a pinned Playwright browser in Docker and fails when any differs from `docs/assets/screenshots`; `scripts/ci/screenshots.sh update` rewrites them. It runs inside `make ui`.
 - `make docs` (`scripts/ci/docs.sh`): strict MkDocs build; broken links, anchors and pages missing from the nav fail it. Docs state only what the code does; check a claim against the code before writing it.
 - `make demo` / `make demo-down`: the local demo used by the Get started guide (load-test compose, one edge).

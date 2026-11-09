@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "lint": "eslint .",
+    "lint": "oxlint .",
     "typecheck": "tsc",
     "test": "node --test test/*.test.ts",
     "replay": "node src/replay.ts"
@@ -17,11 +17,9 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@eslint/js": "10.0.1",
     "@types/node": "26.6.6",
-    "eslint": "10.14.0",
-    "globals": "17.14.0",
-    "typescript": "6.0.3",
-    "typescript-eslint": "8.72.1"
+    "oxlint": "1.92.0",
+    "oxlint-tsgolint": "7.0.2006",
+    "typescript": "6.0.3"
   }
 }
