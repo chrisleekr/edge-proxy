@@ -15,11 +15,11 @@ import (
 
 // PlaywrightVersion matches @playwright/test in web/admin/package.json; the
 // client and the server must be the same release.
-const PlaywrightVersion = "1.64.1"
+const PlaywrightVersion = "1.65.0"
 
 // PlaywrightImage is the browser server for PlaywrightVersion. It runs as
 // amd64 so screenshots taken on an arm64 Mac render as on the CI runners.
-const PlaywrightImage = "mcr.microsoft.com/playwright:v1.64.1-noble"
+const PlaywrightImage = "mcr.microsoft.com/playwright:v1.65.0-noble"
 
 // PlaywrightServer starts a Playwright browser server in Docker and returns
 // its WebSocket endpoint.
