@@ -1126,8 +1126,6 @@ Versions compare with the semantic diff; the raw view shows both JSON documents 
   - read the audit log
 - TypeScript strict mode and oxlint in CI.
 
-TypeScript is pinned to 6.0.x because typescript-eslint 8.71 supports `<6.1.0`.
-
 **Cost to accept:**
 
 - Go developers need some TypeScript and React.
