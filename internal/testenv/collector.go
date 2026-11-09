@@ -16,7 +16,7 @@ import (
 )
 
 // CollectorImage is the OpenTelemetry Collector with the file exporter.
-const CollectorImage = "otel/opentelemetry-collector-contrib:0.164.0"
+const CollectorImage = "otel/opentelemetry-collector-contrib:0.165.0"
 
 // collectorConfig receives OTLP/HTTP and appends every batch to a file,
 // which is read back through the Docker API, so the helper also works

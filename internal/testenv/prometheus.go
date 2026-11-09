@@ -16,8 +16,8 @@ import (
 )
 
 // PrometheusImage is pinned by digest, from
-// https://hub.docker.com/r/prom/prometheus/tags (v3.15.1 manifest list).
-const PrometheusImage = "prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2"
+// https://hub.docker.com/r/prom/prometheus/tags (v3.16.0 manifest list).
+const PrometheusImage = "prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06"
 
 // prometheusConfig scrapes Prometheus itself every second, so `up` and the
 // prometheus_* series exist within seconds of start.
