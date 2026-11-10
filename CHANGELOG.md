@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0](https://github.com/chrisleekr/edge-proxy/compare/v1.1.0...v1.2.0) (2026-11-10)
+
+
+### Features
+
+* **admin:** add attention acks, autopilot case switches and DRAIN_DELAY ([#24](https://github.com/chrisleekr/edge-proxy/issues/24)) ([b87d807](https://github.com/chrisleekr/edge-proxy/commit/b87d807fac7aafe5a72c5654b19e96a2db375e4f))
+* **edge:** add trusted client allowlist (snapshot schema 6) ([#23](https://github.com/chrisleekr/edge-proxy/issues/23)) ([78673bd](https://github.com/chrisleekr/edge-proxy/commit/78673bd62e14c578a6fb42e3ecc1e7ed6540675a))
+* **ui:** rework admin navigation and add allowlist, autopilot and attention controls ([#25](https://github.com/chrisleekr/edge-proxy/issues/25)) ([c4a5d07](https://github.com/chrisleekr/edge-proxy/commit/c4a5d0778533a351465f8c37850106f489b0674c))
+
+
+### Bug Fixes
+
+* **loadtest:** replace config_rules in the autopilot load-full setup ([#21](https://github.com/chrisleekr/edge-proxy/issues/21)) ([feeabbb](https://github.com/chrisleekr/edge-proxy/commit/feeabbb27e5fb5baf6719ae1485952859ea95005))
+
 ## [1.1.0](https://github.com/chrisleekr/edge-proxy/compare/v1.0.0...v1.1.0) (2026-11-03)
 
 
