@@ -44,6 +44,7 @@ func (s *Server) edgeRoutes() {
 	s.handle("GET /v1/snapshot", permEdge, s.snapshot)
 	s.handle("POST /v1/edge/report", permEdge, s.report)
 	s.handle("GET /api/fleet", "stats.read", s.fleet)
+	s.handle("GET /api/verified-bots", "stats.read", s.verifiedBots)
 	s.handle("GET /api/stats", "stats.read", s.stats)
 }
 
@@ -425,8 +426,11 @@ func (a *aggregator) take(now time.Time) map[aggKey]*minuteAgg {
 // flush writes every minute held in one batch, the current one so far
 // included, so stats are at most one flush behind. Each write replaces the
 // row with the minute's running sum. On failure finished minutes are
-// dropped: stats never block or grow memory.
+// dropped: stats never block or grow memory. A hung Postgres must not stall
+// the flush loop, so each write gives up after flushTimeout.
 func (s *Server) flush(ctx context.Context, now time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, flushTimeout)
+	defer cancel()
 	done := s.agg.take(now)
 	if len(done) == 0 {
 		return nil
@@ -487,6 +491,43 @@ func (s *Server) fleet(w http.ResponseWriter, r *http.Request, _ *principal) err
 		return it, err
 	})
 	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, list)
+}
+
+// verifiedBots lists every configured crawler range source with its refresh
+// status, in configuration order, including a source never fetched.
+func (s *Server) verifiedBots(w http.ResponseWriter, r *http.Request, _ *principal) error {
+	n, err := loadNotify(r.Context(), s.db)
+	if err != nil {
+		return err
+	}
+	rows, err := s.db.Query(r.Context(), `SELECT u.src, COALESCE(jsonb_array_length(b.prefixes), 0), b.fetched_at, COALESCE(t.last_success_at, b.fetched_at), t.last_attempt_at, COALESCE(t.failures, 0), t.last_error
+		FROM unnest($1::text[]) WITH ORDINALITY AS u(src, ord)
+		LEFT JOIN verified_bot_sets b ON b.source_url = u.src
+		LEFT JOIN verified_bot_status t ON t.source_url = u.src
+		ORDER BY u.ord`, s.cfg.VerifiedBotSources)
+	if err != nil {
+		return err
+	}
+	type item struct {
+		Source          string     `json:"source"`
+		Prefixes        int        `json:"prefixes"`
+		RangesChangedAt *time.Time `json:"ranges_changed_at"`
+		LastSuccessAt   *time.Time `json:"last_success_at"`
+		LastAttemptAt   *time.Time `json:"last_attempt_at"`
+		Failures        uint64     `json:"failures"`
+		LastError       *string    `json:"last_error"`
+		Stale           bool       `json:"stale"`
+	}
+	list := []item{}
+	var it item
+	if _, err := pgx.ForEachRow(rows, []any{&it.Source, &it.Prefixes, &it.RangesChangedAt, &it.LastSuccessAt, &it.LastAttemptAt, &it.Failures, &it.LastError}, func() error {
+		it.Stale = it.Failures >= n.staleAfter()
+		list = append(list, it)
+		return nil
+	}); err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, list)

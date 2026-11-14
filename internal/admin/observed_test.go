@@ -458,11 +458,12 @@ func TestPatternsGroupSiblingRoutes(t *testing.T) {
 }
 
 type flowView struct {
-	Version *int64                 `json:"version"`
-	Draft   bool                   `json:"draft"`
-	Sample  TestRequest            `json:"sample"`
-	Result  SimView                `json:"result"`
-	Rules   map[string][]ruleMatch `json:"rules"`
+	Version   *int64                 `json:"version"`
+	Draft     bool                   `json:"draft"`
+	Sample    TestRequest            `json:"sample"`
+	Result    SimView                `json:"result"`
+	Rules     map[string][]ruleMatch `json:"rules"`
+	BlockRule string                 `json:"block_rule"`
 }
 
 // A new, broader pattern leaves routes a more specific pattern groups.
@@ -531,6 +532,43 @@ func TestRouteFlowExplainsEveryRule(t *testing.T) {
 	}
 	status(t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=abc", id), nil), http.StatusBadRequest)
 	status(t, pub.do("GET", "/api/observed-routes/999999/flow", nil), http.StatusNotFound)
+}
+
+// The flow names the rule whose block setting applies from the config it
+// simulated, which is the last matched rule that sets one, not the last
+// matched rule.
+func TestRouteFlowNamesTheBlockRule(t *testing.T) {
+	users := mustParse(`starts_with(http.request.uri.path, "/users/")`)
+	for _, c := range []struct {
+		name  string
+		rules []snapshot.ConfigRule
+		want  string
+	}{
+		{"a block rule followed by a rule that sets no block", []snapshot.ConfigRule{
+			{ID: "users-block", Expression: users, Settings: snapshot.Settings{Block: new("block")}},
+			{ID: "users-limit", Expression: users, Settings: snapshot.Settings{BodyLimit: new(int64(512))}},
+		}, "users-block"},
+		{"a later block rule replaces an earlier one", []snapshot.ConfigRule{
+			{ID: "users-block", Expression: users, Settings: snapshot.Settings{Block: new("block")}},
+			{ID: "users-log", Expression: users, Settings: snapshot.Settings{Block: new("log")}},
+		}, "users-log"},
+		{"no matched rule sets block", []snapshot.ConfigRule{
+			{ID: "users-limit", Expression: users, Settings: snapshot.Settings{BodyLimit: new(int64(512))}},
+		}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, pub := published(t)
+			status(t, h.shipper().post(access("GET", "api.example.com", "/users/7")), http.StatusAccepted)
+			id := find(h.routes(pub), "GET", "api.example.com", "/users/{id}").ID
+			cfg := testConfig()
+			cfg.ConfigRules = append(cfg.ConfigRules, c.rules...)
+			status(t, pub.save(pub.revision(), cfg, adminTest), 200)
+			f := decode[flowView](t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=draft", id), nil))
+			if f.BlockRule != c.want {
+				t.Fatalf("block_rule = %q, want %q (matched %v)", f.BlockRule, c.want, f.Result.ConfigRules)
+			}
+		})
+	}
 }
 
 // The route flow simulates the config-test default client, 192.0.2.1. When

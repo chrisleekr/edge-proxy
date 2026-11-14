@@ -192,7 +192,10 @@ const botsMaxBytes = 512 << 10
 // refreshBots fetches every VERIFIED_BOT_SOURCES list. Only a changed set is
 // written, and that change is audited; a source no longer configured is
 // dropped. A failed fetch keeps the last good set: losing it would turn
-// every crawler exemption off.
+// every crawler exemption off. Each attempt is recorded per source, so a
+// source that keeps failing shows up. A fetch or parse failure is reported
+// through that status and its anomaly; only a Postgres failure is returned,
+// after the other sources are done, so the job's failure counter counts it.
 func (s *Server) refreshBots(ctx context.Context) error {
 	srcs := s.cfg.VerifiedBotSources
 	// One goroutine per source, at most MaxBotSources as LoadConfig checks,
@@ -204,36 +207,75 @@ func (s *Server) refreshBots(ctx context.Context) error {
 		wg.Go(func() { fetched[i], errs[i] = s.fetchBotSource(ctx, src) })
 	}
 	wg.Wait()
+	var failed []error
 	// Written one after another, so the audit chain stays in order.
 	for i, src := range srcs {
 		err := errs[i]
-		if err == nil {
-			err = s.storeBotSource(ctx, src, fetched[i])
-		}
 		if err != nil {
 			s.log.Warn("verified bot ranges fetch failed; keeping the last good set", "source", src, "error", err.Error())
+		} else if err = s.storeBotSource(ctx, src, fetched[i]); err != nil {
+			// Postgres failed, not the source: its status stays as it was.
+			failed = append(failed, fmt.Errorf("verified bot source %s: %w", src, err))
+			continue
 		}
+		if err := s.recordBotRefresh(ctx, src, err); err != nil {
+			failed = append(failed, fmt.Errorf("verified bot source %s: %w", src, err))
+		}
+	}
+	// Status is telemetry, so a source taken out of configuration loses it
+	// without an audit row; the removal of its ranges is audited below.
+	if _, err := s.db.Exec(ctx, "DELETE FROM verified_bot_status WHERE NOT source_url = ANY(COALESCE($1::text[], '{}'))", srcs); err != nil {
+		failed = append(failed, err)
 	}
 	rows, err := s.db.Query(ctx, "SELECT source_url FROM verified_bot_sets")
 	if err != nil {
-		return err
+		return errors.Join(append(failed, err)...)
 	}
 	stored, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return err
+		return errors.Join(append(failed, err)...)
 	}
 	for _, src := range stored {
-		if slices.Contains(s.cfg.VerifiedBotSources, src) {
+		if slices.Contains(srcs, src) {
 			continue
 		}
 		if err := s.change(ctx, "system:verified_bots", func(tx pgx.Tx) (admindb.Event, error) {
 			_, err := tx.Exec(ctx, "DELETE FROM verified_bot_sets WHERE source_url = $1", src)
 			return admindb.Event{Action: "verified_bots.removed", Target: src}, err
 		}); err != nil {
-			return err
+			failed = append(failed, fmt.Errorf("verified bot source %s: %w", src, err))
 		}
 	}
-	return nil
+	return errors.Join(failed...)
+}
+
+// maxBotError bounds a stored error: it can quote the remote list.
+const maxBotError = 300
+
+// boundErr is err's text made storable and cut to maxBotError characters: a
+// TLS hostname error copies certificate names, which may hold a NUL that
+// Postgres text refuses, and a parse error can quote a long entry of the
+// remote list.
+func boundErr(err error) string {
+	msg := strings.ToValidUTF8(strings.ReplaceAll(err.Error(), "\x00", ""), "\uFFFD")
+	if r := []rune(msg); len(r) > maxBotError {
+		msg = string(r[:maxBotError])
+	}
+	return msg
+}
+
+// recordBotRefresh stores the outcome of one attempt: a success resets the
+// failures in a row, even when the ranges did not change.
+func (s *Server) recordBotRefresh(ctx context.Context, src string, failed error) error {
+	now := s.now()
+	if failed == nil {
+		_, err := s.db.Exec(ctx, `INSERT INTO verified_bot_status (source_url, last_attempt_at, last_success_at, failures, last_error) VALUES ($1, $2, $2, 0, NULL)
+			ON CONFLICT (source_url) DO UPDATE SET last_attempt_at = $2, last_success_at = $2, failures = 0, last_error = NULL`, src, now)
+		return err
+	}
+	_, err := s.db.Exec(ctx, `INSERT INTO verified_bot_status (source_url, last_attempt_at, failures, last_error) VALUES ($1, $2, 1, $3)
+		ON CONFLICT (source_url) DO UPDATE SET last_attempt_at = $2, failures = verified_bot_status.failures + 1, last_error = $3`, src, now, boundErr(failed))
+	return err
 }
 
 func (s *Server) fetchBotSource(ctx context.Context, src string) ([]string, error) {

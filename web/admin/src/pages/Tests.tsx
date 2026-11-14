@@ -193,7 +193,7 @@ function SimResult({ r }: { r: Sim }) {
 // reason the simulator reports.
 const rejections: Record<string, string> = {
   method: 'rejected with 400: the method is not in upper case',
-  path: 'rejected with 400: the path is malformed or has an ambiguous encoding such as %2F',
+  path: 'rejected with 400: the path is malformed or has an ambiguous encoding such as %5C or a .. segment',
   auth: 'rejected with 401: the route requires a valid token',
   blocked: 'rejected with 403: an access rule blocks the request',
   rate_limit_key: 'rejected with 400: a rate limit rule needs a key part the request lacks',

@@ -394,6 +394,10 @@ test('routes from access logs are found, explained, grouped and deleted', async 
 
   await rows.first().getByRole('link').click();
   await expect(page.getByText('Shown for a request like POST api.example.com/login')).toBeVisible();
+  // The Block step must say so when no access rule blocks the sample, and the flow goes on.
+  const blockStep = page.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Block', exact: true }) });
+  await expect(blockStep).toContainText('Not blocked: no access rule that matches the sample sets block.');
+  await expect(page.getByRole('heading', { name: 'Upstream', exact: true })).toBeVisible();
   await expect(page.getByText('Logged: 2 requests (20%) were blocked by a rate limit.')).toBeVisible();
   await page.getByRole('button', { name: 'Add rule for this route' }).click();
   await page.getByRole('dialog').getByRole('button', { name: /^Rate limit rule/ }).click();
@@ -520,6 +524,34 @@ test('an access rule set to block saves, and the block kill switch saves with it
   await expect(page.getByLabel('Disable blocking by access rules')).toBeChecked();
   await nav('Rules');
   await expect(page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'block-tools', exact: true }) })).toContainText('blocks with 403');
+});
+
+test('a route flow names the access rule that blocks or would block its sample, and a block ends the flow there', async () => {
+  const flow = async () => {
+    await nav('Routes');
+    await page.locator('tbody tr').filter({ hasText: '/login' }).getByRole('link').click();
+    await page.getByRole('group', { name: 'Policy to show' }).getByRole('button', { name: 'Saved draft' }).click();
+  };
+  const blockStep = page.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Block', exact: true }) });
+  // Flipping the kill switch in the draft is the only way to see both outcomes of one rule.
+  const killSwitch = async () => {
+    await nav('Settings');
+    await page.getByText('Disable blocking by access rules').click();
+    await page.getByRole('button', { name: 'Save draft' }).click();
+    await expect(page.getByRole('status').filter({ hasText: /Saved revision \d+/ })).toBeVisible();
+  };
+  // The previous test left block-tools (matches every request) in the draft with the kill switch on.
+  await flow();
+  await expect(blockStep).toContainText('Only logged as one access rule block-tools would block; it goes on to the next steps.');
+  await expect(blockStep.getByRole('link', { name: 'block-tools', exact: true })).toHaveAttribute('href', '/rules/config/block-tools');
+  await expect(page.getByRole('heading', { name: 'Upstream', exact: true })).toBeVisible();
+  await killSwitch(); // off
+  await flow();
+  await expect(blockStep).toContainText('Access rule block-tools answers this request with 403.');
+  await expect(blockStep.getByRole('link', { name: 'block-tools', exact: true })).toHaveAttribute('href', '/rules/config/block-tools');
+  await expect(page.getByText('This sample request stops here: Blocked by an access rule.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Backstop', exact: true })).toHaveCount(0);
+  await killSwitch(); // back on, as the previous test left it
 });
 
 test('a time range picked on Stats holds on Routes, after going back, and after a reload', async () => {
@@ -1196,7 +1228,11 @@ test('fleet hides gone edges until asked', async () => {
   // Gone edges first, to show the table puts the reporting edge on top.
   await page.route('**/api/fleet', (r) => r.fulfill({ json: [edge('edge-gone-a', false, 3_600_000), edge('edge-gone-b', false, 7_200_000), edge('edge-live', true, 5_000)] }));
   try {
+    // This admin sets no VERIFIED_BOT_SOURCES, so once its answer is in, the crawler card stays away.
+    const crawlers = page.waitForResponse('**/api/verified-bots');
     await page.goto('/fleet');
+    await crawlers;
+    await expect(page.getByRole('heading', { name: 'Verified crawler ranges' })).toHaveCount(0);
     const rows = page.locator('tbody tr');
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toContainText('edge-live');
@@ -1207,6 +1243,117 @@ test('fleet hides gone edges until asked', async () => {
     await expect(rows.nth(1)).toContainText('gone');
   } finally {
     await page.unroute('**/api/fleet');
+  }
+});
+
+const crawlerRows = () => {
+  const at = Date.now();
+  const iso = (ago: number) => new Date(at - ago).toISOString();
+  const row = (source: string, o: object) => ({ source, prefixes: 0, ranges_changed_at: null, last_success_at: null, last_attempt_at: iso(60_000), failures: 0, last_error: null, stale: false, ...o });
+  return [
+    row('https://ranges.example/refreshing.json', { prefixes: 1, last_success_at: iso(60_000) }),
+    row('https://ranges.example/failing.json', { prefixes: 1500, last_success_at: iso(3_600_000), failures: 1, last_error: 'source fetch: status 503' }),
+    row('https://ranges.example/stale.json', { prefixes: 12, last_success_at: iso(86_400_000), failures: 5, last_error: 'dial tcp: i/o timeout', stale: true }),
+    row('https://ranges.example/never.json', { failures: 4, last_error: 'no such host', stale: true }),
+    row('https://ranges.example/new.json', { last_attempt_at: null }),
+    // Ranges stored before refresh status was recorded: in use, with no attempt recorded yet.
+    row('https://ranges.example/upgraded.json', { prefixes: 40, ranges_changed_at: iso(7_200_000), last_success_at: iso(7_200_000), last_attempt_at: null }),
+  ];
+};
+
+test('fleet lists crawler range sources with their state in words', async () => {
+  const size = page.viewportSize()!;
+  await page.route('**/api/verified-bots', (r) => r.fulfill({ json: crawlerRows() }));
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/fleet', { waitUntil: 'networkidle' });
+    const card = page.locator('#crawler-ranges');
+    await expect(card.getByRole('heading', { name: 'Verified crawler ranges', exact: true })).toBeVisible();
+    const row = (source: string) => card.getByRole('row').filter({ hasText: source });
+    const badge = (source: string) => row(source).locator('td[data-label="State"]');
+    await expect(badge('refreshing.json')).toHaveText('refreshing');
+    await expect(badge('failing.json')).toHaveText('failing');
+    await expect(badge('stale.json')).toHaveText('stale');
+    await expect(badge('never.json')).toHaveText('never fetched');
+    await expect(badge('new.json')).toHaveText('not fetched yet');
+    await expect(badge('upgraded.json')).toHaveText('refreshing');
+    await expect(row('refreshing.json')).toContainText('1 prefix');
+    await expect(row('failing.json')).toContainText('1,500 prefixes');
+    await expect(row('failing.json')).toContainText('Last error: source fetch: status 503');
+    await expect(row('never.json')).toContainText('none');
+    await expect(row('never.json')).toContainText('Last error: no such host');
+    await expect(row('new.json')).toContainText('not yet');
+    await expect(row('refreshing.json')).not.toContainText('Last error');
+    const notice = card.getByRole('status');
+    await expect(notice).toContainText('1 stale source: requests from addresses in its last good ranges still count as verified crawlers');
+    await expect(notice).toContainText('A source never fetched counts no address as its crawler');
+    const sideways = () =>
+      page.evaluate(() => ({
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        boxes: [...document.querySelectorAll('.overflow-x-auto')].filter((e) => e.scrollWidth > e.clientWidth).length,
+      }));
+    expect(await sideways()).toEqual({ page: 0, boxes: 0 });
+    const { violations } = await new AxeBuilder({ page }).analyze();
+    expect(violations.filter((v) => v.impact === 'serious' || v.impact === 'critical').map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(card.locator('td[data-label="Failures in a row"]').first()).toBeVisible();
+    await expect(card.locator('thead')).toBeHidden();
+    expect((await sideways()).page).toBe(0);
+  } finally {
+    await page.unroute('**/api/verified-bots');
+    await page.setViewportSize(size);
+  }
+});
+
+test('fleet shows an error when crawler range status cannot load', async () => {
+  await page.route('**/api/verified-bots', (r) => r.fulfill({ status: 500, contentType: 'application/problem+json', body: JSON.stringify({ title: 'crawler status unavailable' }) }));
+  try {
+    await page.goto('/fleet');
+    await expect(page.locator('#crawler-ranges').getByRole('alert')).toContainText(/crawler status unavailable/i);
+  } finally {
+    await page.unroute('**/api/verified-bots');
+  }
+});
+
+test('notification settings list stale crawler ranges under Whole fleet', async () => {
+  await page.goto('/notifications?tab=settings');
+  const fleet = page.getByRole('heading', { name: 'Whole fleet', exact: true }).locator('xpath=following-sibling::ul[1]');
+  await expect(fleet.getByRole('listitem').filter({ hasText: 'Verified crawler ranges stopped refreshing' }).getByLabel('Failed refreshes in a row')).toBeVisible();
+});
+
+test('an anomaly on a crawler source or an autopilot case names its subject', async () => {
+  const at = new Date().toISOString();
+  const source = 'https://ranges.example/googlebot.json';
+  const anomaly = (id: number, signal: string, rule: string, phase: string) => ({
+    id, signal, rule, phase, severity: 'warning', state: 'firing', tripped: 2, passed: 0, started_at: at, fired_at: at, resolved_at: null, notified_at: null,
+    summary: `Summary of ${rule || signal}`, case_id: null, case_state: null, case_verdict: null, withheld: '',
+  });
+  await page.route('**/api/anomalies', (r) =>
+    r.fulfill({ json: { alertmanager: false, anomalies: [anomaly(931, 'verified_bots_stale', source, 'verified_bots'), anomaly(932, 'autopilot_needs_person', 'case 12', 'autopilot'), anomaly(933, 'traffic_surge', '', '')] } }),
+  );
+  await page.route('**/api/verified-bots', (r) => r.fulfill({ json: crawlerRows() }));
+  try {
+    await page.goto('/notifications');
+    const crawler = page.getByRole('row').filter({ hasText: `Summary of ${source}` });
+    await expect(crawler).toContainText(`Verified crawler ranges stopped refreshing for source ${source}`);
+    const own = page.getByRole('row').filter({ hasText: 'Summary of case 12' });
+    await expect(own).toContainText('for case 12');
+    await expect(own).not.toContainText('rule case 12');
+    await expect(crawler.getByRole('button', { name: 'Investigate' })).toHaveCount(0);
+    await expect(own.getByRole('button', { name: 'Investigate' })).toHaveCount(0);
+    // Positive control: a traffic anomaly offers it, so the absences above are not a missing permission.
+    await expect(page.getByRole('row').filter({ hasText: 'Summary of traffic_surge' }).getByRole('button', { name: 'Investigate' })).toBeVisible();
+
+    await page.goto('/');
+    const item = page.getByRole('region', { name: 'Needs attention' }).getByRole('listitem').filter({ hasText: source });
+    await expect(item).toContainText(`for source ${source}`);
+    await item.getByRole('link', { name: 'Fleet', exact: true }).click();
+    await expect(page).toHaveURL(/\/fleet(\?[^#]*)?#crawler-ranges$/);
+    await expect(page.locator('#crawler-ranges')).toBeInViewport();
+  } finally {
+    await page.unroute('**/api/anomalies');
+    await page.unroute('**/api/verified-bots');
   }
 });
 

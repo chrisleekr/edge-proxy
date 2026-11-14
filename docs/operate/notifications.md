@@ -1,11 +1,12 @@
 # Notifications
 
-Admin checks the edges' stats every minute for anomalies and sends each one to [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/), which groups, silences and routes it (to Slack, email or a pager). It covers the whole fleet and every rule. The edges do nothing extra for it: they already count each rule's requests and outcomes in their stats reports.
+Admin checks the edges' stats, the autopilot's state and each crawler source's refresh status every minute for anomalies and sends each one to [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/), which groups, silences and routes it (to Slack, email or a pager). It covers the whole fleet, every rule, the autopilot and each [crawler range source](../use/bots.md). The edges do nothing extra for it: they already count each rule's requests and outcomes in their stats reports.
 
 ```mermaid
 flowchart LR
   Edges["Edges<br/>count per rule"] -->|"stats every 10s"| Admin["Admin<br/>per-minute stats"]
   Admin --> Check["Check every minute<br/>last window vs baseline"]
+  State["Autopilot state and<br/>crawler refresh status"] --> Check
   Settings["Notification settings<br/>defaults and per-rule"] --> Check
   Check -->|"firing and resolved"| AM["Alertmanager"]
   AM --> Receivers["Slack, email, pager"]
@@ -36,11 +37,11 @@ One cause notifies once. Per-rule checks are measured against the fleet in the s
 
 On **Notifications**, and in **Needs attention** on the dashboard, a rule anomaly that is open while its fleet signal is open too, such as `rule_upstream_5xx_ratio` with `upstream_5xx_ratio`, is listed under the fleet anomaly. The pairs are the edge 5xx, upstream 5xx and auth failure ratios, `rule_match_surge` with `traffic_surge`, and `rule_stopped_matching` with `traffic_drop`.
 
-Firing and resolving are written to the audit log (`anomaly.fire`, `anomaly.resolve`), and admin logs `anomaly firing` and `anomaly resolved`. Resolved anomalies are kept for 30 days.
+Firing and resolving are written to the audit log (`anomaly.fire`, `anomaly.resolve`) with the subject as target: `fleet`, `rule <id>`, `source <url>`, or the autopilot's `case <n>` or `note <n>`. Admin logs `anomaly firing` and `anomaly resolved`. Resolved anomalies are kept for 30 days.
 
 With `LOG_SEARCH_URL` set ([admin settings](../deploy/admin.md)), each anomaly on **Notifications** has **Search the logs**, which opens your log store from when it started to when it resolved. An anomaly has no status code or host, so a template that uses `{status}` or `{host}` shows no link here.
 
-With `autopilot.manage`, each open anomaly on **Notifications** has **Investigate**, which asks the [autopilot](../use/autopilot.md#cases) about it and opens the case.
+With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** has **Investigate** (not the autopilot's own or a crawler source's), which asks the [autopilot](../use/autopilot.md#cases) about it and opens the case.
 
 ## Signals
 
@@ -80,11 +81,19 @@ With `autopilot.manage`, each open anomaly on **Notifications** has **Investigat
 | `autopilot_needs_person` | A case closed `unsure` or failed in the last hour, or closed `attack` with no enforce rule accepted on it, or with one accepted in `observe` mode that no person has approved yet; not for an attack on an autopilot rule that already enforces | warning |
 | `autopilot_note_contested` | An ablation case, re-run without a confirmed [note](../use/autopilot.md#re-checks), got another verdict in the last hour; one anomaly per note | warning |
 
+**Verified crawler ranges**, from the refresh status of each [`VERIFIED_BOT_SOURCES`](../deploy/admin.md#variables) list. It has no per-rule setting and holds while its condition does.
+
+| Signal | Trips when (defaults) | Severity |
+|---|---|---|
+| `verified_bots_stale` | Shown as **Verified crawler ranges stopped refreshing**. A source's last `min_events` refreshes in a row failed (3), counting failures since its last success. Admin refreshes each list about every 10 minutes and again when a replica takes over as leader. One anomaly per configured source | warning |
+
+Its anomaly names the source: the URL is the `rule` label in Alertmanager, with `phase=verified_bots`, and the audit target is `source <url>`. The summary says how many refreshes failed and when the last one succeeded, and leaves out the error the source returned; that shows on **Fleet** under [Verified crawler ranges](../use/dashboard.md#fleet-and-stats). It resolves at the next check after a refresh succeeds, or once the source is removed from `VERIFIED_BOT_SOURCES`. While it holds, edges keep matching the last good ranges, so addresses that provider no longer owns still count as verified crawlers. It works with the autopilot off, is never held back for the autopilot, and the autopilot cannot investigate it: **Investigate** is hidden for it and the API refuses a case on it.
+
 A request matched by a config or request-header rule counts toward that rule's outcome; request-header rules only see requests that reach the upstream. Rate-limit rules count every request their expression matched. The client counts behind `rule_subject_dominates` are estimated from a sample, as on **Stats**.
 
 ## Per-rule settings
 
-Each rule can replace a signal's settings: turn it off, change its severity, or set its own thresholds. A rule's setting replaces the default for that rule and signal only; fleet signals have no per-rule setting. Settings for a rule ID no longer in the policy stay saved and are shown as unused.
+Each rule can replace a signal's settings: turn it off, change its severity, or set its own thresholds. A rule's setting replaces the default for that rule and signal only; fleet signals have no per-rule setting, and neither does `verified_bots_stale`. Settings for a rule ID no longer in the policy stay saved and are shown as unused.
 
 Notification settings are saved on their own, apart from the draft, like the rollback guard's, and carry an **Applies when saved** badge: changing them needs `settings.manage`, needs no publish, and takes effect at the next check. Every change is audited (`settings.notifications`).
 
@@ -98,9 +107,9 @@ Each alert is named after its signal (`rule_block_spike` is `EdgeProxyRuleBlockS
 | `service` | `edge-proxy` |
 | `signal` | The signal |
 | `severity` | `critical`, `warning` or `info`, as set when the anomaly fired; a later change applies from its next firing |
-| `rule`, `phase` | The rule's ID and phase; fleet alerts have neither |
+| `rule`, `phase` | The rule's ID and phase, or for an autopilot case, note or crawler source the subject and its phase (`autopilot`, `verified_bots`); fleet alerts have neither |
 
-Annotations: `summary` names the signal and rule, and `description` gives the numbers, such as "Blocked 31.0% of the requests it checked in the last 5 minutes, against 1.0% in the hour before".
+Annotations: `summary` names the signal and its subject, and `description` gives the numbers, such as "Blocked 31.0% of the requests it checked in the last 5 minutes, against 1.0% in the hour before".
 
 Admin sends firing alerts every minute with an end three minutes ahead, as [Alertmanager expects of clients](https://prometheus.io/docs/alerting/latest/alerts_api/). If Alertmanager doesn't answer, admin logs `background job failed` and sends again at the next check; nothing queues. **Notifications** shows when Alertmanager last accepted each anomaly.
 
@@ -116,4 +125,4 @@ While the [autopilot](../use/autopilot.md) is on and a runner was seen in the la
 
 With `anomaly_investigation_enabled` off, admin opens no case for an anomaly, so an autopilot rule's anomalies are not held back as its own rule, and an anomaly waits only for a case already open on it, such as one a person opened.
 
-A critical anomaly is never held back, and nothing is while the autopilot is off or no runner is connected. An anomaly already sent keeps being sent until it resolves, whatever its case concludes.
+A critical anomaly is never held back, nor is an autopilot or crawler range anomaly, and nothing is while the autopilot is off or no runner is connected. An anomaly already sent keeps being sent until it resolves, whatever its case concludes.

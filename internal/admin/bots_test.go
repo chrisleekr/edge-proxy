@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chrisleekr/edge-proxy/internal/jwks"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"github.com/chrisleekr/edge-proxy/internal/testenv"
 )
 
 const (
@@ -649,5 +652,514 @@ func TestConfigTestsSetJA4AndHTTPVersion(t *testing.T) {
 	}}))
 	if !slices.Equal(sim.ConfigRules, []string{"old-tls", "http1"}) {
 		t.Fatalf("simulate %+v", sim)
+	}
+}
+
+// crawlerState is one verified_bot_status row, read with raw SQL so the tests
+// stay independent of how admin names its own types.
+type crawlerState struct {
+	attempt  time.Time
+	success  *time.Time
+	failures int
+	lastErr  *string
+}
+
+func (h *harness) crawlerStatus(src string) crawlerState {
+	h.t.Helper()
+	var st crawlerState
+	err := h.db.QueryRow(h.t.Context(), "SELECT last_attempt_at, last_success_at, failures, last_error FROM verified_bot_status WHERE source_url = $1", src).
+		Scan(&st.attempt, &st.success, &st.failures, &st.lastErr)
+	if err != nil {
+		h.t.Fatalf("status row for %s: %v", src, err)
+	}
+	return st
+}
+
+func (h *harness) refreshBotsOnce() {
+	h.t.Helper()
+	if err := h.s.refreshBots(h.t.Context()); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// Each refresh records when it ran, when a list last came back good (even an
+// unchanged one) and how many failed in a row, so an operator can tell a
+// source that is fine from one whose ranges have been aging for days.
+func TestVerifiedBotRefreshRecordsLastSuccessAndFailuresInARow(t *testing.T) {
+	h, _, f, _ := botHarness(t)
+	src := f.srv.URL + "/googlebot.json"
+	good := rangesJSON("66.249.64.0/27", "2001:4860:4801:10::/64")
+	var prev crawlerState
+	for i, step := range []struct {
+		name         string
+		body         string
+		failures     int
+		successMoves bool
+		wantErr      bool
+	}{
+		{"first success", good, 0, true, false},
+		{"first failure keeps the last success", "", 1, false, true},
+		{"second failure counts in a row", "", 2, false, true},
+		{"success with unchanged ranges resets the count and moves the last success", good, 0, true, false},
+	} {
+		h.advance(time.Minute)
+		f.set(step.body)
+		h.refreshBotsOnce()
+		st := h.crawlerStatus(src)
+		if st.failures != step.failures {
+			t.Fatalf("%s: failures %d, want %d", step.name, st.failures, step.failures)
+		}
+		if (st.lastErr != nil) != step.wantErr {
+			t.Fatalf("%s: last_error %v", step.name, st.lastErr)
+		}
+		if st.success == nil || (i > 0 && st.success.After(*prev.success) != step.successMoves) {
+			t.Fatalf("%s: last_success_at %v after %v, moves %v", step.name, st.success, prev.success, step.successMoves)
+		}
+		if i > 0 && !st.attempt.After(prev.attempt) {
+			t.Fatalf("%s: last_attempt_at %v did not move past %v", step.name, st.attempt, prev.attempt)
+		}
+		prev = st
+	}
+}
+
+// A parse error can quote a long entry of the remote list, so the stored
+// error is cut: it must not bloat the row or stop the status being written.
+func TestVerifiedBotStatusBoundsAParseError(t *testing.T) {
+	h, _, f, _ := botHarness(t)
+	src := f.srv.URL + "/googlebot.json"
+	entry := strings.Repeat("é", 2000)
+	f.set(`{"prefixes":[{"ipv4Prefix":"` + entry + `","ipv6Prefix":"` + entry + `"}]}`)
+	h.refreshBotsOnce()
+	st := h.crawlerStatus(src)
+	if st.failures != 1 || st.lastErr == nil {
+		t.Fatalf("status %+v", st)
+	}
+	if n := utf8.RuneCountInString(*st.lastErr); n == 0 || n > 300 {
+		t.Fatalf("last_error has %d characters", n)
+	}
+}
+
+// A TLS hostname error copies the names in the source's certificate, which
+// can hold a NUL byte that Postgres text refuses; the failure must still be
+// recorded or the source would never go stale.
+func TestVerifiedBotStatusRecordsACertificateNameWithNUL(t *testing.T) {
+	h, _, f, _ := botHarness(t)
+	src := f.srv.URL + "/googlebot.json"
+	failed := fmt.Errorf("verified bot ranges fetch: %w", &url.Error{Op: "Get", URL: src,
+		Err: x509.HostnameError{Certificate: &x509.Certificate{DNSNames: []string{"evil\x00.example"}}, Host: "ranges.example"}})
+	if err := h.s.recordBotRefresh(t.Context(), src, failed); err != nil {
+		t.Fatal(err)
+	}
+	st := h.crawlerStatus(src)
+	if st.failures != 1 || st.lastErr == nil || strings.ContainsRune(*st.lastErr, 0) || !strings.Contains(*st.lastErr, "evil") {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// Status is telemetry: recording it must not publish new ranges, or every
+// edge would refetch the snapshot on each 10 minute refresh.
+func TestVerifiedBotStatusLeavesTheEdgeSnapshotUnchanged(t *testing.T) {
+	h, pub, f, _ := botHarness(t)
+	src := f.srv.URL + "/googlebot.json"
+	status(t, pub.save(`"0"`, crawlerConfig(true)), 200)
+	status(t, pub.publishDraft("let verified crawlers through"), 201)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	h.refreshBotsOnce()
+	_, tag := edgeSnapshot(t, e)
+	first := h.crawlerStatus(src).attempt
+
+	h.advance(time.Minute)
+	h.refreshBotsOnce() // unchanged success
+	second := h.crawlerStatus(src).attempt
+	status(t, e.do("GET", "/v1/snapshot", nil, "If-None-Match", tag), 304)
+	if !second.After(first) {
+		t.Fatalf("last_attempt_at %v did not move past %v after an unchanged success", second, first)
+	}
+
+	h.advance(time.Minute)
+	f.set("")
+	h.refreshBotsOnce() // failure
+	status(t, e.do("GET", "/v1/snapshot", nil, "If-None-Match", tag), 304)
+	if third := h.crawlerStatus(src).attempt; !third.After(second) {
+		t.Fatalf("last_attempt_at %v did not move past %v after a failure", third, second)
+	}
+}
+
+// crawlerRow is one source of GET /api/verified-bots.
+type crawlerRow struct {
+	Source          string     `json:"source"`
+	Prefixes        int        `json:"prefixes"`
+	RangesChangedAt *time.Time `json:"ranges_changed_at"`
+	LastSuccessAt   *time.Time `json:"last_success_at"`
+	LastAttemptAt   *time.Time `json:"last_attempt_at"`
+	Failures        int        `json:"failures"`
+	LastError       *string    `json:"last_error"`
+	Stale           bool       `json:"stale"`
+}
+
+func TestVerifiedBotSourcesListEveryConfiguredSourceToStatsReaders(t *testing.T) {
+	t.Run("lists sources in configuration order with their state and a stale flag from the signal threshold", func(t *testing.T) {
+		h, pub, f, _ := botHarness(t)
+		g := newFakeRanges(t, "") // never succeeds
+		e := newFakeRanges(t, rangesJSON("157.55.39.0/24"))
+		h.trustRanges(f, g, e)
+		srcF, srcG, srcE := f.srv.URL+"/googlebot.json", g.srv.URL+"/bingbot.json", e.srv.URL+"/other.json"
+		// Neither ascending nor descending, so the order can only come from configuration.
+		srcs := []string{srcF, srcG, srcE}
+		slices.Sort(srcs)
+		srcs = []string{srcs[1], srcs[2], srcs[0]}
+		h.s.cfg.VerifiedBotSources = srcs
+		reader := h.client()
+		reader.token = pub.userToken("stats.read")
+		list := func() []crawlerRow {
+			t.Helper()
+			return decode[[]crawlerRow](t, reader.do("GET", "/api/verified-bots", nil))
+		}
+
+		before := list()
+		if len(before) != 3 || before[0].Source != srcs[0] || before[1].Source != srcs[1] || before[2].Source != srcs[2] ||
+			before[0].LastAttemptAt != nil || before[0].LastSuccessAt != nil || before[0].Prefixes != 0 || before[0].Stale {
+			t.Fatalf("before any refresh %+v", before)
+		}
+
+		h.refreshBotsOnce()
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+		rows := map[string]crawlerRow{}
+		after := list()
+		for i, r := range after {
+			rows[r.Source] = r
+			if r.Source != srcs[i] {
+				t.Fatalf("row %d is %s, want %s", i, r.Source, srcs[i])
+			}
+		}
+		good, bad := rows[srcF], rows[srcG]
+		if good.Prefixes != 2 || good.RangesChangedAt == nil || good.LastSuccessAt == nil || good.LastAttemptAt == nil || good.Failures != 0 || good.LastError != nil || good.Stale {
+			t.Fatalf("good source %+v", good)
+		}
+		if bad.Prefixes != 0 || bad.LastSuccessAt != nil || bad.LastAttemptAt == nil || bad.Failures != 3 || bad.LastError == nil || !bad.Stale {
+			t.Fatalf("failing source %+v", bad)
+		}
+
+		n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+		s := n.Signals["verified_bots_stale"]
+		s.MinEvents = 4
+		n.Signals["verified_bots_stale"] = s
+		status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+		for _, r := range list() {
+			if r.Stale {
+				t.Fatalf("%s is stale at 3 failures with min_events 4", r.Source)
+			}
+		}
+	})
+	t.Run("a token without stats.read is refused", func(t *testing.T) {
+		_, pub, _, _ := botHarness(t)
+		c := pub.h.client()
+		c.token = pub.userToken("config.read")
+		status(t, c.do("GET", "/api/verified-bots", nil), 403)
+	})
+	t.Run("no configured sources is an empty list", func(t *testing.T) {
+		h := newHarness(t)
+		h.user("pub", "admin")
+		resp := h.signedIn("pub").do("GET", "/api/verified-bots", nil)
+		code := resp.StatusCode
+		if got := strings.TrimSpace(body(resp)); code != 200 || got != "[]" {
+			t.Fatalf("%d %s", code, got)
+		}
+	})
+}
+
+// A Postgres failure while storing ranges is the admin's own fault, not the
+// source's: it counts as a failed job, the other sources still refresh, and
+// the source whose store failed is not charged a failed refresh.
+func TestVerifiedBotStoreFailureCountsAsAFailedJob(t *testing.T) {
+	h, _, f, _ := botHarness(t)
+	g := newFakeRanges(t, rangesJSON("157.55.39.0/24"))
+	h.trustRanges(f, g)
+	srcF, srcG := f.srv.URL+"/googlebot.json", g.srv.URL+"/bingbot.json"
+	h.s.cfg.VerifiedBotSources = []string{srcF, srcG}
+	h.refreshBotsOnce()
+
+	if _, err := h.owner.Exec(t.Context(), "REVOKE INSERT, UPDATE ON verified_bot_sets FROM "+testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+	h.advance(time.Minute)
+	f.set(rangesJSON("66.249.64.0/27", "66.249.66.0/27"))
+	leadBriefly(t, h, func() bool {
+		return strings.Contains(h.metrics(), `admin_background_job_failures_total{job="verified_bots"} 1`+"\n")
+	})
+
+	// The clock stood still during the job, so a row written by it carries now.
+	if g := h.crawlerStatus(srcG); !g.attempt.Equal(h.now()) || g.failures != 0 {
+		t.Fatalf("other source %+v, now %v", g, h.now())
+	}
+	if f := h.crawlerStatus(srcF); !f.attempt.Before(h.now()) || f.failures != 0 {
+		t.Fatalf("source whose store failed %+v, now %v", f, h.now())
+	}
+}
+
+// A Postgres failure while recording a source's status counts as a failed
+// job too, and the ranges of the sources are still stored: status is
+// telemetry and must not hold up what edges are served.
+func TestVerifiedBotStatusStoreFailureCountsAsAFailedJob(t *testing.T) {
+	h, _, f, _ := botHarness(t)
+	g := newFakeRanges(t, rangesJSON("157.55.39.0/24"))
+	h.trustRanges(f, g)
+	srcF, srcG := f.srv.URL+"/googlebot.json", g.srv.URL+"/bingbot.json"
+	h.s.cfg.VerifiedBotSources = []string{srcF, srcG}
+	h.refreshBotsOnce()
+
+	if _, err := h.owner.Exec(t.Context(), "REVOKE INSERT, UPDATE ON verified_bot_status FROM "+testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+	f.set(rangesJSON("66.249.64.0/27", "66.249.66.0/27"))
+	g.set(rangesJSON("157.55.39.0/24", "207.46.13.0/24"))
+	leadBriefly(t, h, func() bool {
+		return strings.Contains(h.metrics(), `admin_background_job_failures_total{job="verified_bots"} 1`+"\n")
+	})
+
+	for _, src := range []string{srcF, srcG} {
+		var n int
+		if err := h.db.QueryRow(t.Context(), "SELECT jsonb_array_length(prefixes) FROM verified_bot_sets WHERE source_url = $1", src).Scan(&n); err != nil || n != 2 {
+			t.Fatalf("%s stores %d prefixes, err %v", src, n, err)
+		}
+	}
+}
+
+// crawlerNotifyHarness is admin with notifications on and the autopilot off,
+// where an anomaly fires on its first tripped check and resolves on its first
+// passing one, and one crawler source that starts good.
+func crawlerNotifyHarness(t *testing.T) (*harness, *client, *fakeRanges, *fakeAlertmanager, string) {
+	t.Helper()
+	am := newFakeAlertmanager(t)
+	f := newFakeRanges(t, rangesJSON("66.249.64.0/27"))
+	src := f.srv.URL + "/googlebot.json"
+	h := newHarnessWith(t, map[string]string{"ALERTMANAGER_URL": am.srv.URL + "/", "VERIFIED_BOT_SOURCES": src})
+	h.trustRanges(f)
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	status(t, pub.save(`"0"`, testConfig(), adminTest), 200)
+	status(t, pub.publishDraft("v1"), 201)
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.FireAfter, n.ResolveAfter = 1, 1
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	return h, pub, f, am, src
+}
+
+func staleOf(h *harness, pub *client) *anomaly {
+	h.t.Helper()
+	for _, a := range h.anomalies(pub) {
+		if a.Signal == "verified_bots_stale" {
+			return &a
+		}
+	}
+	return nil
+}
+
+// A crawler list that keeps failing quietly turns every crawler exemption
+// into a stale one, so it raises an anomaly after three failures in a row and
+// ends it on the next good refresh.
+// An admin that saved notification settings before this signal existed
+// notifies on a stale source at the default threshold and can save again.
+func TestStaleCrawlerSignalIsOnForSettingsSavedBeforeIt(t *testing.T) {
+	h, pub, f, am, src := crawlerNotifyHarness(t)
+	old := decode[map[string]any](t, pub.do("GET", "/api/settings/notifications", nil))
+	delete(old["signals"].(map[string]any), "verified_bots_stale")
+	b, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.Exec(t.Context(), "UPDATE settings SET value = $1 WHERE key = 'notifications'", b); err != nil {
+		t.Fatal(err)
+	}
+	h.refreshBotsOnce()
+	f.set("")
+	for range 3 {
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+	}
+	h.check()
+	if a := staleOf(h, pub); a == nil || a.State != "firing" || a.Rule != src {
+		t.Fatalf("anomaly %+v", a)
+	}
+	if len(am.sent("verified_bots_stale")) == 0 {
+		t.Fatal("not sent to Alertmanager")
+	}
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+}
+
+func TestStaleCrawlerSourceNotifiesAndResolvesOnTheNextGoodRefresh(t *testing.T) {
+	h, pub, f, am, src := crawlerNotifyHarness(t)
+	h.refreshBotsOnce()
+	f.set("")
+	for range 2 {
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+		h.check()
+	}
+	if a := staleOf(h, pub); a != nil {
+		t.Fatalf("anomaly after two failures %+v", a)
+	}
+
+	h.advance(time.Minute)
+	h.refreshBotsOnce()
+	h.check()
+	a := staleOf(h, pub)
+	if a == nil || a.State != "firing" || a.Rule != src || a.Phase != "verified_bots" {
+		t.Fatalf("anomaly after three failures %+v", a)
+	}
+	if strings.Contains(a.Summary, "status 500") || strings.Contains(a.Summary, "fetch") {
+		t.Fatalf("summary carries the remote error: %q", a.Summary)
+	}
+	if !slices.Contains(h.actions(), "anomaly.fire source "+src) {
+		t.Fatalf("firing not audited: %v", h.actions())
+	}
+	sent := am.sent("verified_bots_stale")
+	if len(sent) == 0 || sent[0].Labels["phase"] != "verified_bots" || sent[0].Labels["rule"] != src {
+		t.Fatalf("sent %+v", sent)
+	}
+	if strings.Contains(sent[0].Annotations["description"], "status 500") {
+		t.Fatalf("alert description carries the remote error: %q", sent[0].Annotations["description"])
+	}
+
+	// A recovered source has no finding, so it resolves at the next check
+	// whatever resolve_after is.
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.ResolveAfter = defaultNotify().ResolveAfter
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	f.set(rangesJSON("66.249.64.0/27"))
+	h.advance(time.Minute)
+	h.refreshBotsOnce()
+	h.check()
+	if a := staleOf(h, pub); a == nil || a.State != "resolved" {
+		t.Fatalf("anomaly after a good refresh %+v", a)
+	}
+	if !slices.Contains(h.actions(), "anomaly.resolve source "+src) {
+		t.Fatalf("resolving not audited: %v", h.actions())
+	}
+}
+
+// Taking a source out of VERIFIED_BOT_SOURCES ends its problem: nothing is
+// left to refresh, so its status goes and its anomaly resolves.
+func TestRemovedCrawlerSourceResolvesItsAnomalyAndDropsItsStatus(t *testing.T) {
+	h, pub, f, _, src := crawlerNotifyHarness(t)
+	g := newFakeRanges(t, rangesJSON("157.55.39.0/24"))
+	h.trustRanges(f, g)
+	srcG := g.srv.URL + "/bingbot.json"
+	h.s.cfg.VerifiedBotSources = []string{src, srcG}
+	f.set("")
+	for range 3 {
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+	}
+	h.check()
+	if a := staleOf(h, pub); a == nil || a.State != "firing" {
+		t.Fatalf("anomaly before removal %+v", a)
+	}
+
+	h.s.cfg.VerifiedBotSources = []string{srcG}
+	h.advance(time.Minute)
+	h.refreshBotsOnce()
+	h.check()
+	var removed, kept int
+	if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM verified_bot_status WHERE source_url = $1", src).Scan(&removed); err != nil || removed != 0 {
+		t.Fatalf("%d status rows for the removed source, err %v", removed, err)
+	}
+	if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM verified_bot_status WHERE source_url = $1", srcG).Scan(&kept); err != nil || kept != 1 {
+		t.Fatalf("%d status rows for the kept source, err %v", kept, err)
+	}
+	if a := staleOf(h, pub); a == nil || a.State != "resolved" {
+		t.Fatalf("anomaly after removal %+v", a)
+	}
+	if !slices.Contains(h.actions(), "anomaly.resolve source "+src) {
+		t.Fatalf("resolving not audited: %v", h.actions())
+	}
+}
+
+// Ranges stored by an admin from before status was recorded are still what
+// edges match, so a source that then fails reports when they were fetched,
+// not that it never succeeded.
+func TestStaleCrawlerSourceWithStoredRangesReportsWhenTheyWereFetched(t *testing.T) {
+	h, pub, f, _, src := crawlerNotifyHarness(t)
+	fetched := h.now().Add(-72 * time.Hour)
+	if _, err := h.owner.Exec(t.Context(), "INSERT INTO verified_bot_sets (source_url, fetched_at, prefixes) VALUES ($1, $2, '[\"66.249.64.0/27\"]')", src, fetched); err != nil {
+		t.Fatal(err)
+	}
+	f.set("")
+	for range 3 {
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+	}
+	h.check()
+	want := "Fetching it failed 3 times in a row; edges still treat addresses in its ranges from " + fetched.UTC().Format(time.RFC3339) + " as verified crawlers"
+	if a := staleOf(h, pub); a == nil || a.Summary != want {
+		t.Fatalf("anomaly %+v, want summary %q", a, want)
+	}
+	rows := decode[[]crawlerRow](t, pub.do("GET", "/api/verified-bots", nil))
+	if len(rows) != 1 || rows[0].LastSuccessAt == nil || !rows[0].LastSuccessAt.Equal(fetched) || !rows[0].Stale {
+		t.Fatalf("rows %+v, want last_success_at %v", rows, fetched)
+	}
+}
+
+// With the signal off and no threshold saved, no anomaly fires, but Fleet
+// still judges a source stale at the default of three failures.
+func TestVerifiedBotSignalOffStillMarksASourceStale(t *testing.T) {
+	h, pub, f, _, src := crawlerNotifyHarness(t)
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.Signals["verified_bots_stale"] = NotifySignal{Mode: "off"}
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	f.set("")
+	for range 3 {
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+		h.check()
+	}
+	if a := staleOf(h, pub); a != nil {
+		t.Fatalf("anomaly with the signal off %+v", a)
+	}
+	rows := decode[[]crawlerRow](t, pub.do("GET", "/api/verified-bots", nil))
+	if len(rows) != 1 || rows[0].Source != src || rows[0].Failures != 3 || !rows[0].Stale {
+		t.Fatalf("rows %+v", rows)
+	}
+}
+
+// With the threshold at one, the summary must still read as a sentence: an
+// operator sees it in Needs attention and in the alert.
+func TestStaleCrawlerSummaryReadsRightForOneFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		succeedFirst bool
+		want         func(success time.Time) string
+	}{
+		{"a source that never succeeded", false, func(time.Time) string {
+			return "Fetching it failed 1 time in a row and has never succeeded, so no address counts as this source's verified crawler"
+		}},
+		{"a source that had a success", true, func(success time.Time) string {
+			return "Fetching it failed 1 time in a row; edges still treat addresses in its ranges from " + success.UTC().Format(time.RFC3339) + " as verified crawlers"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pub, f, _, _ := crawlerNotifyHarness(t)
+			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+			sig := n.Signals["verified_bots_stale"]
+			sig.MinEvents = 1
+			n.Signals["verified_bots_stale"] = sig
+			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+			success := h.now()
+			if tc.succeedFirst {
+				h.refreshBotsOnce()
+				h.advance(time.Minute)
+			}
+			f.set("")
+			h.refreshBotsOnce()
+			h.check()
+			if want := tc.want(success); staleOf(h, pub) == nil || staleOf(h, pub).Summary != want {
+				t.Fatalf("anomaly %+v, want summary %q", staleOf(h, pub), want)
+			}
+		})
 	}
 }

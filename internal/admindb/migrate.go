@@ -29,7 +29,7 @@ var runtimeGrants = []string{
 	"GRANT SELECT, INSERT, UPDATE ON config_versions TO %[1]s",
 	"GRANT SELECT, INSERT, UPDATE, DELETE ON users, user_identities, local_credentials, user_roles, group_role_mappings, " +
 		"sessions, api_tokens, config_draft, canary, jwks_keys, settings, fleet, edge_stats_minute, " +
-		"observed_routes, observed_route_hour, route_patterns, anomalies, verified_bot_sets TO %[1]s",
+		"observed_routes, observed_route_hour, route_patterns, anomalies, verified_bot_sets, verified_bot_status TO %[1]s",
 	"GRANT USAGE ON SEQUENCE observed_routes_id_seq, route_patterns_id_seq, anomalies_id_seq TO %[1]s",
 	// Autopilot's record is append-only, like audit_events.
 	"GRANT SELECT, INSERT ON autopilot_model_prices, autopilot_runs, autopilot_run_results, autopilot_run_events, autopilot_proposals, autopilot_transitions TO %[1]s",

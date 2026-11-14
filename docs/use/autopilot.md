@@ -138,7 +138,7 @@ A case's page reads top to bottom as the case happened. It refreshes every 2 sec
 
 **Replay with another model** shows the command that [replays](#replay-and-evaluation) the case's run against a provider and model you pick. Admin calls no model for it.
 
-**Investigate**, with `autopilot.manage`, opens a case and this page: on a rule's editor, on a route's page, and on an open anomaly on **Notifications**. It takes an optional question.
+**Investigate**, with `autopilot.manage`, opens a case and this page: on a rule's editor, on a route's page, and on an open traffic or rule anomaly on **Notifications**. It takes an optional question.
 
 [Find](dashboard.md#find) opens one of the latest 100 cases by `Case N`, and one of the newest 500 notes by `Note N` or words from the first 80 characters of its statement.
 
@@ -173,7 +173,7 @@ A case is one question for the model. Admin opens one:
 - **On an anomaly:** `traffic_surge`, `auth_failure_ratio`, `rule_auth_failure_ratio` or `rule_match_surge` firing, and `rule_would_block` or `rule_subject_dominates` on an autopilot rule. Those two open no case on an autopilot rule while a case on the same rule and signal closed `benign` within `max_ttl`, one renewal of the sensor.
 - **Sweep,** hourly: find observed routes no rule watches and propose sensors for them. It waits while `max_sensors` is used up, since it only proposes sensors.
 - **Review,** daily: retire sensors that never fire or whose cases keep closing benign, and summarize the day.
-- **Investigate** (`POST /api/autopilot/cases`, `autopilot.manage`): a person asks about a rule, route or anomaly, with an optional question, or asks a question alone. Admin also opens one on each rule still enforcing on a note that was [retracted](#re-checks).
+- **Investigate** (`POST /api/autopilot/cases`, `autopilot.manage`): a person asks about a rule, a route, or a traffic or rule anomaly (not the autopilot's own or a crawler source's), with an optional question, or asks a question alone. Admin also opens one on each rule still enforcing on a note that was [retracted](#re-checks).
 - **Ablation:** a re-run of a case with a confirmed [note](#memory) withheld.
 
 The anomaly cases, the sweep and the review each have a setting that turns them off: `anomaly_investigation_enabled`, `sweep_enabled` and `review_enabled`. Turning one off stops new cases of that kind only. It cancels no case, retires no rule and removes nothing from the active version. Investigate cases, ablations and the cases opened for a retracted note have no setting.

@@ -704,6 +704,9 @@ func TestNotifySettings(t *testing.T) {
 	if !n.Enabled || n.FireAfter != 2 || len(n.Signals) != len(notifyChecks) || n.Rules == nil {
 		t.Fatalf("defaults %+v", n)
 	}
+	if got, want := n.Signals["verified_bots_stale"], (NotifySignal{Mode: "notify", Severity: "warning", MinEvents: 3}); got != want {
+		t.Errorf("verified_bots_stale default %+v, want %+v", got, want)
+	}
 	bad := func(edit func(*NotifySettings), path string) {
 		t.Helper()
 		c := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
@@ -732,6 +735,14 @@ func TestNotifySettings(t *testing.T) {
 	bad(func(c *NotifySettings) {
 		c.Rules = map[string]map[string]NotifySignal{"login": {"traffic_drop": {Mode: "off"}}}
 	}, "rules.login.traffic_drop")
+	bad(func(c *NotifySettings) {
+		s := c.Signals["verified_bots_stale"]
+		s.MinEvents = 0
+		c.Signals["verified_bots_stale"] = s
+	}, "signals.verified_bots_stale")
+	bad(func(c *NotifySettings) {
+		c.Rules = map[string]map[string]NotifySignal{"login": {"verified_bots_stale": {Mode: "notify", Severity: "warning", MinEvents: 3}}}
+	}, "rules.login.verified_bots_stale")
 	// A signal turned off needs no thresholds.
 	n.Signals["traffic_surge"] = NotifySignal{Mode: "off"}
 	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)

@@ -174,7 +174,21 @@ const signals: { name: string; label: string; scope: Scope; fields: Threshold[];
     fields: [{ key: 'max_share', label: 'Largest share for one client', kind: 'ratio' }, least('Minimum blocks')],
     trips: (s) => `Trips when one client gets over ${pct(num(s, 'max_share'))} of a rule's blocks, with at least ${counted(s, 'block')}.`,
   },
+  {
+    name: 'verified_bots_stale',
+    label: 'Verified crawler ranges stopped refreshing',
+    scope: 'fleet',
+    fields: [events('Failed refreshes in a row')],
+    trips: (s) => `Trips when fetching a VERIFIED_BOT_SOURCES list fails ${plural(num(s, 'min_events') ?? 0, 'time')} in a row, about one fetch every 10 minutes. Edges keep that list's last good ranges meanwhile.`,
+  },
 ];
+
+// subjectWord names the kind of thing an anomaly is about: a crawler source,
+// a rule, or nothing for an autopilot case or note, whose rule already reads
+// "case 12".
+export const subjectWord = (a: { rule: string; phase: string }) =>
+  a.phase === 'verified_bots' ? 'source ' : a.phase === 'autopilot' && /^(case|note) \d+$/.test(a.rule) ? '' : 'rule ';
+export const about = (a: { rule: string; phase: string }) => subjectWord(a) + a.rule;
 
 export const label = (name: string) => signals.find((s) => s.name === name)?.label ?? name.replaceAll('_', ' ');
 // The fleet signal each rule signal is listed under. A rule signal fires
@@ -454,7 +468,7 @@ function Anomalies() {
             <td className="min-w-72 px-3 py-2.5 whitespace-normal">
               <span className="font-medium text-heading">
                 {label(a.signal)}
-                {a.rule && ` for rule ${a.rule}`}
+                {a.rule && ` for ${about(a)}`}
               </span>
               <p className="text-body">{a.summary}</p>
               {a.case_id !== null && (
@@ -466,9 +480,9 @@ function Anomalies() {
                 </p>
               )}
               <LogsOf a={a} now={q.dataUpdatedAt} />
-              {a.state !== 'resolved' && (
+              {a.state !== 'resolved' && a.phase !== 'autopilot' && a.phase !== 'verified_bots' && (
                 <div className="mt-1">
-                  <Investigate target={{ anomaly_id: a.id }} name={`${label(a.signal)}${a.rule ? ` for rule ${a.rule}` : ''}`} />
+                  <Investigate target={{ anomaly_id: a.id }} name={`${label(a.signal)}${a.rule ? ` for ${about(a)}` : ''}`} />
                 </div>
               )}
               {under.length > 0 && (
@@ -478,7 +492,7 @@ function Anomalies() {
                     {under.map((k) => (
                       <li key={k.id}>
                         <span className="font-medium text-heading">
-                          {label(k.signal)} for rule {k.rule}
+                          {label(k.signal)} for {about(k)}
                         </span>
                         : <span className="text-body">{k.summary}</span> <Badge tone={tone(k)}>{stateWords(k)}</Badge>
                       </li>

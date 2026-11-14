@@ -320,6 +320,29 @@ func TestDocScreenshots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Fleet's crawler ranges card: one source refreshing, one stale since
+	// its last success. Set after the checks above, which read the sources,
+	// and no leader job runs here, so nothing fetches them. Rows are written
+	// from the fixed clock, not now(), so the screenshot does not drift.
+	common := "https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
+	special := "https://developers.google.com/static/crawling/ipranges/special-crawlers.json"
+	h.s.cfg.VerifiedBotSources = []string{common, special}
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{"INSERT INTO verified_bot_sets (source_url, fetched_at, prefixes) VALUES ($1, $2, $3), ($4, $2, $5)",
+			[]any{common, shotTime.Add(-72 * time.Hour), `["66.249.64.0/27","66.249.64.32/27","66.249.64.64/27","2001:4860:4801:10::/64","2001:4860:4801:12::/64"]`,
+				special, `["66.249.90.0/27","66.249.91.0/27","2001:4860:4801:2008::/64"]`}},
+		{"INSERT INTO verified_bot_status (source_url, last_attempt_at, last_success_at, failures, last_error) VALUES ($1, $2, $2, 0, NULL)",
+			[]any{common, shotTime.Add(-4 * time.Minute)}},
+		{"INSERT INTO verified_bot_status (source_url, last_attempt_at, last_success_at, failures, last_error) VALUES ($1, $2, $3, 5, 'source fetch: status 503')",
+			[]any{special, shotTime.Add(-4 * time.Minute), shotTime.Add(-50 * time.Minute)}},
+	} {
+		if _, err := h.owner.Exec(t.Context(), q.sql, q.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
 	at(0)
 	status(t, h.shipper().post(lines...), http.StatusAccepted)
 	if err := h.s.flushRoutes(t.Context()); err != nil {

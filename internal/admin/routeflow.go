@@ -254,12 +254,22 @@ func (s *Server) routeFlow(w http.ResponseWriter, r *http.Request, _ *principal)
 	}
 	cfg := c.Config
 	out := struct {
-		Version *int64                 `json:"version"`
-		Draft   bool                   `json:"draft"`
-		Sample  TestRequest            `json:"sample"`
-		Result  SimView                `json:"result"`
-		Rules   map[string][]ruleMatch `json:"rules"`
+		Version *int64      `json:"version"`
+		Draft   bool        `json:"draft"`
+		Sample  TestRequest `json:"sample"`
+		Result  SimView     `json:"result"`
+		// BlockRule is named here from the simulated snapshot, so the UI need not match ids against a config it fetched separately.
+		BlockRule string                 `json:"block_rule,omitempty"`
+		Rules     map[string][]ruleMatch `json:"rules"`
 	}{Version: version, Draft: version == nil, Sample: req, Result: sim, Rules: map[string][]ruleMatch{}}
+	if sim.Settings.Block != "" {
+		// The edge keeps the block setting of the last matched rule that sets one.
+		for _, id := range sim.ConfigRules {
+			if i := slices.IndexFunc(cfg.ConfigRules, func(r snapshot.ConfigRule) bool { return r.ID == id }); cfg.ConfigRules[i].Settings.Block != nil {
+				out.BlockRule = id
+			}
+		}
+	}
 	var ids []string
 	var exprs []expr.Node
 	for _, x := range cfg.ConfigRules {

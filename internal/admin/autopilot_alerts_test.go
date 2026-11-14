@@ -309,3 +309,68 @@ func TestAutopilotSensorCases(t *testing.T) {
 		}
 	})
 }
+
+// firingAnomalyIn is a firing anomaly of signal in phase, which the
+// autopilot cannot act on when the phase is not traffic.
+func (h *harness) firingAnomalyIn(signal, phase, rule string) int64 {
+	h.t.Helper()
+	var id int64
+	if err := h.db.QueryRow(h.t.Context(), `INSERT INTO anomalies (signal, rule, phase, severity, state, tripped, passed, started_at, fired_at, summary, details)
+		VALUES ($1, $3, $2, 'warning', 'firing', 3, 0, $4, $4, 'Stopped refreshing', '{}') RETURNING id`, signal, phase, rule, h.now()).Scan(&id); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}
+
+// A failing crawler fetch is not something the autopilot works, so a person
+// hears of it at once even while the autopilot is on with a runner connected.
+func TestStaleCrawlerAnomalyIsSentWhileTheAutopilotRuns(t *testing.T) {
+	am := newFakeAlertmanager(t)
+	f := newFakeRanges(t, rangesJSON("66.249.64.0/27"))
+	h, pub, agent := autopilotHarnessWith(t, map[string]string{"ALERTMANAGER_URL": am.srv.URL + "/", "VERIFIED_BOT_SOURCES": f.srv.URL + "/googlebot.json"})
+	h.trustRanges(f)
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.FireAfter = 1
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	agent.seen()
+	h.refreshBotsOnce()
+	f.set("")
+	for range 3 {
+		h.advance(time.Minute)
+		h.refreshBotsOnce()
+	}
+	// The minutes above outlast agentSeenWithin; the runner must be connected
+	// when the check runs, or nothing would be withheld anyway.
+	agent.seen()
+	h.check()
+	if w := withheldOf(t, pub, "verified_bots_stale"); w != "" {
+		t.Fatalf("withheld %q", w)
+	}
+	if got := am.sent("verified_bots_stale"); len(got) == 0 {
+		t.Fatal("not sent")
+	}
+}
+
+// The autopilot reads traffic and rules; a failing fetch or its own health
+// is not something it can act on, so a person cannot open a case on them.
+func TestAutopilotRefusesToInvestigateAnomaliesItCannotAct(t *testing.T) {
+	for _, tc := range []struct{ name, signal, phase, rule, about string }{
+		{"a stale crawler source is refused", "verified_bots_stale", "verified_bots", "https://ranges.example/googlebot.json", "crawler ranges"},
+		{"an autopilot health anomaly is refused", "autopilot_agent_down", "autopilot", "", "the autopilot itself"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pub, agent := autopilotHarness(t)
+			agent.seen()
+			a := h.firingAnomalyIn(tc.signal, tc.phase, tc.rule)
+			resp := pub.do("POST", "/api/autopilot/cases", map[string]any{"anomaly_id": a})
+			code, msg := resp.StatusCode, body(resp)
+			if code != 422 || !strings.Contains(msg, "the autopilot investigates traffic") || !strings.Contains(msg, tc.about) {
+				t.Fatalf("status %d: %s", code, msg)
+			}
+			var n int
+			if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM autopilot_cases WHERE anomaly_id = $1", a).Scan(&n); err != nil || n != 0 {
+				t.Fatalf("%d cases, err %v", n, err)
+			}
+		})
+	}
+}

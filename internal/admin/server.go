@@ -50,8 +50,8 @@ var (
 	// audit export streams its response.
 	readTimeout = 30 * time.Second
 	idleTimeout = 120 * time.Second
-	// flushTimeout bounds the last stats write at shutdown, so an
-	// unresponsive Postgres can't hold the replica open.
+	// An unresponsive Postgres must not stall the flush loop or hold the replica
+	// open at shutdown, so every stats and route flush gives up after flushTimeout.
 	flushTimeout = 5 * time.Second
 	// flushEvery is how often stats, the current minute included, are
 	// written: the dashboard's delay after an edge's report.

@@ -51,6 +51,7 @@ type NotifySignal struct {
 	MinRequests uint64  `json:"min_requests,omitempty"`
 	// MinEvents is the least counted requests (5xx, failed token checks) a
 	// share signal needs, so a few errors in a quiet window don't trip it.
+	// For verified_bots_stale it is the failed refreshes in a row.
 	MinEvents uint64 `json:"min_events,omitempty"`
 }
 
@@ -91,6 +92,8 @@ func defaultNotify() NotifySettings {
 			"autopilot_agent_down":       {Mode: "notify", Severity: "warning"},
 			"autopilot_needs_person":     {Mode: "notify", Severity: "warning"},
 			"autopilot_note_contested":   {Mode: "notify", Severity: "warning"},
+			// A crawler range source that keeps failing, found from its status.
+			"verified_bots_stale": {Mode: "notify", Severity: "warning", MinEvents: 3},
 		},
 		Rules: map[string]map[string]NotifySignal{},
 	}
@@ -204,6 +207,9 @@ var notifyChecks = map[string]notifyCheck{
 	"autopilot_agent_down":       autopilotCheck,
 	"autopilot_needs_person":     autopilotCheck,
 	"autopilot_note_contested":   autopilotCheck,
+	// No rule subject has this phase, so the traffic checks never evaluate
+	// it (check stays nil); botFindings does.
+	"verified_bots_stale": {phases: []string{botsPhase}, ok: func(s NotifySignal) bool { return s.MinEvents > 0 }, needs: "min_events of at least 1"},
 }
 
 // autopilotCheck is an autopilot signal. Its phase is no rule's, so the
@@ -211,6 +217,9 @@ var notifyChecks = map[string]notifyCheck{
 var autopilotCheck = notifyCheck{phases: []string{autopilotPhase}, ok: func(NotifySignal) bool { return true }}
 
 const autopilotPhase = "autopilot"
+
+// botsPhase is the phase of a crawler range source's anomaly.
+const botsPhase = "verified_bots"
 
 var notifyNames = slices.Sorted(maps.Keys(notifyChecks))
 
@@ -297,6 +306,10 @@ func (n NotifySettings) problems() []expr.Issue {
 		for _, name := range slices.Sorted(maps.Keys(n.Rules[id])) {
 			if c, ok := notifyChecks[name]; ok && slices.Equal(c.phases, fleetOnly) {
 				add("rules."+id+"."+name, "is a fleet signal; it can't be set per rule")
+				continue
+			}
+			if name == "verified_bots_stale" {
+				add("rules."+id+"."+name, "has no per-rule setting")
 				continue
 			}
 			signal("rules."+id+"."+name, name, n.Rules[id][name])
@@ -594,8 +607,58 @@ func (s *Server) findAnomalies(ctx context.Context, n NotifySettings) ([]finding
 	if err != nil {
 		return nil, err
 	}
+	found := evaluateNotify(n, w, b, rules)
 	ap, err := s.autopilotFindings(ctx, n)
-	return append(evaluateNotify(n, w, b, rules), ap...), err
+	if err != nil {
+		return nil, err
+	}
+	bots, err := s.botFindings(ctx, n)
+	return append(append(found, ap...), bots...), err
+}
+
+// staleAfter is how many failed refreshes in a row make a crawler source stale.
+func (n NotifySettings) staleAfter() uint64 {
+	if m := n.Signals["verified_bots_stale"].MinEvents; m > 0 {
+		return m
+	}
+	// Mode off skips validation, so the threshold can be unset.
+	return defaultNotify().Signals["verified_bots_stale"].MinEvents
+}
+
+// botFindings are the configured crawler sources that failed to refresh
+// staleAfter times in a row. A source that recovers or is removed has no
+// finding, so its anomaly resolves. The summaries carry no remote text: the
+// error is a remote list's own words and reaches Alertmanager.
+func (s *Server) botFindings(ctx context.Context, n NotifySettings) ([]finding, error) {
+	sig := n.Signals["verified_bots_stale"]
+	if sig.Mode != "notify" || len(s.cfg.VerifiedBotSources) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT t.source_url, t.failures, COALESCE(t.last_success_at, b.fetched_at) FROM verified_bot_status t
+		LEFT JOIN verified_bot_sets b ON b.source_url = t.source_url WHERE t.source_url = ANY($1) ORDER BY t.source_url`, s.cfg.VerifiedBotSources)
+	if err != nil {
+		return nil, err
+	}
+	var out []finding
+	var src string
+	var failures uint64
+	var last *time.Time
+	_, err = pgx.ForEachRow(rows, []any{&src, &failures, &last}, func() error {
+		if failures < n.staleAfter() {
+			return nil
+		}
+		times := "times"
+		if failures == 1 {
+			times = "time"
+		}
+		summary := fmt.Sprintf("Fetching it failed %d %s in a row and has never succeeded, so no address counts as this source's verified crawler", failures, times)
+		if last != nil {
+			summary = fmt.Sprintf("Fetching it failed %d %s in a row; edges still treat addresses in its ranges from %s as verified crawlers", failures, times, last.UTC().Format(time.RFC3339))
+		}
+		out = append(out, finding{Signal: "verified_bots_stale", Rule: src, Phase: botsPhase, Severity: sig.Severity, Summary: summary, Tripped: true})
+		return nil
+	})
+	return out, err
 }
 
 // autopilotFindings are the autopilot's signals in effect now. Each is
@@ -807,8 +870,15 @@ func (s *Server) pass(ctx context.Context, tx pgx.Tx, resolveAfter int, a *anoma
 }
 
 func (s *Server) auditAnomaly(ctx context.Context, tx pgx.Tx, action string, a *anomaly, summary string) error {
+	// The subject is named as the UI names it: an autopilot case or note
+	// already reads "case 12", so it is not called a rule.
 	target := "fleet"
-	if a.Rule != "" {
+	switch {
+	case a.Phase == botsPhase:
+		target = "source " + a.Rule
+	case a.Phase == autopilotPhase && (strings.HasPrefix(a.Rule, "case ") || strings.HasPrefix(a.Rule, "note ")):
+		target = a.Rule
+	case a.Rule != "":
 		target = "rule " + a.Rule
 	}
 	return admindb.Audit(ctx, tx, s.cfg.Audit, s.now, admindb.Event{Actor: "system:notifications", Action: action, Target: target,
@@ -1018,6 +1088,7 @@ var signalTitles = map[string]string{
 	"autopilot_agent_down":       "The autopilot runner is down",
 	"autopilot_needs_person":     "An autopilot case needs a person",
 	"autopilot_note_contested":   "An autopilot note was contested",
+	"verified_bots_stale":        "Verified crawler ranges stopped refreshing",
 }
 
 func (a anomaly) title() string {
