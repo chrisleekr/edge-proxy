@@ -12,7 +12,7 @@ COPY autopilot/package.json autopilot/package-lock.json ./
 RUN cpu="${TARGETARCH}"; [ "${cpu}" = amd64 ] && cpu=x64; \
     npm ci --omit=dev --ignore-scripts --os=linux --libc=glibc --cpu="${cpu}"
 
-FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:33c86a63859efc2ebd88ea0a355863582ec6f1220d048de62baffb2584e709b3
+FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY autopilot/package.json ./
