@@ -423,8 +423,8 @@ func (s *Server) auditBroken(ctx context.Context, err error) error {
 	return err
 }
 
-// dropOldStats keeps 30 days of per-minute stats, route hours and resolved
-// anomalies, and drops edges and routes not seen as long: replaced pods
+// dropOldStats keeps 30 days of per-minute stats, route hours, traffic hours
+// and resolved anomalies, and drops edges and routes not seen as long: replaced pods
 // report under new names.
 func (s *Server) dropOldStats(ctx context.Context) error {
 	cutoff := s.now().AddDate(0, 0, -retentionDays)
@@ -435,6 +435,9 @@ func (s *Server) dropOldStats(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.Exec(ctx, "DELETE FROM observed_route_hour WHERE hour < $1", cutoff); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, "DELETE FROM traffic_hour WHERE hour < $1", cutoff); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(ctx, "DELETE FROM anomalies WHERE resolved_at < $1", cutoff); err != nil {

@@ -71,7 +71,7 @@ An admin service with an admin UI manages policy in Postgres, validates it, publ
   - `golang.org/x/text`
   - `go.opentelemetry.io/otel` (API, SDK, `otlptracehttp`) and `go-logr/logr`, in `internal/tracing`: OTLP export, W3C propagation and batching are protocol code upstream maintains. Every binary is built with `-tags grpcnotrace`, or gRPC's `x/net/trace` adds about 13 MB; `make container` checks it.
   - Admin only: `jackc/pgx/v5`, `golang.org/x/crypto`, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`, `modelcontextprotocol/go-sdk` (the MCP protocol and its Streamable HTTP transport, for the autopilot runner), and later `coreos/go-oidc/v3` and `golang.org/x/oauth2`.
-- **Admin UI:** React + Vite + TypeScript (strict) + Tailwind CSS, with `react-querybuilder` for the rule builder and CodeMirror 6 for expression text.
+- **Admin UI:** React + Vite + TypeScript (strict) + Tailwind CSS, with `react-querybuilder` for the rule builder, CodeMirror 6 for expression text and `d3-geo` for the Traffic map globe.
   - It's built to `web/admin/dist/app`, embedded by `web/admin/ui.go` (`go:embed`) and served by admin. Node is needed at build time only.
   - The UI never parses, renders or validates expressions; it calls the admin `/api/expr/*` API.
 - **Autopilot runner** (`autopilot/`): TypeScript (strict) run by Node 26's type stripping, no build step. `@anthropic-ai/claude-agent-sdk` (drives the bundled Claude Code binary), `@openai/agents`, `zod` for the verdict check, and the Claude SDK's peers `@anthropic-ai/sdk` and `@modelcontextprotocol/sdk`, all pinned exactly. Tests are `node:test` with SDK-typed fixtures, no mocks. Node is pinned in `scripts/ci/node.sh`, `ci.yml` and the Dockerfiles, kept in step.

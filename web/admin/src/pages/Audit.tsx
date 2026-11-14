@@ -54,6 +54,7 @@ export const said: Record<string, string> = {
   'settings.save': 'changed settings',
   'settings.guard': 'changed guard settings',
   'settings.autopilot': 'changed autopilot settings',
+  'settings.traffic_map': 'changed where the edges are on the traffic map',
   'user.create': 'added user',
   'user.disable': 'disabled user',
   'user.roles': 'changed roles of',
@@ -85,7 +86,7 @@ export const said: Record<string, string> = {
 const categories: [string, string[]][] = [
   ['Releases', ['config.publish', 'config.revert', 'config.rollback', 'config.import', 'config.overlay_publish', 'canary.step', 'canary.promote', 'canary.abort', 'guard.rollback', 'guard.canary_abort', 'guard.alert']],
   ['Draft', ['config.save', 'config.rebase', 'config.copy_to_draft', 'config.adopt', 'config.export']],
-  ['Settings', ['settings.guard', 'settings.notifications', 'settings.autopilot', 'settings.autopilot_price']],
+  ['Settings', ['settings.guard', 'settings.notifications', 'settings.autopilot', 'settings.autopilot_price', 'settings.traffic_map']],
   ['Anomalies', ['anomaly.fire', 'anomaly.resolve', 'attention.ack', 'attention.undo', 'attention.cleared']],
   ['Users and tokens', ['user.create', 'user.disable', 'user.roles', 'token.create', 'token.revoke', 'auth.password.change']],
   ['Sign-ins', ['auth.login.success', 'auth.login.failure', 'auth.logout']],

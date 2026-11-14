@@ -302,6 +302,12 @@ func seed(ctx context.Context) error {
 	if _, err := call("POST", "/api/publish", map[string]string{"message": msg}, 201, "If-Match", `"1"`); err != nil {
 		return err
 	}
+	if os.Getenv("SEED_POLICY") == "demo" {
+		// Frankfurt, so the demo's Traffic map draws lines to the edges.
+		if _, err := call("PUT", "/api/settings/traffic-map", map[string]any{"edge": map[string]float64{"lat": 50.11, "long": 8.68}}, 204); err != nil {
+			return err
+		}
+	}
 	out, err := call("POST", "/api/tokens", map[string]string{"name": "edges", "kind": "edge"}, 201)
 	if err != nil {
 		return err

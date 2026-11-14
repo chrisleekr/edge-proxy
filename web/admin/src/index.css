@@ -298,3 +298,33 @@ html:has(dialog[open]) {
   content: '0\A 1\A 2\A 3\A 4\A 5\A 6\A 7\A 8\A 9';
   white-space: pre;
 }
+
+/* The traffic map's pulses and flowing lines, on the live globe only.
+   Traffic.tsx stops the globe's turn; this query stops the pulses and lines,
+   which are then plain. */
+@media (prefers-reduced-motion: no-preference) {
+  .pulse {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: pulse 2s ease-out infinite;
+  }
+  svg[data-live] .arc {
+    stroke-dasharray: 4 6;
+    animation: flow 1s linear infinite;
+  }
+  @keyframes pulse {
+    from {
+      transform: scale(1);
+      opacity: 1;
+    }
+    to {
+      transform: scale(2.4);
+      opacity: 0;
+    }
+  }
+  @keyframes flow {
+    to {
+      stroke-dashoffset: -10;
+    }
+  }
+}

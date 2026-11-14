@@ -1,6 +1,6 @@
 # Dashboard
 
-The admin UI is served by the admin service. Sign in with a username and password. The menu groups pages by job: **Monitor** (Dashboard, Stats, Routes, Fleet, Notifications, Autopilot), **Policy** (Rules, Templates, CORS policies, Issuers, Settings), **Release** (Tests and simulate, Publish, Versions) and **Admin** (Audit log, Users and tokens). Menu items you lack the permission for are hidden, and opening such a page by its address says your role cannot open it. On a narrow screen the menu opens from **Menu** at the top, beside **Find**.
+The admin UI is served by the admin service. Sign in with a username and password. The menu groups pages by job: **Monitor** (Dashboard, Stats, Traffic map, Routes, Fleet, Notifications, Autopilot), **Policy** (Rules, Templates, CORS policies, Issuers, Settings), **Release** (Tests and simulate, Publish, Versions) and **Admin** (Audit log, Users and tokens). Menu items you lack the permission for are hidden, and opening such a page by its address says your role cannot open it. On a narrow screen the menu opens from **Menu** at the top, beside **Find**.
 
 The bar at the top of every screen shows where policy stands, in the order a change travels: the shared draft (such as **Unsaved edits**, **Same as live**, or what is **Not published**, such as `1 rule changed`; while a canary runs it is compared with the canary), a canary if one runs, and the live version.
 
@@ -8,7 +8,7 @@ The info mark beside a page or card title explains it; hover over it or click it
 
 ## Time range
 
-The dashboard, **Rules**, a rule's **Traffic** card, **Stats**, a client's page, **Routes**, a route's page and **Audit log** share one **Time range**: the last hour, 6 hours, 24 hours (the default), 7 days or 30 days. The address keeps it as `?range=1h`, `6h`, `7d` or `30d`, and links carry it to the next screen, so a range picked on the dashboard holds on the others and in a bookmarked or shared link. On the dashboard, **Rules**, a rule's **Traffic** card, **Stats** and a client's page, **Auto-refresh** beside it means the figures refresh, every 10 seconds up to 24 hours and every minute for longer ranges; it reads **Not updating** when they can't.
+The dashboard, **Rules**, a rule's **Traffic** card, **Stats**, a client's page, **Routes**, a route's page, the period view of **Traffic map** and **Audit log** share one **Time range**: the last hour, 6 hours, 24 hours (the default), 7 days or 30 days. The address keeps it as `?range=1h`, `6h`, `7d` or `30d`, and links carry it to the next screen, so a range picked on the dashboard holds on the others and in a bookmarked or shared link. On the dashboard, **Rules**, a rule's **Traffic** card, **Stats** and a client's page, **Auto-refresh** beside it means the figures refresh, every 10 seconds up to 24 hours and every minute for longer ranges; it reads **Not updating** when they can't.
 
 ## Find
 
@@ -118,6 +118,18 @@ Every published version with its author, message, change summary and guard outco
 **Download bootstrap file** saves the live version as the file an edge starts from when admin is unreachable. **Export** saves it with its tests; **Import** on another admin (production, say, from staging) publishes that file through every publish check, to all traffic.
 
 When a guard rollback, an aborted canary or a revert replaces the version a draft started from, **Publish** offers to rebase the draft, or, if the draft has no edits of its own, to keep the replaced version's changes in the draft to fix and publish again.
+
+## Traffic map
+
+Where requests come from, counted by the viewer's country from the same access logs as **Routes**, so the edge does no extra work and no client address is kept. A globe shows each country shaded by its share of requests, with a circle sized by that share and, beside it, a triangle sized by the part of its requests the edge refused. Hover over a country or its circle for its name and counts. The table below it lists the countries with their requests, blocked requests and share.
+
+![Traffic map](../assets/screenshots/traffic.png)
+
+- **Live** counts the last 5 minutes, refreshes every 10 seconds, and turns the globe slowly, with a pulse on each circle and the lines to the edges flowing. Drag the globe, or press the arrow keys while it has focus, to turn it by hand. **Period** counts whole hours over the [time range](#time-range) and holds still. Neither moves when your system asks for reduced motion.
+- **Blocked** means the edge refused the request instead of passing it on, for example a rate limit, an access rule or an overloaded edge. Log-only matches, an upstream error or timeout, and a client that left are not counted. Requests refused for a malformed path or method are counted here, though they make no route.
+- **Estimates:** the edges log only a share of allowed requests (`LOG_SAMPLE_RATE`), and each logged request counts for the requests it stands for, so such counts are marked **≈**. Blocked requests are logged every time and are exact.
+- **Lines to the edges** are drawn to the edges' place from up to 30 of the busiest countries facing you. A role with `settings.manage` sets it under **Where the edges are** on this page, as latitude and longitude in decimal degrees such as `50.11, 8.68`, and the change is audited as `settings.traffic_map`. Without it the globe has no lines, and opens on the busiest country.
+- **Countries** need a trusted country header: the edge logs one only when `CLIENT_IP_SOURCE` or `VIEWER_HEADERS` names a source for it. Requests with none are listed as **Country not known**. Countries too small for the [Natural Earth](https://www.naturalearthdata.com/) outlines the map draws are listed with **Not on the map**.
 
 ## Routes
 

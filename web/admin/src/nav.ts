@@ -7,6 +7,7 @@ export const nav: { group: string; links: { to: string; label: string; perm: str
     links: [
       { to: '/', label: 'Dashboard', perm: '' },
       { to: '/stats', label: 'Stats', perm: 'stats.read' },
+      { to: '/traffic', label: 'Traffic map', perm: 'stats.read' },
       { to: '/routes', label: 'Routes', perm: 'stats.read' },
       { to: '/fleet', label: 'Fleet', perm: 'stats.read' },
       { to: '/notifications', label: 'Notifications', perm: 'stats.read' },

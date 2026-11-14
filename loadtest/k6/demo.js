@@ -33,7 +33,11 @@ function token(kind) {
   return value;
 }
 
-const client = () => viewer(Math.floor(Math.random() * ips));
+// Countries by client number, so a given address always comes from the same
+// one and the Traffic map has places to show.
+const countries = ['US', 'US', 'US', 'GB', 'DE', 'DE', 'FR', 'JP', 'AU', 'BR', 'IN', 'CA', 'ZA', 'SG', 'MX', 'NL'];
+const located = (n) => ({ ...viewer(n), 'CloudFront-Viewer-Country': countries[n % countries.length] });
+const client = () => located(Math.floor(Math.random() * ips));
 const languages = ['fr-FR,fr;q=0.9', 'de', 'ko-KR', 'en-GB', 'ja'];
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
 // Built once per VU: a body over the default 1 MiB limit, and an upload
@@ -50,7 +54,7 @@ const mix = [
   [3, 'CORS preflight from the web app', () => http.options(`${edge}/api/items`, null, { headers: { ...client(), Origin: 'https://app.example.com', 'Access-Control-Request-Method': 'PUT' } })],
   [1, 'CORS preflight from an unknown origin', () => http.options(`${edge}/api/items`, null, { headers: { ...client(), Origin: 'https://evil.example', 'Access-Control-Request-Method': 'DELETE' } })],
   // Ten IPs share the logins, so the 2 per minute limit and its penalty show.
-  [5, 'login: sliding window with penalty', () => http.post(`${edge}/login`, 'user=demo', { headers: viewer(Math.floor(Math.random() * 10)) })],
+  [5, 'login: sliding window with penalty', () => http.post(`${edge}/login`, 'user=demo', { headers: located(Math.floor(Math.random() * 10)) })],
   [3, 'private page without a token: 401', () => http.get(`${edge}/private/account`, { headers: client() })],
   [2, 'private page with a token', () => http.get(`${edge}/private/account`, { headers: { ...client(), Authorization: `Bearer ${token('user')}` } })],
   [2, 'partner API: API key and partner issuer', () => http.get(`${edge}/api/partner/orders`, { headers: { ...client(), Authorization: `Bearer ${token('partner')}`, 'X-Api-Key': `key-${__VU % 5}` } })],
