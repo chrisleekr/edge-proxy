@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/chrisleekr/edge-proxy/compare/v1.2.0...v1.3.0) (2026-11-14)
+
+
+### Features
+
+* **admin:** add a Traffic map of requests by viewer country ([#30](https://github.com/chrisleekr/edge-proxy/issues/30)) ([9d91308](https://github.com/chrisleekr/edge-proxy/commit/9d91308d56d38adfb47a368428c3b9b9b338558e))
+* **admin:** show crawler range refresh status and alert when a source goes stale ([#29](https://github.com/chrisleekr/edge-proxy/issues/29)) ([3ce021b](https://github.com/chrisleekr/edge-proxy/commit/3ce021b93cf84bc13936c8882e98b5db763c8237))
+
 ## [1.2.0](https://github.com/chrisleekr/edge-proxy/compare/v1.1.0...v1.2.0) (2026-11-10)
 
 
