@@ -96,7 +96,8 @@ const Time = ({ iso, none }: { iso: string | null; none: string }) =>
 
 // stateOf says each source's state in words, so it never rests on colour.
 function stateOf(b: VerifiedBot) {
-  if (!b.last_attempt_at) return { tone: 'slate', words: 'not fetched yet' } as const;
+  // Ranges stored before attempts were recorded have a success but no attempt yet.
+  if (!b.last_attempt_at && !b.last_success_at) return { tone: 'slate', words: 'not fetched yet' } as const;
   if (b.stale) return { tone: 'red', words: b.last_success_at ? 'stale' : 'never fetched' } as const;
   if (b.failures > 0) return { tone: 'amber', words: 'failing' } as const;
   return { tone: 'green', words: 'refreshing' } as const;

@@ -75,6 +75,7 @@ interface Flow {
   version: number | null;
   draft: boolean;
   sample: { method?: string; host: string; path: string };
+  block_rule?: string;
   result: {
     rejected?: string;
     allowlist?: string;
@@ -997,8 +998,8 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
     return x ? summary(x) : '';
   };
   const rejected = flow.result.rejected;
-  // The edge keeps the block setting of the last matched rule that sets one; none applies when it is empty (allowlisted, or no rule sets block).
-  const blockRule = s.block ? flow.result.config_rules.findLast((id) => find(config.config_rules, id)?.settings?.block != null) : undefined;
+  // The server names the rule from the snapshot it simulated, so a draft saved after this flow was fetched can't change which rule is named.
+  const blockRule = flow.block_rule;
   const blocker = blockRule ? (
     <Link to={ruleLink('config', blockRule)} className="font-mono break-all text-heading underline">
       {blockRule}

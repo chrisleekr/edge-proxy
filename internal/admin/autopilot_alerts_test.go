@@ -339,6 +339,9 @@ func TestStaleCrawlerAnomalyIsSentWhileTheAutopilotRuns(t *testing.T) {
 		h.advance(time.Minute)
 		h.refreshBotsOnce()
 	}
+	// The minutes above outlast agentSeenWithin; the runner must be connected
+	// when the check runs, or nothing would be withheld anyway.
+	agent.seen()
 	h.check()
 	if w := withheldOf(t, pub, "verified_bots_stale"); w != "" {
 		t.Fatalf("withheld %q", w)

@@ -1256,6 +1256,8 @@ const crawlerRows = () => {
     row('https://ranges.example/stale.json', { prefixes: 12, last_success_at: iso(86_400_000), failures: 5, last_error: 'dial tcp: i/o timeout', stale: true }),
     row('https://ranges.example/never.json', { failures: 4, last_error: 'no such host', stale: true }),
     row('https://ranges.example/new.json', { last_attempt_at: null }),
+    // Ranges stored before refresh status was recorded: in use, with no attempt recorded yet.
+    row('https://ranges.example/upgraded.json', { prefixes: 40, ranges_changed_at: iso(7_200_000), last_success_at: iso(7_200_000), last_attempt_at: null }),
   ];
 };
 
@@ -1274,6 +1276,7 @@ test('fleet lists crawler range sources with their state in words', async () => 
     await expect(badge('stale.json')).toHaveText('stale');
     await expect(badge('never.json')).toHaveText('never fetched');
     await expect(badge('new.json')).toHaveText('not fetched yet');
+    await expect(badge('upgraded.json')).toHaveText('refreshing');
     await expect(row('refreshing.json')).toContainText('1 prefix');
     await expect(row('failing.json')).toContainText('1,500 prefixes');
     await expect(row('failing.json')).toContainText('Last error: source fetch: status 503');
