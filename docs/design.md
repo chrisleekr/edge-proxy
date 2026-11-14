@@ -198,7 +198,7 @@ Every field, its type and its source are listed in the [Expressions reference](r
 
 **Edge-computed fields** read only the request and the snapshot, so they exist in every phase and every deployment:
 - `client.signals` is a list of automation hints from the headers and viewer fields, computed lazily as a bitmask the first time anything reads it, and as names from a table built once, so a request allocates nothing for it. It takes only `eq`, `ne`, `in` and `not_in` with known names. A signal needs the viewer field it reads (`ssl`, HTTP version or JA4): validation rejects a rule naming one the deployment can't compute. Browser thresholds come from MDN's compatibility data; the tool list includes the OWASP Core Rule Set's scanners. Signals are hints for log-first rules, not a score.
-- `client.verified_bot` is true when the client IP is in a crawler range list admin fetched from `VERIFIED_BOT_SOURCES` ([§5.4](#54-ssrf-guard)). The ranges travel in the snapshot envelope, only while the active or canary version reads `client.verified_bot`, and the edge compiles them into an IP set off the request path. Admin validation refuses a rule that reads the field when `VERIFIED_BOT_SOURCES` is empty (`Deployment.VerifiedBots`); edges always accept it, since their ranges arrive with the snapshot. The field is false until the first fetch succeeds.
+- `client.verified_bot` is true when the client IP is in a crawler range list admin fetched from `VERIFIED_BOT_SOURCES` ([§5.4](#54-ssrf-guard)). The ranges travel in the snapshot envelope, only while the active or canary version reads `client.verified_bot`, and the edge compiles them into an IP set off the request path. Admin validation refuses a rule that reads the field when `VERIFIED_BOT_SOURCES` is empty (`Deployment.VerifiedBots`); edges always accept it, since their ranges arrive with the snapshot. The field is false until the first fetch succeeds. Each source's refresh status (last attempt, last success, failures in a row, a bounded last error) is in `verified_bot_status`, apart from `verified_bot_sets`: that table's row versions make up the snapshot ETag, and a status write on every refresh must not make every edge refetch. Status is telemetry like the fleet table, so its writes are not audited; the `verified_bots_stale` anomaly it raises is, with `anomaly.fire` and `anomaly.resolve` ([§15.2.1](#1521-notifications-anomalies-from-the-stats)).
 
 **Path normalization (security):**
 - Matching uses a copy of the path that has been percent-decoded once, except `%2F`, with path parameters (`;x`) dropped from each segment, `//` collapsed and `.` removed.
@@ -606,7 +606,7 @@ responses:
 - `SetURL(upstream)`
 - `Out.Host = In.Host`
 - **Forwarding headers, set explicitly. Don't call `SetXForwarded()`.**
-  - In go1.27.3 `reverseproxy.go`, `SetXForwarded` takes the client IP from `In.RemoteAddr`, which here is the LB. It also sets `X-Forwarded-Proto` from `In.TLS`, which here is always `http` because TLS ends at the CDN/LB.
+  - In go1.27.4 `reverseproxy.go`, `SetXForwarded` takes the client IP from `In.RemoteAddr`, which here is the LB. It also sets `X-Forwarded-Proto` from `In.TLS`, which here is always `http` because TLS ends at the CDN/LB.
   - The edge sets instead:
     - `X-Forwarded-For` = the trusted client IP ([§10](#10-client-identity-and-viewer-metadata))
     - `X-Forwarded-Proto` = the viewer `ssl` field (`https`/`http`), or `http` if no viewer source is configured
@@ -623,7 +623,7 @@ responses:
 - **The edge never retries upstream requests.** A request may not be safe to repeat, and retries multiply load during an incident. (Go's `Transport` itself may retry a request that failed on a reused idle connection before any response; that's the stdlib's own behavior and stays.)
 
 **Streaming:**
-- **SSE:** ReverseProxy flushes immediately for `text/event-stream` and `ContentLength == -1` (go1.27.3 `reverseproxy.go`).
+- **SSE:** ReverseProxy flushes immediately for `text/event-stream` and `ContentLength == -1` (go1.27.4 `reverseproxy.go`).
 - **WebSocket:** handled through the stdlib's upgrade path. Hijacking clears connection deadlines (`server.go` `hijackLocked`).
 - Rate limiting and JWT apply at connect only.
 - **Stats:** a stream's latency is its time to response headers. Its lifetime would fill the top histogram bucket, which the guard's `p99_latency` reads. A WebSocket is counted and logged as 101; the access log's `duration_ms` is the stream's lifetime.
@@ -780,7 +780,7 @@ tests:
 They run through the edge's own `Simulate` with the same compiler as the edge, on every save, and a failure **blocks publish**.
 
 - **Request and expectation fields** are in [Policy tests](use/policy.md#policy-tests). `expect` checks only what it lists, so a test pins the behavior it is about and survives unrelated edits.
-- A test follows the edge's step order and stops where the edge would: a CORS preflight the edge answers, required auth with no `jwt_claims` (`rejected: auth`), or a missing key under `on_missing_key: reject`. The backstop and quotas depend on the running edge and aren't simulated.
+- A test follows the edge's step order and stops where the edge would: a method or path the edge refuses (`rejected: method` or `rejected: path`), an access rule set to block (`rejected: blocked`), a CORS preflight the edge answers, required auth with no `jwt_claims` (`rejected: auth`), or a missing key under `on_missing_key: reject` (`rejected: rate_limit_key`). The backstop and quotas depend on the running edge and aren't simulated.
 - A failing test doesn't stop a save; it is reported with the save and blocks publish.
 
 **Canary:**
@@ -1039,7 +1039,7 @@ Every route with its permission is in the [Admin API reference](reference/api.md
 - **Audit reads that write** (`verify`, `export`) are POST because each writes its own audit row. No endpoint edits audit rows.
 - **Edge endpoints** (`GET /v1/snapshot`, `POST /v1/edge/report`) accept only edge service tokens. The snapshot ETag fingerprints what the envelope is built from, except the fleet size: active version, canary row and each key row's `xmin`. An unchanged snapshot is a 304 after one query, with no transaction and no config loaded, so polling every 5s from every edge stays cheap. It is 503 until the first publish, so edges use their cache or bootstrap. The report is answered with the live `fleet_size`.
 - **Canary:** no other publish, revert or import runs during a canary (409 until it is promoted or aborted), so the guard compares only the candidate against the active version.
-- **Background jobs** run on the replica holding the leader lock: JWKS refresh every 10 minutes (only changed key sets are written, each change audited), incremental audit verification and an anchor log line every 5 minutes, a full verification and stats retention daily, and the guard. Saving a draft also fetches keys for any issuer that has none yet; a failure there is a warning.
+- **Background jobs** run on the replica holding the leader lock: JWKS and crawler range refresh every 10 minutes (only changed key sets and range lists are written, each change audited; each crawler source's attempt is recorded apart, unaudited), incremental audit verification and an anchor log line every 5 minutes, a full verification and stats retention daily, and the guard. Saving a draft also fetches keys for any issuer that has none yet; a failure there is a warning.
 
 ### 13.5 Admin UI screens
 
@@ -1052,7 +1052,7 @@ Every route with its permission is in the [Admin API reference](reference/api.md
 - Tests and simulate
 - Diff, publish and canary
 - Versions: timeline, view, semantic and raw compare, revert, per-rule history ([§12.7](#127-versions-and-revert))
-- Fleet (per edge: versions loaded, `UPSTREAM_URL`, config source, last report)
+- Fleet (per edge: versions loaded, `UPSTREAM_URL`, config source, last report; with `VERIFIED_BOT_SOURCES` set, each crawler range source's refresh state)
 - Stats (charts, most-limited keys)
 - Notifications (open and recent anomalies, defaults per signal, per-rule settings)
 - Audit
@@ -1223,7 +1223,7 @@ Versions compare with the semantic diff; the raw view shows both JSON documents 
   - Aggregates in memory, per minute and config version, bounded (at most 1000 most-limited subjects per minute and version).
   - Validates `status_codes` (codes 0 to 600) and `upstream_errors` (the six cause names), with counts below the same bound as the other counts, and accepts a report without them from an older edge. Both are summed per minute into `edge_stats_minute`, and `/api/stats` sums them across replicas. Admin stores counts only; the lines themselves stay in the deployment's log store, which `LOG_SEARCH_URL` links to from the UI.
   - `/api/stats?step=N` sums rows into buckets of N minutes from UTC midnight and keeps the 20 most limited clients per rule in each bucket, summing as it reads, so memory follows the buckets rather than the stored minutes.
-  - Writes one batch every 10s into `edge_stats_minute`, the minute in progress included: each write replaces the row with the minute's running sum, so the dashboard is at most one report and one write behind. Each admin replica writes its own rows for the reports it received, under its name plus its start time so a restarted replica never overwrites its previous run's minute, and readers sum across replicas, so replicas never merge each other's arrays. On a write failure a finished minute is dropped; the minute in progress is written again on the next one. On shutdown admin first keeps serving for `DRAIN_DELAY`, so edge polls still routed to it succeed, then stops accepting connections, waits for reports in flight, then writes everything it still holds, giving up after 5s so an unresponsive Postgres can't keep the replica from exiting.
+  - Writes one batch every 10s into `edge_stats_minute`, the minute in progress included: each write replaces the row with the minute's running sum, so the dashboard is at most one report and one write behind. Each admin replica writes its own rows for the reports it received, under its name plus its start time so a restarted replica never overwrites its previous run's minute, and readers sum across replicas, so replicas never merge each other's arrays. On a write failure a finished minute is dropped; the minute in progress is written again on the next one. Each write gives up after 5s, so an unresponsive Postgres can't stall the loop that also flushes route stats; a timed-out write drops the finished minutes like any other failure. On shutdown admin first keeps serving for `DRAIN_DELAY`, so edge polls still routed to it succeed, then stops accepting connections, waits for reports in flight, then writes everything it still holds, giving up after 5s so an unresponsive Postgres can't keep the replica from exiting.
   - 30-day retention by a daily delete on the leader.
   - `fleet` keeps each edge's last report, which the Fleet screen shows with the edge's `UPSTREAM_URL`; `fleet_size` counts edges seen in the last minute. Admin answers each report with it.
 - **Why push, not pull:**
@@ -1239,6 +1239,7 @@ Versions compare with the semantic diff; the raw view shows both JSON documents 
 - **Where:** a leader job every minute compares the last window with the baseline before it, over every version, for the fleet and for each rule of the active and canary versions. Process health (not ready, snapshot rejected, overload, panics, Valkey errors) stays with Prometheus and the edges' `/metrics`: a dead edge sends no stats.
 - **Decisions:** thresholds relative to the baseline with an absolute floor and a minimum count, as in the guard. No learned model: an operator can read why an alert fired. Hysteresis (`fire_after`, `resolve_after`) drops one-minute blips. Per-rule checks are measured against the fleet in the same window (a rule's expected matches follow its share of requests, and its failure share must pass `factor` times the fleet's), so one cause such as an upstream outage sends one alert rather than one per rule; grouping and inhibition beyond that are left to Alertmanager.
 - **Settings apart from the policy:** defaults per signal plus per-rule settings, in `settings` like the guard's. Edges decode snapshots strictly, so a field there would need a schema bump; and turning off a noisy alert must not need a publish, which itself starts a guard watch.
+- **Not from stats:** the autopilot signals and `verified_bots_stale` are found from state, not traffic. `verified_bots_stale` reads `verified_bot_status` for the configured sources and trips when failures in a row reach `min_events` (3); its subject is the source URL in phase `verified_bots`, it has no per-rule setting, and the autopilot neither holds it back nor investigates it, since a failing fetch is not traffic.
 - **State:** `anomalies` holds at most one open row per signal and subject, so leadership can change mid-anomaly. Firing and resolving are audited in the same transaction.
 - **Delivery:** Alertmanager's API v2, which owns grouping, silences and routing. Firing alerts are sent every check with an end three checks ahead; resolved ones for 5 minutes. A failed send is logged and retried at the next check; nothing queues. `ALERTMANAGER_URL` is deployment config.
 - **What the autopilot works is held back.** While the autopilot runs, an autopilot rule's would-block and dominant-subject anomalies are not sent, unless critical: they open cases, and a person hears the conclusion. With `anomaly_investigation_enabled` off no case opens for an anomaly, so an autopilot rule's anomalies are not held back as its own and an anomaly waits only for a case already open on it. A non-critical anomaly that opens a case waits up to 10 minutes for the verdict and is sent with it, without the case's summary, which the model writes after reading traffic clients control; only an `info` one closed benign is dropped, since traffic an attacker shapes could talk the model into a benign verdict. Nothing is held back while no runner is connected, and an anomaly already sent is sent until it resolves.

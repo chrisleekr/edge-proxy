@@ -736,6 +736,20 @@ func (s *Server) investigate(w http.ResponseWriter, r *http.Request, p *principa
 	if why != "" {
 		return fail(http.StatusConflict, why)
 	}
+	if in.AnomalyID != nil {
+		// The autopilot reads traffic and rules; a failing fetch or its own
+		// health is not something it can act on.
+		var phase string
+		if err := s.db.QueryRow(ctx, "SELECT phase FROM anomalies WHERE id = $1", *in.AnomalyID).Scan(&phase); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		switch phase {
+		case botsPhase:
+			return fail(http.StatusUnprocessableEntity, "the autopilot investigates traffic; this anomaly is about crawler ranges")
+		case autopilotPhase:
+			return fail(http.StatusUnprocessableEntity, "the autopilot investigates traffic; this anomaly is about the autopilot itself")
+		}
+	}
 	var id int64
 	err = dbProblem(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		var opened bool

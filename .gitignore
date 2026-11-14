@@ -11,3 +11,4 @@ web/admin/dist/app/
 /.claude/
 /tools
 .DS_Store
+*.tgz

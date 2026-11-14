@@ -7,7 +7,7 @@ import { Button, ErrorBox, Info, Page, Rolling, ago, plural, when, who } from '.
 import { type Event, said } from './Audit';
 import { LogLink, useLogSearch } from '../logSearch';
 import { Bars, codeName, type Edge, pct, type Range, RangePicker, type Row, statusCodes, statusOf, sum, Unranked, useMarks, useRange } from './Fleet';
-import { type Anomaly, anomaliesQuery, groupAnomalies, label } from './Notifications';
+import { type Anomaly, about, anomaliesQuery, groupAnomalies, label, subjectWord } from './Notifications';
 import { useVersions } from './Publish';
 import { outcomeSays, whyKept } from '../guard';
 
@@ -402,7 +402,7 @@ function Attention({ d, can }: { d: Data; can: (p: string) => boolean }) {
   const severe = { critical: 'danger', warning: 'warning' } as const;
   const ruleSays = (k: Anomaly) => (
     <>
-      {label(k.signal)} for rule <code className="font-medium">{k.rule}</code>: {k.summary}.
+      {label(k.signal)} for {subjectWord(k)}<code className="font-medium">{k.rule}</code>: {k.summary}.
     </>
   );
   const firing = (d.anomalies?.data?.anomalies ?? []).filter((x) => x.state === 'firing');
@@ -410,12 +410,12 @@ function Attention({ d, can }: { d: Data; can: (p: string) => boolean }) {
   for (const { a, under } of groupAnomalies(firing))
     items.push({
       key: `anomaly:${a.id}`,
-      say: a.rule ? `${label(a.signal)} for rule ${a.rule}` : a.summary,
+      say: a.rule ? `${label(a.signal)} for ${about(a)}` : a.summary,
       tone: severe[a.severity as keyof typeof severe] ?? 'neutral',
-      // A fleet summary names its signal; a rule's needs the rule.
+      // A fleet summary names its signal; any other needs its subject: a rule, a crawler source, or an autopilot case or note.
       text: a.rule ? ruleSays(a) : `${a.summary}.`,
-      to: '/notifications',
-      action: 'Notifications',
+      to: a.phase === 'verified_bots' ? '/fleet#crawler-ranges' : '/notifications',
+      action: a.phase === 'verified_bots' ? 'Fleet' : 'Notifications',
       under: under.map(ruleSays),
     });
 

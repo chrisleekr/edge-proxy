@@ -1365,6 +1365,10 @@ func TestAutopilotNotifications(t *testing.T) {
 		if st := state(h, pub, "autopilot_needs_person"); st != "firing" {
 			t.Fatalf("autopilot_needs_person %s", st)
 		}
+		// The audit log names the case itself, not a rule called "case N".
+		if want := fmt.Sprintf("anomaly.fire case %d", c.CaseID); !slices.Contains(h.actions(), want) {
+			t.Fatalf("audit %v, want %q", h.actions(), want)
+		}
 	})
 	t.Run("autopilot_needs_person stays firing for every such case in the hour, past 20", func(t *testing.T) {
 		h, pub, agent := setup(t)

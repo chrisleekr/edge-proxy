@@ -36,8 +36,9 @@ type SimRequest struct {
 
 // SimResult is what the edge would decide for a SimRequest.
 type SimResult struct {
-	// Rejected names the check that would reject the request, or "": a
-	// step 2 path or method check, auth for required auth with no token, or
+	// Rejected names the check that would reject the request, or "", in the
+	// edge's order: a step 2 method or path check, blocked for a block
+	// setting of block, auth for required auth with no token, or
 	// rate_limit_key for a missing key part under on_missing_key: reject.
 	Rejected       string
 	ConfigRules    []string

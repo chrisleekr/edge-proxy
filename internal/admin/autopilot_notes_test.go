@@ -2300,6 +2300,9 @@ func TestNoteAblationDemotesContested(t *testing.T) {
 		if got := firing(h, pub, "autopilot_note_contested"); got == nil || got.State != "firing" || got.Rule != fmt.Sprintf("note %d", n) || got.Severity != "warning" {
 			t.Fatalf("autopilot_note_contested %+v", got)
 		}
+		if got := h.actions(); !slices.Contains(got, fmt.Sprintf("anomaly.fire note %d", n)) {
+			t.Fatalf("audit %v", got)
+		}
 		// The ablation proposes nothing, so its attack verdict needs no person.
 		if got := firing(h, pub, "autopilot_needs_person"); got != nil {
 			t.Fatalf("autopilot_needs_person %+v for an ablation", got)

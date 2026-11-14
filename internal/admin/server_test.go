@@ -221,10 +221,9 @@ func TestListenerFailureStillFlushesStats(t *testing.T) {
 	}
 }
 
-// With Postgres accepting connections but never answering, shutdown still
-// finishes: the last stats flush gives up instead of hanging the replica.
-func TestShutdownWithPostgresHungFinishes(t *testing.T) {
-	h := newHarness(t)
+// hungPostgres returns a pool whose server accepts connections and never answers.
+func hungPostgres(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 	hole, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +249,14 @@ func TestShutdownWithPostgresHungFinishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	return pool
+}
+
+// With Postgres accepting connections but never answering, shutdown still
+// finishes: the last stats flush gives up instead of hanging the replica.
+func TestShutdownWithPostgresHungFinishes(t *testing.T) {
+	h := newHarness(t)
+	pool := hungPostgres(t)
 	s := NewServer(h.s.cfg, pool, slog.New(slog.DiscardHandler))
 	s.agg.add(s.now(), []edge.StatsCounts{{Version: 1, Requests: 3, LatencyMS: []uint64{3}}})
 	defer func(d time.Duration) { flushTimeout = d }(flushTimeout)
@@ -258,6 +265,35 @@ func TestShutdownWithPostgresHungFinishes(t *testing.T) {
 	_, _, stop := runServer(t, s)
 	if err := stop(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// With Postgres accepting connections but never answering, the periodic stats
+// flush gives up after flushTimeout, so the loop keeps flushing stats and routes
+// instead of stalling.
+func TestStatsFlushWithPostgresHungKeepsLoopRunning(t *testing.T) {
+	h := newHarness(t)
+	pool := hungPostgres(t)
+	b := &syncBuffer{}
+	s := NewServer(h.s.cfg, pool, slog.New(slog.NewJSONHandler(b, nil)))
+	// A held minute makes the first tick write stats.
+	s.agg.add(s.now(), []edge.StatsCounts{{Version: 1, Requests: 3, LatencyMS: []uint64{3}}})
+	defer func(e, d time.Duration) { flushEvery, flushTimeout = e, d }(flushEvery, flushTimeout)
+	flushEvery, flushTimeout = 50*time.Millisecond, 200*time.Millisecond
+
+	_, _, stop := runServer(t, s)
+	var stats, routes int
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		// flushRoutes runs after flush on every tick and fails on the hung pool whatever it holds, so its warnings count ticks that got past the stats write.
+		if stats, routes = b.count(`"stats flush dropped`), b.count(`"msg":"route flush"`); stats >= 1 && routes >= 2 {
+			break
+		}
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if stats < 1 || routes < 2 {
+		t.Fatalf("%d stats and %d route flush warnings in 5s, want at least 1 and 2: the loop stalled on a hung stats flush", stats, routes)
 	}
 }
 

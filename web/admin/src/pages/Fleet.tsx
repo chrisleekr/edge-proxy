@@ -3,7 +3,7 @@ import { Fragment, type PointerEvent, useEffect, useLayoutEffect, useMemo, useRe
 import { api, useCan } from '../api';
 import { LogLink, useLogSearch } from '../logSearch';
 import { Link, useSearch } from '../router';
-import { Badge, Button, Card, ErrorBox, Page, Rolling, Table, Title, ago, plural, when } from '../ui';
+import { Badge, Button, Card, ErrorBox, Notice, Page, Rolling, Table, Title, ago, plural, when } from '../ui';
 import type { Event } from './Audit';
 import { useVersions } from './Publish';
 
@@ -69,7 +69,95 @@ export function Fleet() {
           {showGone ? 'Hide gone edges' : `Show ${plural(gone, 'gone edge')}`}
         </Button>
       )}
+      <CrawlerRanges />
     </Page>
+  );
+}
+
+interface VerifiedBot {
+  source: string;
+  prefixes: number;
+  ranges_changed_at: string | null;
+  last_success_at: string | null;
+  last_attempt_at: string | null;
+  failures: number;
+  last_error: string | null;
+  stale: boolean;
+}
+
+const Time = ({ iso, none }: { iso: string | null; none: string }) =>
+  iso ? (
+    <time dateTime={iso} title={when(iso)}>
+      {ago(iso)}
+    </time>
+  ) : (
+    none
+  );
+
+// stateOf says each source's state in words, so it never rests on colour.
+function stateOf(b: VerifiedBot) {
+  if (!b.last_attempt_at) return { tone: 'slate', words: 'not fetched yet' } as const;
+  if (b.stale) return { tone: 'red', words: b.last_success_at ? 'stale' : 'never fetched' } as const;
+  if (b.failures > 0) return { tone: 'amber', words: 'failing' } as const;
+  return { tone: 'green', words: 'refreshing' } as const;
+}
+
+// CrawlerRanges shows the refresh state of each VERIFIED_BOT_SOURCES list;
+// it is absent when none are set, but a failed load is always shown.
+function CrawlerRanges() {
+  const q = useQuery({ queryKey: ['verified-bots'], queryFn: () => api<VerifiedBot[]>('GET', '/api/verified-bots'), refetchInterval: 60_000 });
+  const rows = q.data ?? [];
+  if (!q.error && rows.length === 0) return null;
+  const stale = rows.filter((b) => b.stale);
+  const never = stale.filter((b) => !b.last_success_at).length;
+  const kept = stale.length - never;
+  return (
+    <Card
+      id="crawler-ranges"
+      title="Verified crawler ranges"
+      intro="The crawler IP range lists set in VERIFIED_BOT_SOURCES, which rules match as verified crawlers. Admin fetches each list about every 10 minutes."
+      info="A failed fetch changes nothing on the edges: they keep the last ranges fetched. A source turns stale after the number of failed fetches in a row set on Notifications for Verified crawler ranges stopped refreshing, 3 unless changed. The sources are set in admin's deployment, not here."
+    >
+      <div className="flex flex-col gap-3">
+        <ErrorBox error={q.error} />
+        {stale.length > 0 && (
+          <Notice tone="amber">
+            {kept > 0 &&
+              `${plural(kept, 'stale source')}: requests from addresses in ${kept === 1 ? 'its' : 'their'} last good ranges still count as verified crawlers, even if the provider no longer owns them. `}
+            {never > 0 &&
+              (never === 1
+                ? 'A source never fetched counts no address as its crawler, so rules that exempt verified crawlers treat those crawlers as ordinary clients.'
+                : `${never} sources never fetched count no address as their crawlers, so rules that exempt verified crawlers treat those crawlers as ordinary clients.`)}
+          </Notice>
+        )}
+        {rows.length > 0 && (
+          <Table head={['Source', 'State', 'Failures in a row', 'Last successful refresh', 'Last attempt', 'Ranges']} num={[2, 5]}>
+            {rows.map((b) => {
+              const st = stateOf(b);
+              return (
+                <tr key={b.source} className="align-top">
+                  <td className="min-w-64 font-mono break-all whitespace-normal">
+                    {b.source}
+                    {b.failures > 0 && b.last_error && <p className="font-sans break-words text-body">Last error: {b.last_error}</p>}
+                  </td>
+                  <td>
+                    <Badge tone={st.tone}>{st.words}</Badge>
+                  </td>
+                  <td className="text-right tabular-nums">{b.failures.toLocaleString()}</td>
+                  <td>
+                    <Time iso={b.last_success_at} none="never" />
+                  </td>
+                  <td>
+                    <Time iso={b.last_attempt_at} none="not yet" />
+                  </td>
+                  <td className="text-right tabular-nums">{b.prefixes === 0 ? 'none' : plural(b.prefixes, 'prefix', 'prefixes')}</td>
+                </tr>
+              );
+            })}
+          </Table>
+        )}
+      </div>
+    </Card>
   );
 }
 

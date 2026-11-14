@@ -111,6 +111,8 @@ const decisionWords: Record<string, string> = {
   blocked: 'Blocked by an access rule',
   would_block: 'Forwarded; a log only access rule would block it',
   backstop: 'Blocked by the per-edge backstop',
+  method: 'Refused: the method is not in upper case',
+  path: 'Refused: the path is malformed or has an ambiguous encoding such as %5C or a .. segment',
   auth: 'Refused: missing or invalid token',
   rate_limit_key: 'Refused: a rate limit key was missing',
   rate_limit_unavailable: 'Refused: rate limits could not be checked',
@@ -995,6 +997,15 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
     return x ? summary(x) : '';
   };
   const rejected = flow.result.rejected;
+  // The edge keeps the block setting of the last matched rule that sets one; none applies when it is empty (allowlisted, or no rule sets block).
+  const blockRule = s.block ? flow.result.config_rules.findLast((id) => find(config.config_rules, id)?.settings?.block != null) : undefined;
+  const blocker = blockRule ? (
+    <Link to={ruleLink('config', blockRule)} className="font-mono break-all text-heading underline">
+      {blockRule}
+    </Link>
+  ) : (
+    'an access rule'
+  );
   const listed = Array.isArray(config.global.client_allowlist) && config.global.client_allowlist.length > 0;
   const d = r.decisions;
   const share = (n: number | undefined) => (n ? `${count(n)} requests (${rate(n, r.requests)})` : undefined);
@@ -1034,11 +1045,23 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
             Result: waiting up to {s.upstream_timeout || 'the default'} for the upstream, body limit{' '}
             {bytes(s.body_limit)}
             {s.cors_policy ? `, CORS policy ${s.cors_policy}` : ''}
-            {s.locale ? ', locale detected' : ''}
-            {s.block === 'block' ? ', answered 403 by a block setting' : s.block === 'log' ? ', logged as one a block setting would answer 403' : ''}.
+            {s.locale ? ', locale detected' : ''}.
           </p>
         </div>
       ),
+    },
+    {
+      title: 'Block',
+      body:
+        s.block === 'block' ? (
+          <>Access rule {blocker} answers this request with 403.</>
+        ) : s.block === 'log' ? (
+          <>Only logged as one access rule {blocker} would block; it goes on to the next steps.</>
+        ) : flow.result.allowlist ? (
+          'Not blocked: the sample client IP is on the trusted client allowlist.'
+        ) : (
+          'Not blocked: no access rule that matches the sample sets block.'
+        ),
       seen: [share(d.blocked) && `${share(d.blocked)} were blocked`, share(d.would_block) && `${share(d.would_block)} would be blocked by a log only rule`].filter(Boolean).join('; ') || undefined,
     },
     {
@@ -1100,8 +1123,9 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
   ];
   // The sample carries no token or claims, so a refusal for a missing token
   // or key part is noted on its step and the later steps still show: real
-  // traffic on the route usually carries them. Any other refusal ends the flow.
-  const stopAt = rejected && !steps.some((x) => x.stop) ? 0 : -1;
+  // traffic on the route usually carries them. A block ends the flow at its
+  // own step; any other refusal ends it at the first.
+  const stopAt = rejected === 'blocked' ? steps.findIndex((x) => x.title === 'Block') : rejected && !steps.some((x) => x.stop) ? 0 : -1;
   return (
     <ol className="flex flex-col">
       {(stopAt >= 0 ? steps.slice(0, stopAt + 1) : steps).map((step, i, list) => (

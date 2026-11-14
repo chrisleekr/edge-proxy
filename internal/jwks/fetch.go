@@ -47,7 +47,7 @@ func NewClient(allowedHosts []string, timeout time.Duration, roots *x509.CertPoo
 		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 || req.URL.Scheme != "https" || req.URL.Host != via[0].URL.Host {
-				return errors.New("jwks redirect must stay on the same https host")
+				return errors.New("redirect must stay on the same https host")
 			}
 			return nil
 		},
@@ -68,7 +68,7 @@ func guard(_, address string, _ syscall.RawConn) error {
 	// address, which blocked refuses.
 	ap, _ := netip.ParseAddrPort(address)
 	if blocked(ap.Addr()) {
-		return fmt.Errorf("jwks fetch to %w %s refused", ErrNonPublic, ap.Addr())
+		return fmt.Errorf("fetch to %w %s refused", ErrNonPublic, ap.Addr())
 	}
 	return nil
 }

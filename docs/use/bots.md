@@ -14,7 +14,7 @@ An access rule's `block` setting answers 403; a rate limit answers 429. Every re
 
 A signal or fingerprint is a hint, not proof. A careful bot sends a browser's headers and TLS stack, and some real users run privacy tools or old browsers. Keep crawlers you want out of every blocking rule with `not client.verified_bot`.
 
-`client.verified_bot` needs `VERIFIED_BOT_SOURCES`; without it, validation refuses rules that read the field. Until admin's first fetch succeeds, the field is false. For Google, list only `common-crawlers.json` and `special-crawlers.json`. The user-triggered fetcher lists cover fetches other people control, such as Google Cloud customers' fetchers, so never use them for an exemption.
+`client.verified_bot` needs `VERIFIED_BOT_SOURCES`; without it, validation refuses rules that read the field. Until admin's first fetch succeeds, the field is false. When a list keeps failing, edges keep matching its last good ranges; **Fleet** shows each source's state under [Verified crawler ranges](dashboard.md#fleet-and-stats), and the `verified_bots_stale` [notification](../operate/notifications.md#signals) trips after 3 failed refreshes in a row by default, then fires per the notification settings. For Google, list only `common-crawlers.json` and `special-crawlers.json`. The user-triggered fetcher lists cover fetches other people control, such as Google Cloud customers' fetchers, so never use them for an exemption.
 
 ## Refuse tools on pages
 
