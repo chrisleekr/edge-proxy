@@ -92,7 +92,9 @@ type Server struct {
 	// the route patterns, reloaded on every flush.
 	ingest   chan struct{}
 	routeAgg *routeAggregator
-	patterns atomic.Pointer[[]routePattern]
+	// trafficAgg holds this replica's unflushed traffic by country.
+	trafficAgg *trafficAggregator
+	patterns   atomic.Pointer[[]routePattern]
 
 	met adminMetrics
 	// mcpCalls counts each token's MCP calls in progress.
@@ -124,7 +126,7 @@ func NewServer(cfg *Config, db *pgxpool.Pool, log *slog.Logger) *Server {
 		// The start time keeps a restarted replica's rows apart from its
 		// previous run's for the same minute; readers sum replicas.
 		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil),
-		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(), alertClient: &http.Client{Timeout: 10 * time.Second},
+		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(), trafficAgg: newTrafficAggregator(), alertClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	s.tools = configuredTools(cfg)
 	s.toolsSHA256 = toolsHash(s.tools)
@@ -494,6 +496,9 @@ func (s *Server) Serve(ctx context.Context, l, internal net.Listener) error {
 			if err := s.flushRoutes(ctx); err != nil {
 				s.log.Warn("route flush", "error", err.Error())
 			}
+			if err := s.flushTraffic(ctx); err != nil {
+				s.log.Warn("traffic flush", "error", err.Error())
+			}
 		case <-ctx.Done():
 			running = false
 		}
@@ -517,6 +522,9 @@ func (s *Server) Serve(ctx context.Context, l, internal net.Listener) error {
 	}
 	if ferr := s.flushRoutes(fctx); ferr != nil {
 		s.log.Warn("route flush at shutdown", "error", ferr.Error())
+	}
+	if ferr := s.flushTraffic(fctx); ferr != nil {
+		s.log.Warn("traffic flush at shutdown", "error", ferr.Error())
 	}
 	if err != nil {
 		err = fmt.Errorf("shutdown: %w", err)

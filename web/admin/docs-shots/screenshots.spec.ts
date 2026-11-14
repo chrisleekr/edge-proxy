@@ -49,6 +49,7 @@ test('docs screenshots', async ({ page }) => {
     ['fleet', '/fleet', 'Fleet'],
     ['audit', '/audit', 'Audit log'],
     ['routes', '/routes', 'Routes'],
+    ['traffic', '/traffic?view=period&range=1h', 'Traffic map'],
     ['templates', '/templates', 'Templates'],
     ['cors', '/cors', 'CORS policies'],
     ['issuers', '/issuers', 'Issuers'],

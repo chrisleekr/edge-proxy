@@ -593,6 +593,113 @@ test('a role that reads stats but not config sees Notifications without asking f
   await other.context().close();
 });
 
+test('a role that reads stats sees the traffic map, which turns live and holds still when motion is reduced', async ({ browser }) => {
+  const other = await (await browser.newContext()).newPage();
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Traffic map', exact: true }).click();
+  // The seeded lines are real; the live window is only 5 minutes, so it is mocked.
+  await other.getByRole('button', { name: 'Period', exact: true }).click();
+  await expect(other).toHaveURL(/view=period/);
+  await expect(other.getByRole('button', { name: 'Period', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(other.getByRole('cell', { name: 'United States' })).toBeVisible();
+  await expect(other.getByRole('cell', { name: 'Country not known' })).toBeVisible();
+  const globe = other.getByRole('img', { name: /^Globe of requests by country/ });
+  await expect(globe).toBeVisible();
+  // Read-only: the form to move the edges is for roles that manage settings.
+  await expect(other.getByRole('heading', { name: 'Where the edges are' })).toHaveCount(0);
+  // Hovering a country names it, with its counts.
+  await expect(globe.locator('[data-country="US"] > title')).toHaveText(/^United States: [\d,]+ requests, [\d,]+ blocked$/);
+
+  const now = Date.now();
+  await other.route('**/api/traffic?minutes=5', (r) =>
+    r.fulfill({
+      json: {
+        from: new Date(now - 240_000).toISOString(),
+        to: new Date(now).toISOString(),
+        countries: [
+          { country: 'DE', requests: 900, blocked: 0, estimated: 0 },
+          { country: 'US', requests: 300, blocked: 12, estimated: 0 },
+        ],
+        edge: null,
+      },
+    }),
+  );
+  await other.getByRole('button', { name: 'Live', exact: true }).click();
+  await expect(other.getByRole('button', { name: 'Live', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(other).not.toHaveURL(/view=period/);
+  // Germany starts at the centre of the globe, so its outline always has a path.
+  const outline = () => other.locator('path[data-country="DE"]').getAttribute('d');
+  const before = await outline();
+  expect(before).toBeTruthy();
+  await other.waitForTimeout(1000);
+  expect(await outline()).not.toBe(before);
+
+  await other.emulateMedia({ reducedMotion: 'reduce' });
+  await other.waitForTimeout(300);
+  const still = await outline();
+  await other.waitForTimeout(1000);
+  expect(await outline()).toBe(still);
+
+  await other.setViewportSize({ width: 375, height: 812 });
+  expect(await other.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+  await other.context().close();
+});
+
+test('the traffic map explains no logs and no countries, marks estimates and unmapped countries, and turns from the keyboard', async ({ browser }) => {
+  // Reduced motion from the start, so only the keyboard can turn the globe.
+  const other = await (await browser.newContext({ reducedMotion: 'reduce' })).newPage();
+  let countries: { country: string; requests: number; blocked: number; estimated: number }[] = [];
+  await other.route('**/api/traffic?minutes=5', (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge: null } }));
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Traffic map', exact: true }).click();
+  await expect(other.getByRole('heading', { name: 'No access logs in the last 5 minutes' })).toBeVisible();
+
+  countries = [{ country: 'unknown', requests: 40, blocked: 0, estimated: 0 }];
+  await other.reload();
+  await expect(other.getByText(/carries a country/)).toContainText('CLIENT_IP_SOURCE');
+
+  countries = [
+    { country: 'SG', requests: 5, blocked: 0, estimated: 5 },
+    { country: '*', requests: 2, blocked: 0, estimated: 0 },
+  ];
+  await other.reload();
+  await expect(other.getByRole('row').filter({ hasText: 'Singapore' }).getByText('Not on the map')).toBeVisible();
+  await expect(other.getByRole('cell', { name: 'Other countries' })).toBeVisible();
+  await expect(other.getByRole('cell', { name: /^≈\s*5$/ })).toBeVisible();
+
+  // Germany faces the opening view, so its outline has a path before and after.
+  const outline = () => other.locator('path[data-country="DE"]').getAttribute('d');
+  const before = await outline();
+  expect(before).toBeTruthy();
+  await other.getByRole('img', { name: /^Globe of requests by country/ }).focus();
+  await other.keyboard.press('ArrowRight');
+  await expect.poll(outline).not.toBe(before);
+  await other.context().close();
+});
+
+test('a settings manager places the edges on the traffic map, and clearing removes the lines', async () => {
+  await page.goto('/traffic?view=period');
+  await expect(page.getByRole('heading', { name: 'Traffic map', exact: true })).toBeVisible();
+  await expect(page.locator('.arc')).toHaveCount(0);
+  await page.getByLabel('Latitude').fill('91');
+  await page.getByLabel('Longitude').fill('8.68');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText(/latitude must be from -90 to 90/i);
+  await page.getByLabel('Latitude').fill('50.11');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible();
+  expect(await page.locator('.arc').count()).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Clear', exact: true }).click();
+  await expect(page.locator('.arc')).toHaveCount(0);
+  await expect(page.getByLabel('Latitude')).toHaveValue('');
+});
+
 test('an acknowledged item leaves the list for the acknowledged items, and undo brings it back', async () => {
   // Mocked: the seed cannot make an anomaly fire. The ack itself goes to the real admin.
   const at = new Date().toISOString();
@@ -1079,7 +1186,7 @@ test('the sidebar groups pages by job', async () => {
   const main = page.getByRole('navigation', { name: 'Main' });
   // Headings and links in document order, so each link sits under its group.
   await expect(main.locator('p, a')).toHaveText([
-    'Monitor', 'Dashboard', 'Stats', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
+    'Monitor', 'Dashboard', 'Stats', 'Traffic map', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
     'Policy', 'Rules', 'Templates', 'CORS policies', 'Issuers', 'Settings',
     'Release', 'Tests and simulate', 'Publish', 'Versions',
     'Admin', 'Audit log', 'Users and tokens',
@@ -1173,6 +1280,8 @@ test('at 1280 pixels wide no page scrolls sideways or has a serious accessibilit
     [route!, 'POST api.example.com/login'],
     ['/fleet', 'Fleet'],
     ['/stats', 'Stats'],
+    ['/traffic', 'Traffic map'],
+    ['/traffic?view=period', 'Traffic map'],
     ['/notifications', 'Notifications'],
     ['/autopilot', 'Autopilot'],
     [investigated, `Case ${investigated.split('/').pop()}`],

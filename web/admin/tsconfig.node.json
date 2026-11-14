@@ -26,6 +26,7 @@
   "include": [
     "e2e",
     "edge-streams",
+    "scripts",
     "docs-shots",
     "vite.config.ts",
     "playwright.config.ts",

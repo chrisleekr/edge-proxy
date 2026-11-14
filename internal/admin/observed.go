@@ -84,18 +84,21 @@ func (s *Server) observedRoutes() {
 
 // accessLine is the part of an edge access line routes use.
 type accessLine struct {
-	Time          time.Time `json:"time"`
-	Msg           string    `json:"msg"`
-	Method        string    `json:"http.request.method"`
-	Host          string    `json:"server.address"`
-	Path          string    `json:"url.path"`
-	Status        int       `json:"http.response.status_code"`
-	Decision      string    `json:"edge.decision"`
-	DurationMS    float64   `json:"duration_ms"`
-	QueryKeys     []string  `json:"edge.query_keys"`
-	Version       int64     `json:"edge.config_version"`
-	ConfigRules   []string  `json:"edge.config_rules"`
-	RateLimitRule string    `json:"edge.rate_limit_rule"`
+	Time     time.Time `json:"time"`
+	Msg      string    `json:"msg"`
+	Method   string    `json:"http.request.method"`
+	Host     string    `json:"server.address"`
+	Path     string    `json:"url.path"`
+	Status   int       `json:"http.response.status_code"`
+	Decision string    `json:"edge.decision"`
+	// Country is the viewer's country as the edge logs it from its trusted
+	// source.
+	Country       string   `json:"client.geo.country_iso_code"`
+	DurationMS    float64  `json:"duration_ms"`
+	QueryKeys     []string `json:"edge.query_keys"`
+	Version       int64    `json:"edge.config_version"`
+	ConfigRules   []string `json:"edge.config_rules"`
+	RateLimitRule string   `json:"edge.rate_limit_rule"`
 	// SampleRate is set on allowed lines the edge logged at a rate below 1.
 	SampleRate float64 `json:"edge.sample_rate"`
 	// UpstreamErrorKind is why the edge got no answer from the upstream.
@@ -142,14 +145,26 @@ func (l *accessLine) weight() int64 {
 	return n
 }
 
-// hour is the hour the line belongs to: its own time when plausible.
-func (l *accessLine) hour(now time.Time) time.Time {
+// plausible reports whether the line's own time is within lateLine before
+// now and at most 5 minutes ahead of it.
+func (l *accessLine) plausible(now time.Time) bool {
+	return !l.Time.Before(now.Add(-lateLine)) && !l.Time.After(now.Add(5*time.Minute))
+}
+
+// at is the line's own time when plausible, else now.
+func (l *accessLine) at(now time.Time) time.Time {
 	t := l.Time
-	if t.IsZero() || t.Before(now.Add(-lateLine)) || t.After(now.Add(5*time.Minute)) {
+	if t.IsZero() || !l.plausible(now) {
 		t = now
 	}
-	return t.UTC().Truncate(time.Hour)
+	return t.UTC()
 }
+
+// hour is the hour the line belongs to.
+func (l *accessLine) hour(now time.Time) time.Time { return l.at(now).Truncate(time.Hour) }
+
+// minute is the minute the line belongs to.
+func (l *accessLine) minute(now time.Time) time.Time { return l.at(now).Truncate(time.Minute) }
 
 func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *principal) error {
 	select {
@@ -166,7 +181,16 @@ func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *princip
 	// Lines are counted only once the whole body is read, so a failed
 	// request adds nothing and a resent batch is not counted twice.
 	br := bufio.NewReaderSize(http.MaxBytesReader(w, r.Body, maxIngestBody), maxIngestLine)
-	var lines []accessLine // bounded by maxIngestBody
+	now := s.now()
+	// Only lines that make a route are kept whole until the body is read;
+	// every other access line keeps a small traffic record, so a body of tiny
+	// lines can't hold hundreds of bytes per line.
+	type routeLine struct {
+		accessLine
+		w int64
+	}
+	var lines []routeLine
+	var traffic []trafficLine
 	skipped := 0
 	for {
 		b, err := br.ReadSlice('\n')
@@ -187,20 +211,33 @@ func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *princip
 		}
 		if b = bytes.TrimSpace(b); len(b) > 0 {
 			var l accessLine
-			if json.Unmarshal(b, &l) != nil || !l.usable() {
+			if json.Unmarshal(b, &l) != nil || l.Msg != "access" {
 				skipped++
 			} else {
-				lines = append(lines, l)
+				w := l.weight() // drawn once: routes and traffic must agree
+				// Traffic counts requests the edge refused for a malformed
+				// request line too: they make no route but they came from
+				// somewhere.
+				if t, ok := l.traffic(w, now); ok {
+					traffic = append(traffic, t)
+				}
+				if l.usable() {
+					lines = append(lines, routeLine{l, w})
+				} else {
+					skipped++
+				}
 			}
 		}
 		if err != nil {
 			break
 		}
 	}
-	now := s.now()
+	for _, t := range traffic {
+		s.trafficAgg.add(t)
+	}
 	for i := range lines {
 		l := &lines[i]
-		s.routeAgg.add(l.hour(now), l.route(pats), l, now)
+		s.routeAgg.add(l.hour(now), l.route(pats), &l.accessLine, l.w, now)
 	}
 	accepted := len(lines)
 	s.met.linesAccepted.Add(uint64(accepted))
@@ -412,7 +449,7 @@ func newRouteTotals(first time.Time) *routeTotals {
 		decisions: map[string]int64{}, config: map[string]int64{}, rateLimit: map[string]int64{}, shapes: map[string]int64{}}
 }
 
-func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, now time.Time) {
+func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, w int64, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hk := hourRoute{hour, k}
@@ -425,7 +462,6 @@ func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, now tim
 		a.m[hk] = t
 	}
 	t.last = now
-	w := l.weight()
 	t.requests += w
 	if l.sampled() {
 		t.estimated += w

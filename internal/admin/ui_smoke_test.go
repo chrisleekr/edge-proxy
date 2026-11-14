@@ -51,19 +51,27 @@ func TestUISmoke(t *testing.T) {
 	lines := []string{}
 	for i := range 10 {
 		if i < 2 {
-			lines = append(lines, access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login"))
+			lines = append(lines, access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login", "client.geo.country_iso_code", "US"))
 			continue
 		}
-		lines = append(lines, access("POST", "api.example.com", "/login"))
+		lines = append(lines, access("POST", "api.example.com", "/login", "client.geo.country_iso_code", "US"))
 	}
+	// Some blog readers have no country, as when the CDN does not send one.
 	for i := range 22 {
-		lines = append(lines, access("GET", "www.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i), "edge.query_keys", []string{"utm_source"}))
+		country := "DE"
+		if i%4 == 0 {
+			country = ""
+		}
+		lines = append(lines, access("GET", "www.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i), "edge.query_keys", []string{"utm_source"}, "client.geo.country_iso_code", country))
 	}
 	// And a request the edge answered 502 because the upstream refused it.
 	lines = append(lines, access("GET", "api.example.com", "/orders/7", "http.response.status_code", 502, "edge.decision", "upstream_error",
-		"edge.upstream_answered", false, "edge.upstream_error", "dial tcp 10.0.0.1:443: connect: connection refused", "edge.upstream_error_kind", "refused"))
+		"edge.upstream_answered", false, "edge.upstream_error", "dial tcp 10.0.0.1:443: connect: connection refused", "edge.upstream_error_kind", "refused", "client.geo.country_iso_code", "GB"))
 	status(t, h.shipper().post(lines...), http.StatusAccepted)
 	if err := h.s.flushRoutes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.flushTraffic(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	// An hour of steady traffic, then 5 minutes with a fifth of it 5xx the

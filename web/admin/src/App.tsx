@@ -121,6 +121,9 @@ function LoginForm({ username: known }: { username?: string }) {
 // it uses, so they load when a rule is first opened.
 const RuleEditor = lazy(() => import('./pages/RuleEditor').then((m) => ({ default: m.RuleEditor })));
 
+// The traffic map brings the globe and its outlines, which only it uses.
+const TrafficMap = lazy(() => import('./pages/Traffic').then((m) => ({ default: m.TrafficMap })));
+
 // The section a path belongs to, so nested screens keep their nav link
 // marked: a rule editor is under Rules, a version under Versions.
 const sectionOf = (path: string) => `/${path.split('/')[1] ?? ''}`;
@@ -298,6 +301,7 @@ function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
     routes: () => (parts[1] ? <RouteDetail key={path} id={Number(parts[1])} can={can} /> : <Routes can={can} />),
     fleet: () => <Fleet />,
     stats: () => <Stats />,
+    traffic: () => <TrafficMap />,
     notifications: () => <Notifications canRead={can('config.read')} canManage={can('settings.manage')} />,
     autopilot: () =>
       parts[1] === 'cases' && parts[2] ? (

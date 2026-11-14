@@ -168,7 +168,7 @@ const shapeKeys = (shape: string) => (shape === '' ? [] : shape.split('&'));
 // useHours is the picked range in whole hours, as routes are counted. One
 // more than the range, so the hour in progress and the hour the range
 // starts in are both whole; 30 days is the most kept.
-function useHours() {
+export function useHours() {
   const [key, pick] = useRangeKey();
   const { minutes, label } = ranges[key];
   return { key, pick, label, hours: Math.min(720, minutes / 60 + 1) };
@@ -487,6 +487,18 @@ export function Routes({ can }: { can: (p: string) => boolean }) {
 // ms shows a latency bucket's upper bound: the true figure is at most this.
 const ms = (v: number) => (v === 0 ? '—' : v >= 1000 ? `≤ ${v / 1000} s` : `≤ ${v} ms`);
 
+// ShipperHint says where access logs come from, for a screen with none.
+// Its first words continue the sentence before it.
+export function ShipperHint() {
+  return (
+    <>
+      If none come back, check the log shipper: counts are built from the edges' access logs, which it posts to admin. The Helm
+      chart runs one by default (<code>logShipper.enabled</code>). Elsewhere, send each edge container's output to <code>/v1/logs/access</code> with the token in admin's{' '}
+      <code>LOG_INGEST_TOKEN_FILE</code>.
+    </>
+  );
+}
+
 // Coverage says how complete the counts are: the access lines admin
 // received, against the requests the edges counted themselves.
 function Coverage({ d, phrase }: { d: RouteList; phrase: string }) {
@@ -494,9 +506,7 @@ function Coverage({ d, phrase }: { d: RouteList; phrase: string }) {
     return (
       <Card title={`No access logs ${phrase}`}>
         <p className="max-w-prose text-body">
-          After Delete all, routes come back within a minute of new traffic. If none come back, check the log shipper: routes are built from the edges' access logs, which it posts to admin. The Helm
-          chart runs one by default (<code>logShipper.enabled</code>). Elsewhere, send each edge container's output to <code>/v1/logs/access</code> with the token in admin's{' '}
-          <code>LOG_INGEST_TOKEN_FILE</code>.
+          After Delete all, routes come back within a minute of new traffic. <ShipperHint />
         </p>
       </Card>
     );

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -296,7 +297,9 @@ func TestDocScreenshots(t *testing.T) {
 	var lines []string
 	add := func(n int, method, host, path string, extra ...any) {
 		for range n {
-			lines = append(lines, access(method, host, path, extra...))
+			// Countries by position in a fixed list, so every run is the same.
+			country := viewerCountries[len(lines)%len(viewerCountries)]
+			lines = append(lines, access(method, host, path, append(slices.Clip(extra), "client.geo.country_iso_code", country)...))
 		}
 	}
 	const sampled = 1.0 / 4096
@@ -344,8 +347,14 @@ func TestDocScreenshots(t *testing.T) {
 		}
 	}
 	at(0)
+	if _, err := h.owner.Exec(t.Context(), `INSERT INTO settings (key, value, updated_at) VALUES ('traffic_map', '{"edge":{"lat":50.11,"long":8.68}}', now())`); err != nil {
+		t.Fatal(err)
+	}
 	status(t, h.shipper().post(lines...), http.StatusAccepted)
 	if err := h.s.flushRoutes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.flushTraffic(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -367,3 +376,7 @@ func TestDocScreenshots(t *testing.T) {
 		t.Fatalf("playwright: %v (run scripts/ci/screenshots.sh update after a deliberate UI change)", err)
 	}
 }
+
+// viewerCountries are the access lines' countries for the Traffic map shot,
+// by line position: weighted towards a few, with some lines carrying none.
+var viewerCountries = []string{"US", "US", "DE", "US", "GB", "FR", "US", "DE", "JP", "US", "AU", "GB", "BR", "US", "IN", "DE", "CA", "", "US", "ZA", "SG", "FR", "US", "MX"}

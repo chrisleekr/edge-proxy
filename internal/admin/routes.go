@@ -15,6 +15,7 @@ func (s *Server) routes() {
 	s.notifyRoutes()
 	s.auditRoutes()
 	s.observedRoutes()
+	s.trafficRoutes()
 	s.autopilotRoutes()
 	s.attentionRoutes()
 	s.uiRoutes()
