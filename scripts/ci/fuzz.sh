@@ -11,6 +11,8 @@ fuzztime="${FUZZTIME:-20s}"
 base="${BASE:-}"
 # GitLab passes all zeros as the base of a new branch.
 [[ "${base}" =~ ^0+$ ]] && base=""
+# A force-push leaves the previous head out of the clone; fuzz everything then.
+[[ -n "${base}" ]] && ! git cat-file -e "${base}^{commit}" 2>/dev/null && base=""
 
 changed=""
 if [[ -n "${base}" ]]; then
