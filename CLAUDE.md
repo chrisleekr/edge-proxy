@@ -143,10 +143,10 @@ How tests must be written:
 
 ## Required commands
 
-- `make test` (`scripts/ci/test.sh`): `go test -race ./...`, then the 100% edge coverage gate and the admin-import check. Integration tests start their own Valkey/Postgres with testcontainers and never target shared or development infrastructure.
+- `make test` (`scripts/ci/test.sh`): edge packages with `-race` and the 100% edge coverage gate in one run, admin-only packages without `-race` (with it when `RACE_ADMIN=1`, as the nightly run sets), and the admin-import check. Integration tests start their own Valkey/Postgres with testcontainers and never target shared or development infrastructure.
 - `make lint` (`scripts/ci/lint.sh`): `go vet`, golangci-lint, shellcheck and the citation check (`scripts/ci/citations.sh`). It uses the pinned Docker image if golangci-lint isn't installed.
 - `make vuln` (`scripts/ci/vuln.sh`): govulncheck.
-- `make fuzz` (`scripts/ci/fuzz.sh`): every fuzz target for `FUZZTIME` (default 20s). Use `FUZZTIME=5m` before merging parser or matcher changes.
+- `make fuzz` (`scripts/ci/fuzz.sh`): every fuzz target for `FUZZTIME` (default 20s), or with `BASE=<commit>` only the targets whose package or dependencies changed since it (CI sets `BASE` on PRs, merge requests and pushes; scheduled runs fuzz everything). Use `FUZZTIME=5m` before merging parser or matcher changes.
 - `make bench` (`scripts/ci/bench.sh`): every benchmark, briefly, so they keep compiling and passing.
 - `make ui` (`scripts/ci/ui.sh`): admin UI `npm ci`, oxlint, typecheck and build, then the Playwright smoke tests against a real admin and Postgres (`TestUISmoke`, run only with `UI_SMOKE=1`) and the edge's SSE, streamed fetch and WebSocket tests in Chromium, Firefox and WebKit (`TestBrowserStreams`, run only with `BROWSER_SMOKE=1`).
 - `make autopilot` (`scripts/ci/autopilot.sh`): runner `npm ci`, oxlint, typecheck and unit tests, then `TestAutopilotRunner` (run only with `AUTOPILOT_RUNNER=1`): the real runner with a scripted adapter against a real admin and Postgres.
@@ -179,9 +179,9 @@ Every change is verified locally, end to end, before it is pushed or an MR is op
 | Gate | What it protects |
 | --- | --- |
 | `go vet ./...` + `golangci-lint run` | Correctness and style |
-| `go test -race ./...` | Unit and integration, against real Valkey (standalone and cluster) and Postgres |
+| `go test` (`-race` for edge on every change, for admin nightly) | Unit and integration, against real Valkey (standalone and cluster) and Postgres |
 | Edge merged coverage = 100% | Every edge statement is exercised by a scenario (unit + integration + e2e binary) |
-| Fuzz smoke (`scripts/ci/fuzz.sh`) | Parsers and matchers on the trust boundary: no panics, agreement with reference implementations |
+| Fuzz smoke (`scripts/ci/fuzz.sh`), scoped to the targets a change reaches; every target nightly | Parsers and matchers on the trust boundary: no panics, agreement with reference implementations |
 | `govulncheck ./...` | Known vulnerabilities in dependencies |
 | Zero-allocation tests + benchmarks run (`scripts/ci/bench.sh`) | Request-path allocations (gated by tests). ns/op is reported, not gated: shared runners are too noisy |
 | k6 smoke (Tier 1) | End-to-end behavior under load, including a Valkey outage. Admin, Postgres and IdP outages run in `make load-full` |

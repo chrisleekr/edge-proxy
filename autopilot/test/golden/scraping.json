@@ -23,7 +23,9 @@
     "opened_by": "system:autopilot",
     "created_at": "2026-10-28T22:49:26.339315Z",
     "closed_at": "2026-10-28T22:49:27.150154Z",
-    "ablation_of": null
+    "ablation_of": null,
+    "needs_you": [],
+    "details": ""
   },
   "run": {
     "id": 4,
@@ -45,7 +47,65 @@
     "status": "ok",
     "telemetry_complete": true,
     "tool_calls": 5,
-    "turns": 6
+    "turns": 6,
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "summary",
+        "needs_you",
+        "details",
+        "proposals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "attack",
+            "benign",
+            "unsure"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "needs_you": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule",
+              "ask"
+            ],
+            "properties": {
+              "rule": {
+                "type": "string",
+                "maxLength": 43
+              },
+              "ask": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 50
+        }
+      }
+    }
   },
   "calls": [
     {

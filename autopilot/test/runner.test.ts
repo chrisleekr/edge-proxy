@@ -55,19 +55,54 @@ test('batches stay under 1 MiB', () => {
 });
 
 test('a verdict with a field the schema does not list is refused', () => {
-  assert.equal(verdictSchema.safeParse({ verdict: 'attack', summary: 's', proposals: [], extra: 1 }).success, false);
+  assert.equal(verdictSchema.safeParse({ verdict: 'attack', summary: 's', needs_you: [], details: '', proposals: [], extra: 1 }).success, false);
 });
 
 test('a verdict outside attack, benign and unsure is refused', () => {
-  assert.equal(verdictSchema.safeParse({ verdict: 'maybe', summary: 's', proposals: [] }).success, false);
+  assert.equal(verdictSchema.safeParse({ verdict: 'maybe', summary: 's', needs_you: [], details: '', proposals: [] }).success, false);
 });
 
 test('a well-formed verdict is accepted', () => {
-  assert.equal(verdictSchema.safeParse({ verdict: 'attack', summary: 's', proposals: [1] }).success, true);
+  assert.equal(verdictSchema.safeParse({ verdict: 'attack', summary: 's', needs_you: [], details: '', proposals: [1] }).success, true);
 });
 
 test('claim backoff doubles from 1s and stops growing at 60s', () => {
   assert.ok(backoff(1) >= 1000 && backoff(1) < 2000);
   assert.ok(backoff(3) >= 4000 && backoff(3) < 5000);
   assert.ok(backoff(20) >= 60_000 && backoff(20) < 61_000);
+});
+
+const okVerdict = { verdict: 'attack', summary: 's', needs_you: [], details: '', proposals: [] };
+const item = { rule: '', ask: 'Decide.' };
+
+test('a verdict with six needs_you items is refused', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: Array(6).fill(item) }).success, false);
+});
+
+test('a verdict with five needs_you items is accepted', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: Array(5).fill(item) }).success, true);
+});
+
+test('a needs_you item with an unknown field is refused', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: [{ rule: 'ap-x', ask: 'a', extra: 1 }] }).success, false);
+});
+
+test('a verdict with a 301-character summary is refused', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, summary: 'a'.repeat(301) }).success, false);
+});
+
+test('a needs_you item with an empty ask is refused', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: [{ rule: '', ask: '' }] }).success, false);
+});
+
+test('a needs_you rule of 65 characters is refused and 64 accepted', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: [{ rule: 'a'.repeat(65), ask: 'Decide.' }] }).success, false);
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: [{ rule: 'a'.repeat(64), ask: 'Decide.' }] }).success, true);
+});
+
+test('NUL in the summary, details, an ask or a rule is refused', () => {
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, summary: 'a\0b' }).success, false);
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, details: 'a\0b' }).success, false);
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: [{ rule: '', ask: 'a\0b' }] }).success, false);
+  assert.equal(verdictSchema.safeParse({ ...okVerdict, needs_you: [{ rule: 'a\0b', ask: 'Decide.' }] }).success, false);
 });

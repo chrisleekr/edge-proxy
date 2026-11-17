@@ -262,7 +262,7 @@ func (a *agentRunner) run(ctx context.Context, c claimed) error {
 			}
 		}
 	}
-	result := map[string]any{"run_id": c.RunID, "status": "ok", "error_category": "", "verdict": verdict, "summary": "Answered by the load-test plan",
+	result := map[string]any{"run_id": c.RunID, "status": "ok", "error_category": "", "verdict": verdict, "summary": "Answered by the load-test plan", "needs_you": []any{}, "details": "",
 		"proposals": orEmpty(proposals), "turns": made + 1, "tool_calls": made, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0},
 		"provider_cost_usd": nil, "transcript_bytes": 0, "transcript_sha256": "", "last_seq": 0}
 	_, err = a.post(ctx, fmt.Sprintf("/v1/autopilot/cases/%d/result", c.CaseID), result, nil)

@@ -67,7 +67,7 @@ const promAnswer = { result_type: 'vector', result: [{ metric: {}, value: [17932
 // 11, and the four MCP calls admin recorded for it, one refused.
 function caseRead(runToolsSha: string) {
   return {
-    case: { id: 7, kind: 'anomaly', rule: 'ap-login-401-17', route_id: null, anomaly_id: 5, question: '', brief, state: 'done', attempts: 1, lease_until: null, run_id: 11, verdict: 'attack', summary: 'One address guessing passwords', opened_by: 'system:autopilot', created_at: at, closed_at: at, ablation_of: null },
+    case: { id: 7, kind: 'anomaly', rule: 'ap-login-401-17', route_id: null, anomaly_id: 5, question: '', brief, state: 'done', attempts: 1, lease_until: null, run_id: 11, verdict: 'attack', summary: 'One address guessing passwords', needs_you: [], details: '', opened_by: 'system:autopilot', created_at: at, closed_at: at, ablation_of: null },
     runs: [
       {
         id: 11, attempt: 1, runner: 'runner-a', provider: 'claude', model: 'claude-opus-5-5', prompt_sha256: contract.prompt_sha256, tools_sha256: runToolsSha, started_at: at, finished_at: at,
@@ -141,7 +141,7 @@ function model(calls: { tool: string; arguments: Record<string, unknown> }[], ve
     } finally {
       await server.close();
     }
-    return { output: { verdict, summary: 'replayed', proposals: [] }, error: '', turns: calls.length + 1, toolCalls: calls.length, usage, costUSD: 0.02 };
+    return { output: { verdict, summary: 'replayed', needs_you: [], details: '', proposals: [] }, error: '', turns: calls.length + 1, toolCalls: calls.length, usage, costUSD: 0.02 };
   };
 }
 
@@ -328,7 +328,7 @@ test("the replay's MCP server answers only the model it started, at its own addr
     // A DNS-rebound page reaches 127.0.0.1 under its own host name.
     got['rebound host'] = await post(input.mcpURL, { ...input.mcpHeaders, host: `attacker.example:${port}` });
     got['the model'] = await post(input.mcpURL, input.mcpHeaders);
-    return { output: { verdict: 'attack', summary: 'probed', proposals: [] }, error: '', turns: 1, toolCalls: 0, usage, costUSD: 0 };
+    return { output: { verdict: 'attack', summary: 'probed', needs_you: [], details: '', proposals: [] }, error: '', turns: 1, toolCalls: 0, usage, costUSD: 0 };
   };
   await replayMain({ claude: probe }, ['7', '--admin', admin.url, '--token-file', admin.tokenFile]);
   assert.deepEqual(got, { 'no token': 401, 'wrong token': 401, 'rebound host': 401, 'the model': 200 });

@@ -1035,7 +1035,7 @@ test('turning the hourly sweep off is saved, shown in the status card, and turne
   await expect(page.getByRole('checkbox', { name: 'Daily review' })).toBeChecked();
 });
 
-test('Investigate from a rule opens a case that reads as a story, and Find opens it by its rule', async () => {
+test('Investigate from a rule opens a case that leads with its answer, and Find opens it by its rule', async () => {
   await page.goto('/rules/rate_limit/login');
   await page.getByRole('button', { name: 'Investigate', exact: true }).click();
   await page.getByRole('dialog').getByLabel('Question, if any').fill('Is someone guessing passwords?');
@@ -1047,13 +1047,28 @@ test('Investigate from a rule opens a case that reads as a story, and Find opens
   await expect(page.getByText('Attack', { exact: true })).toBeVisible({
     timeout: 20_000,
   });
-  // The story order, top to bottom.
-  await expect(page.locator('main h2')).toHaveText(['Trigger', 'Evidence', 'Tool calls', 'Verdict', 'Policy checks', 'Actions', 'Cost']);
+  // The answer comes first, then what admin did, then the folded evidence.
+  await expect(page.locator('main h2')).toHaveText(['Trigger', 'Verdict', 'Policy checks', 'Actions', 'Evidence', 'Tool calls', 'Cost']);
   await expect(page.locator('main details').first()).not.toHaveAttribute('open');
-  await expect(page.getByText('get_case', { exact: true })).toBeVisible();
   // The innermost section with the heading: the page is a section too.
   const card = (name: string) => page.locator('section').filter({ has: page.getByRole('heading', { name, exact: true }) }).last();
+  const verdict = card('Verdict');
+  await expect(verdict.getByText('Needs you', { exact: true })).toBeVisible();
+  await expect(verdict.getByRole('link', { name: /^ap-login-stuffing-\d+$/ })).toHaveAttribute('href', investigated);
+  await expect(verdict.getByText('Approve blocking once it has logged for a day')).toBeVisible();
+  await expect(verdict.getByText('Tell the login team about the password guessing')).toBeVisible();
+  await expect(verdict.getByText('Proposed enforcing 1 rule: all accepted.', { exact: true })).toBeVisible();
+  const details = 'so the rule counts failed logins per address';
+  await expect(verdict.getByText(details)).toBeHidden();
+  await verdict.getByText('How it decided', { exact: true }).click();
+  await expect(verdict.getByText(details)).toBeVisible();
+  // Evidence, tool calls and passed checks are folded until opened.
+  await expect(card('Evidence').getByText('rule_would_block on login')).toBeHidden();
+  await card('Evidence').getByText(/^Evidence for \d+ proposals?$/).click();
   await expect(card('Evidence').getByText('rule_would_block on login')).toBeVisible();
+  await card('Tool calls').getByText(/^\d+ tool calls?$/).click();
+  await expect(page.getByText('get_case', { exact: true })).toBeVisible();
+  await card('Policy checks').getByText(/^Passed all \d+ checks$/).first().click();
   await expect(page.getByText('Passed: Counts per IP or JWT claim')).toBeVisible();
 
   // The next autopilot run publishes it log only.
@@ -1158,6 +1173,7 @@ test('Investigate from a route opens a case on that route', async () => {
   await expect(page.getByText('Benign', { exact: true })).toBeVisible({
     timeout: 20_000,
   });
+  await expect(page.getByText('Proposed nothing.', { exact: true })).toBeVisible();
 });
 
 test('Find opens a case and a note', async () => {

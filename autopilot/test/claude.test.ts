@@ -185,7 +185,7 @@ const result = {
   usage: resultUsage,
   modelUsage: {},
   permission_denials: [{ tool_name: 'Bash', tool_use_id: 'tu_2', tool_input: { command: 'ls' } }],
-  structured_output: { verdict: 'attack', summary: 'One /24', proposals: [3] },
+  structured_output: { verdict: 'attack', summary: 'One /24', needs_you: [], details: '', proposals: [3] },
   uuid: '00000000-0000-0000-0000-000000000002',
   session_id: 's',
 } satisfies SDKResultSuccess;
@@ -199,7 +199,7 @@ test('a refused tool call is recorded as permission_denied', () => {
 
 test('a successful result carries the structured output, turns, tokens and cost', () => {
   assert.deepEqual(fromClaude(result, 2), {
-    output: { verdict: 'attack', summary: 'One /24', proposals: [3] },
+    output: { verdict: 'attack', summary: 'One /24', needs_you: [], details: '', proposals: [3] },
     error: '',
     turns: 4,
     toolCalls: 2,

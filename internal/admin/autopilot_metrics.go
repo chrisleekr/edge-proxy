@@ -19,7 +19,7 @@ var (
 	proposalActions = [...]string{"add_sensor", "enforce", "retire"}
 	proposalResults = [...]string{"accepted", "rejected"}
 	policyReasons   = [...]string{"not_overlay_shape", "site_wide", "fail_mode", "key_needs_ip_or_jwt", "constant_or_host_key", "missing_key_rejects",
-		"ttl_over_max", "lifetime_over_max", "penalty_past_expiry", "named_subjects", "duplicate", "suppressed", "compile", "budget_enforcing",
+		"ttl_over_max", "lifetime_over_max", "penalty_past_expiry", "named_subjects", "duplicate", "suppressed", "sweep_repeat", "compile", "budget_enforcing",
 		"budget_sensors", "observed_too_short", "block_share", "crawler_subject", "protected_subject", "attack_stopped", "schema", "deployment",
 		"note_key", "note_jwt_key", "note_expected_pattern"}
 	llmProviders = [...]string{"claude", "openai"}

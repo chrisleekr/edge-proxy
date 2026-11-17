@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Runs every test with the race detector and enforces 100% statement coverage
-# on edge scope: every package in this module except the admin-only ones.
-# Admin-only packages are tested but not gated.
+# Runs every test and enforces 100% statement coverage on edge scope: every
+# package in this module except the admin-only ones. Edge packages run once,
+# with the race detector and coverage together. Admin-only packages run
+# separately without coverage flags, so they never count toward the gate, and
+# with the race detector only when RACE_ADMIN=1 (nightly): it doubles their
+# run, and admin is off the request path.
 set -euo pipefail
 
 mod="$(go list -m)"
@@ -16,8 +19,6 @@ if [[ -z "${all_pkgs}" ]]; then
   exit 0
 fi
 
-go test -race -count=1 -timeout 20m ./...
-
 if [[ -d cmd/edge ]]; then
   leaked="$(go list -deps ./cmd/edge | grep "^${mod}/" | grep -E "${admin_only}" || true)"
   if [[ -n "${leaked}" ]]; then
@@ -28,6 +29,15 @@ if [[ -d cmd/edge ]]; then
 fi
 
 edge_pkgs="$(echo "${all_pkgs}" | grep -Ev "${admin_only}" || true)"
+admin_pkgs="$(echo "${all_pkgs}" | grep -E "${admin_only}" || true)"
+
+if [[ -n "${admin_pkgs}" ]]; then
+  race=""
+  [[ "${RACE_ADMIN:-}" == 1 ]] && race="-race"
+  # shellcheck disable=SC2086 # word splitting of the flag and package list is intended
+  go test ${race} -count=1 -timeout 20m ${admin_pkgs}
+fi
+
 if [[ -z "${edge_pkgs}" ]]; then
   echo "no edge-scope packages yet; coverage gate skipped"
   exit 0
@@ -35,7 +45,7 @@ fi
 
 coverpkg="$(echo "${edge_pkgs}" | paste -sd, -)"
 # shellcheck disable=SC2086 # word splitting of the package list is intended
-go test -count=1 -covermode=atomic -coverpkg="${coverpkg}" -coverprofile=cover.out ${edge_pkgs}
+go test -race -count=1 -timeout 20m -covermode=atomic -coverpkg="${coverpkg}" -coverprofile=cover.out ${edge_pkgs}
 
 # End-to-end: run the real edge binary built with -cover and merge its
 # profile, so cmd/edge (main, signals, exit codes) is measured too.

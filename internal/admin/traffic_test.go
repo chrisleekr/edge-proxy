@@ -148,6 +148,7 @@ func TestRefusedRequestsCountAsBlocked(t *testing.T) {
 			return access("BREW", "evil.example", "/", "client.geo.country_iso_code", c, "edge.decision", "method", "http.response.status_code", 405)
 		}, 1},
 		{"log only would block", "AE", func(c string) string { return geo(c, "edge.decision", "would_block") }, 0},
+		{"log only would limit", "AK", func(c string) string { return geo(c, "edge.decision", "would_limit", "edge.rate_limit_rule", "login") }, 0},
 		{"upstream error", "AF", func(c string) string {
 			return geo(c, "edge.decision", "upstream_error", "http.response.status_code", 502)
 		}, 0},
@@ -167,7 +168,7 @@ func TestRefusedRequestsCountAsBlocked(t *testing.T) {
 	for _, tc := range cases {
 		lines = append(lines, tc.line(tc.country))
 	}
-	if got := decode[map[string]int](t, h.shipper().post(lines...)); got["accepted"] != 8 || got["skipped"] != 2 {
+	if got := decode[map[string]int](t, h.shipper().post(lines...)); got["accepted"] != 9 || got["skipped"] != 2 {
 		t.Fatalf("ingest = %v", got)
 	}
 	got := h.traffic(vera, "?minutes=5")

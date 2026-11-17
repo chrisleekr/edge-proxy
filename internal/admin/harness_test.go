@@ -65,16 +65,13 @@ func newHarness(t *testing.T) *harness { t.Helper(); return newHarnessWith(t, ni
 // serve does. Edge routes share that pool here; serve gives them their own.
 func newHarnessWith(t *testing.T, set map[string]string) *harness {
 	t.Helper()
-	db := testenv.Postgres(t)
+	db := testenv.Migrated(t, func(ctx context.Context, c *pgx.Conn) error { return admindb.Migrate(ctx, c, testenv.AppRole) })
 	ctx := t.Context()
 	owner, err := pgx.Connect(ctx, db.Owner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = owner.Close(context.Background()) }) //nolint:usetesting // t.Context is already cancelled when Cleanup runs
-	if err := admindb.Migrate(ctx, owner, testenv.AppRole); err != nil {
-		t.Fatal(err)
-	}
 	e := baseEnv(db.App)
 	maps.Copy(e, set)
 	cfg, err := LoadConfig(env(e))

@@ -36,6 +36,8 @@ export interface Result {
   error_category: string;
   verdict?: string;
   summary: string;
+  needs_you: { rule: string; ask: string }[];
+  details: string;
   proposals: number[];
   turns: number;
   tool_calls: number;

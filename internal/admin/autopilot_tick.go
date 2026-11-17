@@ -334,7 +334,18 @@ func (s *Server) tickRules(ctx context.Context, gate tickGate, why string) error
 			case r.State != "proposed" && base[plain]:
 				change(r, ended(r, "adopted", "adopted", now), "a person adopted it", "system:autopilot", "autopilot.adopt", nil)
 			case r.State != "proposed" && r.ExpiresAt != nil && !r.ExpiresAt.After(now):
-				change(r, ended(r, "expired", "expired", now), "it reached its expiry", "system:autopilot", "autopilot.expire", nil)
+				idle, numbers := false, map[string]any(nil)
+				if r.Kind == "sensor" && r.State == "observing" {
+					var err error
+					if idle, numbers, err = s.idleSensor(ctx, tx, r, time.Duration(set.MaxTTL), *r.ExpiresAt); err != nil {
+						return err
+					}
+				}
+				if idle {
+					change(r, ended(r, "expired", "unused", now), "it matched no requests before its expiry", "system:autopilot", "autopilot.expire", numbers)
+				} else {
+					change(r, ended(r, "expired", "expired", now), "it reached its expiry", "system:autopilot", "autopilot.expire", nil)
+				}
 				summary = append(summary, "expire "+r.ID)
 			// Its expression still leaves out a client a person no longer
 			// excludes; the sweep can watch the route again without it. An
@@ -494,9 +505,28 @@ func (s *Server) lifetimeEnd(ctx context.Context, q querier, set AutopilotSettin
 	return start.Add(time.Duration(set.MaxLifetime))
 }
 
-// renew extends a rule a quarter of whose ttl is left: a sensor always,
-// an enforcing rule only while it still limits. A rule never runs past
-// max_lifetime after it went live, counted from the sensor it cites.
+// idleSensor reports whether a sensor has been live for at least maxTTL
+// before to and matched no request in the maxTTL window ending at to, with the
+// numbers that decided it. A first ttl can be as short as the policy allows,
+// so a shorter life is never idle: pausing traffic for one short ttl must not
+// end a sensor. A log-only rule past the per-request cap counts as capped, not
+// evaluated, so both are matches. Without a stats row for it the answer is no:
+// a stats outage must not end a sensor.
+func (s *Server) idleSensor(ctx context.Context, q querier, r apRule, maxTTL time.Duration, to time.Time) (bool, map[string]any, error) {
+	if r.LiveSince == nil || to.Sub(*r.LiveSince) < maxTTL {
+		return false, nil, nil
+	}
+	from := to.Add(-maxTTL).Truncate(time.Minute)
+	var rows, matches int64
+	err := q.QueryRow(ctx, `SELECT count(e), coalesce(sum(coalesce((e->>'evaluated')::bigint, 0) + coalesce((e->>'capped')::bigint, 0)), 0)::bigint
+		FROM (SELECT (SELECT x FROM jsonb_array_elements(rate_limit) x WHERE x->>'id' = $1 LIMIT 1) e FROM edge_stats_minute WHERE minute >= $2 AND minute <= $3) m`,
+		r.ID, from, to).Scan(&rows, &matches)
+	return rows > 0 && matches == 0, map[string]any{"window_from": from, "window_to": to, "stats_minutes": rows, "matches": matches}, err
+}
+
+// renew extends a rule a quarter of whose ttl is left: a sensor unless it
+// is idle, an enforcing rule only while it still limits. A rule never runs
+// past max_lifetime after it went live, counted from the sensor it cites.
 func (s *Server) renew(ctx context.Context, q querier, set AutopilotSettings, r apRule) (*ruleChange, error) {
 	now := s.now()
 	ttl := time.Duration(r.TTLSeconds) * time.Second
@@ -523,6 +553,8 @@ func (s *Server) renew(ctx context.Context, q querier, set AutopilotSettings, r 
 		}
 	} else if r.Kind != "sensor" {
 		return nil, nil
+	} else if idle, _, err := s.idleSensor(ctx, q, r, time.Duration(set.MaxTTL), now); err != nil || idle {
+		return nil, err
 	}
 	exp := minTime(now.Add(newTTL), s.lifetimeEnd(ctx, q, set, r)).Truncate(time.Second)
 	if !exp.After(*r.ExpiresAt) {

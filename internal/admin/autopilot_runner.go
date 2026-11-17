@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -29,8 +30,11 @@ var autopilotPrompt string
 var promptSHA256 = sha256.Sum256([]byte(autopilotPrompt))
 
 // verdictSchema is the output schema the runner asks the model for.
-var verdictSchema = json.RawMessage(`{"type":"object","required":["verdict","summary","proposals"],"additionalProperties":false,"properties":{` +
-	`"verdict":{"type":"string","enum":["attack","benign","unsure"]},"summary":{"type":"string","maxLength":4000},` +
+var verdictSchema = json.RawMessage(`{"type":"object","required":["verdict","summary","needs_you","details","proposals"],"additionalProperties":false,"properties":{` +
+	`"verdict":{"type":"string","enum":["attack","benign","unsure"]},"summary":{"type":"string","maxLength":300},` +
+	`"needs_you":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["rule","ask"],"properties":{` +
+	`"rule":{"type":"string","maxLength":64},"ask":{"type":"string","minLength":1,"maxLength":300}}}},` +
+	`"details":{"type":"string","maxLength":4000},` +
 	`"proposals":{"type":"array","items":{"type":"integer"},"maxItems":50}}}`)
 
 // Run record bounds. An event over maxEventBytes is stored as a marker with
@@ -367,19 +371,28 @@ func (s *Server) runEvents(w http.ResponseWriter, r *http.Request, _ *principal)
 }
 
 type resultIn struct {
-	RunID            int64    `json:"run_id"`
-	Status           string   `json:"status"`
-	ErrorCategory    string   `json:"error_category"`
-	Verdict          string   `json:"verdict"`
-	Summary          string   `json:"summary"`
-	Proposals        []int64  `json:"proposals"`
-	Turns            int      `json:"turns"`
-	ToolCalls        int      `json:"tool_calls"`
-	Usage            tokenUse `json:"usage"`
-	ProviderCostUSD  *float64 `json:"provider_cost_usd"`
-	TranscriptBytes  int64    `json:"transcript_bytes"`
-	TranscriptSHA256 string   `json:"transcript_sha256"`
-	LastSeq          int      `json:"last_seq"`
+	RunID            int64      `json:"run_id"`
+	Status           string     `json:"status"`
+	ErrorCategory    string     `json:"error_category"`
+	Verdict          string     `json:"verdict"`
+	Summary          string     `json:"summary"`
+	NeedsYou         []needsYou `json:"needs_you"`
+	Details          string     `json:"details"`
+	Proposals        []int64    `json:"proposals"`
+	Turns            int        `json:"turns"`
+	ToolCalls        int        `json:"tool_calls"`
+	Usage            tokenUse   `json:"usage"`
+	ProviderCostUSD  *float64   `json:"provider_cost_usd"`
+	TranscriptBytes  int64      `json:"transcript_bytes"`
+	TranscriptSHA256 string     `json:"transcript_sha256"`
+	LastSeq          int        `json:"last_seq"`
+}
+
+// needsYou is one decision only a person can make. Rule is an autopilot rule
+// id (at most snapshot.MaxNameLen, 64, characters) or "" for none.
+type needsYou struct {
+	Rule string `json:"rule"`
+	Ask  string `json:"ask"`
 }
 
 type tokenUse struct {
@@ -400,8 +413,17 @@ func (in resultIn) problems() string {
 	case in.Status == "ok" && in.Verdict != "attack" && in.Verdict != "benign" && in.Verdict != "unsure":
 		return "verdict must be attack, benign or unsure"
 	// Characters, as the output schema's maxLength counts them.
-	case utf8.RuneCountInString(in.Summary) > 4000 || len(in.ErrorCategory) > 64 || len(in.Proposals) > 50:
-		return "summary is at most 4000 characters, error_category at most 64 and proposals at most 50"
+	case utf8.RuneCountInString(in.Summary) > 300 || utf8.RuneCountInString(in.Details) > 4000 || len(in.ErrorCategory) > 64 || len(in.Proposals) > 50:
+		return "summary is at most 300 characters, details at most 4000, error_category at most 64 and proposals at most 50"
+	case len(in.NeedsYou) > 5 || slices.ContainsFunc(in.NeedsYou, func(n needsYou) bool {
+		return n.Ask == "" || utf8.RuneCountInString(n.Ask) > 300 || utf8.RuneCountInString(n.Rule) > 64
+	}):
+		return "needs_you is at most 5 items, each an ask of 1 to 300 characters and a rule of at most 64 characters"
+	// Postgres text and jsonb refuse U+0000, so one would fail the close with a 500.
+	case strings.ContainsRune(in.Summary, 0) || strings.ContainsRune(in.Details, 0) || slices.ContainsFunc(in.NeedsYou, func(n needsYou) bool {
+		return strings.ContainsRune(n.Ask, 0) || strings.ContainsRune(n.Rule, 0)
+	}):
+		return "summary, details and needs_you can't hold NUL"
 	case in.Turns < 0 || in.ToolCalls < 0 || in.TranscriptBytes < 0 || in.LastSeq < 0:
 		return "counts can't be negative"
 	case slices.ContainsFunc(in.Usage.list(), func(t int64) bool { return t < 0 || t > maxTokens }):
@@ -530,8 +552,9 @@ func (s *Server) caseResult(w http.ResponseWriter, r *http.Request, _ *principal
 		switch {
 		case in.Status == "ok":
 			closedAs = in.Verdict
-			details["verdict"], details["summary"] = in.Verdict, in.Summary
-			_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'done', verdict = $2, summary = $3, closed_at = $4, lease_until = NULL WHERE id = $1", id, in.Verdict, in.Summary, now)
+			needs := orEmpty(in.NeedsYou)
+			details["verdict"], details["summary"], details["needs_you"], details["details"] = in.Verdict, in.Summary, needs, in.Details
+			_, err = tx.Exec(ctx, "UPDATE autopilot_cases SET state = 'done', verdict = $2, summary = $3, needs_you = $4, details = $5, closed_at = $6, lease_until = NULL WHERE id = $1", id, in.Verdict, in.Summary, needs, in.Details, now)
 			if err == nil && kind == "ablation" {
 				err = s.ablationDone(ctx, tx, id, in.RunID, in.Verdict)
 			}

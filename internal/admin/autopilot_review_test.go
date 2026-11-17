@@ -202,21 +202,30 @@ func TestAutopilotSummariesAreUntrusted(t *testing.T) {
 			}
 		}
 	})
-	t.Run("an earlier case's summary in prior_cases", func(t *testing.T) {
-		h, pub, agent := autopilotHarness(t)
-		c := openAndClaim(t, pub, agent)
-		in := resultBody(c.RunID, "benign", usage{Input: 1}, nil, 0)
-		in["summary"] = "The path said " + injected
-		status(t, agent.result(c.CaseID, in), 204)
-		c = openAndClaim(t, pub, agent)
-		out := mustCall(t, h.mcpSession(agentToken, c.RunID), "get_case", nil)
-		if !strings.Contains(fmt.Sprint(out), injected) {
-			t.Fatalf("prior_cases is missing the summary: %v", out)
-		}
-		if p := untrustedOnly(out, injected, "", false); p != "" {
-			t.Fatalf("%s holds a client-written value outside an untrusted field", p)
-		}
-	})
+	for _, field := range []string{"summary", "details", "ask"} {
+		t.Run("an earlier case's "+field+" reaches the model only inside untrusted in prior_cases", func(t *testing.T) {
+			h, pub, agent := autopilotHarness(t)
+			c := openAndClaim(t, pub, agent)
+			in := resultBody(c.RunID, "benign", usage{Input: 1}, nil, 0)
+			in["summary"], in["details"] = "A summary.", "Some details."
+			in["needs_you"] = []map[string]string{{"rule": "", "ask": "An ask."}}
+			switch field {
+			case "ask":
+				in["needs_you"] = []map[string]string{{"rule": "", "ask": "Check " + injected}}
+			default:
+				in[field] = "The path said " + injected
+			}
+			status(t, agent.result(c.CaseID, in), 204)
+			c = openAndClaim(t, pub, agent)
+			out := mustCall(t, h.mcpSession(agentToken, c.RunID), "get_case", nil)
+			if !strings.Contains(fmt.Sprint(out), injected) {
+				t.Fatalf("prior_cases is missing the %s: %v", field, out)
+			}
+			if p := untrustedOnly(out, injected, "", false); p != "" {
+				t.Fatalf("%s holds a client-written value outside an untrusted field", p)
+			}
+		})
+	}
 	t.Run("a route in get_route", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		status(t, h.shipper().post(access("GET", "api.example.com", "/"+injected+"/42")), http.StatusAccepted)

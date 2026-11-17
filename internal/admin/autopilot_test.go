@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -642,9 +643,9 @@ func TestAutopilotRunRecords(t *testing.T) {
 		summary string
 		want    int
 	}{
-		// The output schema the model gets says maxLength 4000, which JSON Schema counts in characters.
-		{"a 4000-character summary in a multi-byte script is accepted", strings.Repeat("가", 4000), 204},
-		{"a 4001-character summary is refused", strings.Repeat("a", 4001), 422},
+		// The output schema the model gets says maxLength 300, which JSON Schema counts in characters.
+		{"a 300-character summary in a multi-byte script is accepted", strings.Repeat("가", 300), 204},
+		{"a 301-character summary is refused", strings.Repeat("a", 301), 422},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, pub, agent := autopilotHarness(t)
@@ -654,6 +655,79 @@ func TestAutopilotRunRecords(t *testing.T) {
 			status(t, agent.result(c.CaseID, in), tc.want)
 		})
 	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(in map[string]any)
+	}{
+		{"six needs_you items", func(in map[string]any) {
+			in["needs_you"] = slices.Repeat([]map[string]string{{"rule": "", "ask": "Decide."}}, 6)
+		}},
+		{"a needs_you ask of 301 characters", func(in map[string]any) {
+			in["needs_you"] = []map[string]string{{"rule": "", "ask": strings.Repeat("a", 301)}}
+		}},
+		{"an empty needs_you ask", func(in map[string]any) {
+			in["needs_you"] = []map[string]string{{"rule": "", "ask": ""}}
+		}},
+		{"a needs_you rule of 65 characters", func(in map[string]any) {
+			in["needs_you"] = []map[string]string{{"rule": "ap-" + strings.Repeat("a", 62), "ask": "Decide."}}
+		}},
+		{"NUL in a needs_you ask", func(in map[string]any) {
+			in["needs_you"] = []map[string]string{{"rule": "", "ask": "Decide\x00."}}
+		}},
+		{"NUL in details", func(in map[string]any) { in["details"] = "Failed\x00logins." }},
+		{"details of 4001 characters", func(in map[string]any) { in["details"] = strings.Repeat("a", 4001) }},
+	} {
+		t.Run(tc.name+" is refused and closes nothing", func(t *testing.T) {
+			h, pub, agent := autopilotHarness(t)
+			c := openAndClaim(t, pub, agent)
+			in := resultBody(c.RunID, "benign", usage{Input: 10}, nil, 0)
+			tc.mutate(in)
+			status(t, agent.result(c.CaseID, in), 422)
+			var state string
+			if err := h.db.QueryRow(t.Context(), "SELECT state FROM autopilot_cases WHERE id = $1", c.CaseID).Scan(&state); err != nil || state != "running" {
+				t.Fatalf("case state %q, want running, err %v", state, err)
+			}
+		})
+	}
+	t.Run("a needs_you rule of 64 characters, the longest rule id, is accepted", func(t *testing.T) {
+		_, pub, agent := autopilotHarness(t)
+		c := openAndClaim(t, pub, agent)
+		in := resultBody(c.RunID, "benign", usage{Input: 10}, nil, 0)
+		in["needs_you"] = []map[string]string{{"rule": "ap-" + strings.Repeat("a", 61), "ask": "Decide."}}
+		status(t, agent.result(c.CaseID, in), 204)
+	})
+	t.Run("a result's needs_you and details are stored, returned by the case API and audited", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		c := openAndClaim(t, pub, agent)
+		in := resultBody(c.RunID, "attack", usage{Input: 10}, nil, 0)
+		want := []map[string]string{{"rule": "ap-login-stuffing", "ask": "Decide whether it may block."}, {"rule": "", "ask": "Confirm the partner."}}
+		in["needs_you"], in["details"] = want, "Failed logins rose eightfold."
+		status(t, agent.result(c.CaseID, in), 204)
+		type view struct {
+			NeedsYou []map[string]string `json:"needs_you"`
+			Details  string              `json:"details"`
+		}
+		got := decode[struct {
+			Case view `json:"case"`
+		}](t, pub.do("GET", fmt.Sprintf("/api/autopilot/cases/%d", c.CaseID), nil)).Case
+		if !reflect.DeepEqual(got.NeedsYou, want) || got.Details != "Failed logins rose eightfold." {
+			t.Fatalf("case API gave %+v", got)
+		}
+		var audited string
+		if err := h.db.QueryRow(t.Context(), `SELECT (details->'needs_you')::text || (details->>'details') FROM audit_events WHERE action = 'autopilot.case_close' AND target = $1`,
+			fmt.Sprintf("case %d", c.CaseID)).Scan(&audited); err != nil || !strings.Contains(audited, "Confirm the partner.") || !strings.Contains(audited, "Failed logins rose eightfold.") {
+			t.Fatalf("audit row %q, err %v", audited, err)
+		}
+	})
+	t.Run("a case closed without needs_you lists none", func(t *testing.T) {
+		_, pub, agent := autopilotHarness(t)
+		c := openAndClaim(t, pub, agent)
+		status(t, agent.result(c.CaseID, resultBody(c.RunID, "benign", usage{Input: 10}, nil, 0)), 204)
+		got, _ := decode[map[string]any](t, pub.do("GET", fmt.Sprintf("/api/autopilot/cases/%d", c.CaseID), nil))["case"].(map[string]any)
+		if n, ok := got["needs_you"].([]any); !ok || len(n) != 0 || got["details"] != "" {
+			t.Fatalf("needs_you %v details %v, want [] and empty", got["needs_you"], got["details"])
+		}
+	})
 	t.Run("the result closes the case with an audit row that hashes its events", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		c := openAndClaim(t, pub, agent)
@@ -1056,7 +1130,7 @@ func TestAutopilotMetrics(t *testing.T) {
 			`admin_background_job_failures_total{job="autopilot"} 0`,
 		}
 		for _, reason := range []string{"not_overlay_shape", "site_wide", "fail_mode", "key_needs_ip_or_jwt", "constant_or_host_key", "missing_key_rejects",
-			"ttl_over_max", "lifetime_over_max", "penalty_past_expiry", "named_subjects", "duplicate", "suppressed", "compile", "budget_enforcing",
+			"ttl_over_max", "lifetime_over_max", "penalty_past_expiry", "named_subjects", "duplicate", "suppressed", "sweep_repeat", "compile", "budget_enforcing",
 			"budget_sensors", "observed_too_short", "block_share", "crawler_subject", "protected_subject", "attack_stopped",
 			"note_key", "note_jwt_key", "note_expected_pattern"} {
 			lines = append(lines, fmt.Sprintf(`admin_autopilot_policy_rejections_total{reason=%q} 0`, reason))
