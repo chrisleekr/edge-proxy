@@ -510,11 +510,11 @@ func (s *Server) lifetimeEnd(ctx context.Context, q querier, set AutopilotSettin
 // numbers that decided it. A first ttl can be as short as the policy allows,
 // so a shorter life is never idle: pausing traffic for one short ttl must not
 // end a sensor. A log-only rule past the per-request cap counts as capped, not
-// evaluated, so both are matches. Dropped stats reports must never end a
-// sensor, and edges report every rate-limit rule every interval, zero counts
-// included, so it is idle only when every whole minute of the window has a
-// stats row naming the rule. The current minute may not be reported yet and
-// is not required.
+// evaluated, so both are matches. A stats outage must not end a sensor, and
+// edges report every rate-limit rule every interval, zero counts included, so
+// it is idle only when every whole minute of the window has a stats row naming
+// the rule. Rows sum all edges, so one edge's lost report is not detected. The
+// current minute may not be reported yet and is not required.
 func (s *Server) idleSensor(ctx context.Context, q querier, r apRule, maxTTL time.Duration, to time.Time) (bool, map[string]any, error) {
 	if r.LiveSince == nil || to.Sub(*r.LiveSince) < maxTTL {
 		return false, nil, nil
