@@ -337,6 +337,42 @@ func TestSimulateEvaluatesJA4AndHTTPVersion(t *testing.T) {
 	}
 }
 
+// A config test can put the client in IP lists by name, and rules naming
+// them match as they do live. A name that can't be a list name, or more
+// lists than an edge holds, is an error.
+func TestSimulateIPLists(t *testing.T) {
+	c := testConfig(1)
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "hosted", Expression: mustParse(`client.ip_lists in {"aws" "azure"} and not client.ip_lists in {"statuscake"}`), Settings: snapshot.Settings{BodyLimit: new(int64(2048))}})
+	cc := compiled(t, c)
+	const base = `"Method": "GET", "Host": "api.example.com", "Target": "/", "IP": "198.51.100.7"`
+	cases := []struct {
+		name, req string
+		want      []string
+	}{
+		{"client on a named list", `{` + base + `, "IPLists": ["firehol-abusers", "azure"]}`, []string{"hosted"}},
+		{"client on a list the rule does not name", `{` + base + `, "IPLists": ["hetzner"]}`, nil},
+		{"client on a named list and an exempt one", `{` + base + `, "IPLists": ["aws", "statuscake"]}`, nil},
+		{"client on no list", `{` + base + `}`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Simulate(cc, simRequest(t, tc.req))
+			if err != nil || !slices.Equal(got.ConfigRules, tc.want) {
+				t.Fatalf("config rules %v, want %v, error %v", got.ConfigRules, tc.want, err)
+			}
+		})
+	}
+	tooMany := make([]string, expr.MaxIPLists+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("list-%d", i)
+	}
+	for name, lists := range map[string][]string{"an uppercase name": {"AWS"}, "more lists than an edge holds": tooMany} {
+		if _, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: "/", IP: "198.51.100.7", IPLists: lists}); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
 // A config test sees a block rule refuse the request at the config phase,
 // and the block setting it resolved.
 func TestSimulateBlockRule(t *testing.T) {
@@ -353,6 +389,26 @@ func TestSimulateBlockRule(t *testing.T) {
 		got, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: "/", IP: "198.51.100.7", Headers: map[string][]string{"User-Agent": {tc.ua}}})
 		if err != nil || got.Rejected != tc.rejected || got.Settings.Block != tc.block {
 			t.Fatalf("%s: %+v %v", tc.ua, got, err)
+		}
+	}
+}
+
+// A config test shows how long a trap rule bans the client, only when that
+// rule is the winning block rule.
+func TestSimulateReportsTheBan(t *testing.T) {
+	c := trapConfig(1)
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "later", Expression: mustParse(`http.user_agent contains "curl"`), Settings: snapshot.Settings{Block: new("block")}})
+	cc := compiled(t, c)
+	for _, tc := range []struct {
+		name, ua string
+		want     snapshot.Duration
+	}{
+		{"trap is the winning block rule", "Mozilla/5.0", dur(time.Hour)},
+		{"a later block rule without ban wins", "curl/8.5.0", 0},
+	} {
+		got, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: "/wp-login.php", IP: "198.51.100.7", Headers: map[string][]string{"User-Agent": {tc.ua}}})
+		if err != nil || got.Rejected != "blocked" || got.Settings.Ban != tc.want {
+			t.Fatalf("%s: %+v %v", tc.name, got, err)
 		}
 	}
 }

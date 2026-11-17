@@ -35,6 +35,10 @@ type version struct {
 	nLocal int
 	// issuers by token iss.
 	issuers map[string]*issuer
+	// banRules are the IDs of config rules that set ban. A ban whose rule is
+	// not here is ignored, so removing the rule lifts its bans. Nil when no
+	// rule sets ban.
+	banRules map[string]bool
 }
 
 // sweep drops the version's expired backstop and local rate-limit state.
@@ -54,6 +58,14 @@ func newVersion(c *snapshot.Compiled, st *versionStats, prev *loaded, ks *keySto
 		c: c, defaults: defaults(c), stats: st, rules: ratelimit.Compile(c.Config.RateLimitRules),
 		cors: compileCORS(c.Config.Global.CORSPolicies), headers: compileHeaders(c), locale: newLocaleResolver(c),
 		issuers: compileIssuers(c, ks, keys, prev),
+	}
+	for _, r := range c.Config.ConfigRules {
+		if r.Settings.Ban != nil {
+			if v.banRules == nil {
+				v.banRules = map[string]bool{}
+			}
+			v.banRules[r.ID] = true
+		}
 	}
 	if prev != nil {
 		for _, pv := range []*version{prev.active, prev.candidate} {
@@ -201,9 +213,11 @@ func (p *poller) run(ctx context.Context) {
 }
 
 func (p *poller) delay(failures int) time.Duration {
-	d := p.cfg.PollInterval << min(failures, 6)
-	d = min(d, time.Minute)
-	// Jitter spreads the fleet so admin isn't hit by every edge at once.
+	return jitter(min(p.cfg.PollInterval<<min(failures, 6), time.Minute))
+}
+
+// jitter spreads the fleet by ±20% so admin isn't hit by every edge at once.
+func jitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // jitter needs no cryptographic randomness
 }
 

@@ -202,10 +202,16 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, _ *principal) (e
 	if len(rep.Upstream) > 2048 || strings.ContainsRune(rep.Upstream, 0) {
 		return fail(http.StatusUnprocessableEntity, "upstream must be at most 2048 characters, without NUL")
 	}
+	if !bansOK(rep.Bans) {
+		return fail(http.StatusUnprocessableEntity, fmt.Sprintf("bans must be at most %d, each with a ban key address, bounded text without NUL and a span of at most a week", edge.MaxBanReports))
+	}
 	_, err = s.edgeDB.Exec(r.Context(), `INSERT INTO fleet (instance, last_seen, config_source, bootstrap_age_seconds, versions, max_schema, deployment, upstream) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (instance) DO UPDATE SET last_seen = $2, config_source = $3, bootstrap_age_seconds = $4, versions = $5, max_schema = $6, deployment = $7, upstream = $8`,
 		rep.Instance, s.now(), rep.ConfigSource, rep.BootstrapAgeSeconds, versions, max(rep.MaxSchema, 1), rep.Deployment, rep.Upstream)
 	if err != nil {
+		return err
+	}
+	if err := s.recordBans(r.Context(), rep.Instance, rep.Bans); err != nil {
 		return err
 	}
 	s.agg.add(s.now(), rep.Versions)

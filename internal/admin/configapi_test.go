@@ -1024,6 +1024,23 @@ func TestConfigTestsRunForATrustedClient(t *testing.T) {
 	}
 }
 
+// A config test can assert how long a trap rule bans the client.
+func TestConfigTestsAssertTheBan(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	c := authConfig("https://idp.example.com/jwks")
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "trap", Expression: mustParse(`starts_with(http.request.uri.path, "/wp-")`), Settings: snapshot.Settings{Block: new("block"), Ban: new(snapshot.Duration(time.Hour))}})
+	rejected := "blocked"
+	res := decode[struct {
+		TestResults []TestResult `json:"test_results"`
+	}](t, ed.save(`"0"`, c, ConfigTest{Name: "trap bans for an hour", Request: TestRequest{Host: "api.example.com", Path: "/wp-login.php", IP: "203.0.113.96"},
+		Expect: TestExpect{Rejected: &rejected, Settings: map[string]any{"ban": "1h0m0s"}}}))
+	if len(res.TestResults) != 1 || !res.TestResults[0].Pass {
+		t.Fatalf("results %+v", res.TestResults)
+	}
+}
+
 func TestSchemaCDNHeaders(t *testing.T) {
 	headers := func(t *testing.T, set map[string]string) []string {
 		t.Helper()

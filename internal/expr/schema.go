@@ -106,6 +106,8 @@ var Fields = []FieldDef{
 	{Name: "tls.client.ja3", Label: "JA3 Fingerprint", Type: TypeString, Source: SourceViewer},
 	{Name: SignalsField, Label: "Client Signals", Type: TypeStringList, Source: SourceEdge, Exact: true},
 	{Name: VerifiedBotField, Label: "Verified Crawler", Type: TypeBool, Source: SourceEdge},
+	{Name: IPListsField, Label: "IP lists", Type: TypeStringList, Source: SourceEdge, Exact: true},
+	{Name: DenylistedField, Label: "On any IP list", Type: TypeBool, Source: SourceEdge},
 	{Name: "edge.locale", Label: "Locale", Type: TypeString, Source: SourceLocale},
 	{Name: "http.request.jwt.claims", Label: "JWT claim", Type: TypeStringList, Keyed: true, Source: SourceJWT},
 }
@@ -116,6 +118,30 @@ const SignalsField = "client.signals"
 // VerifiedBotField is true for an address in the crawler ranges admin
 // fetches from VERIFIED_BOT_SOURCES.
 const VerifiedBotField = "client.verified_bot"
+
+// IPListsField is the names of the IP lists admin serves that hold the
+// client address. Which lists exist is admin state, so it is always
+// available and a name is checked only for its form.
+const IPListsField = "client.ip_lists"
+
+// DenylistedField is true when any IP list admin serves holds the client
+// address. Kept so policies written before client.ip_lists keep compiling;
+// new rules use client.ip_lists.
+const DenylistedField = "client.denylisted"
+
+// ValidListName reports whether s can name an IP list: 1 to 63 lowercase
+// letters, digits and hyphens, not starting with a hyphen.
+func ValidListName(s string) bool {
+	if s == "" || len(s) > 63 || s[0] == '-' {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
 
 // SignalDef is one client.signals name. Needs lists the viewer fields it
 // reads: without a source for each, it can never fire.

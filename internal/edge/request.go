@@ -27,6 +27,11 @@ type fields struct {
 	claims map[string][]string
 	// bots is the snapshot's verified crawler ranges.
 	bots *expr.IPSet
+	// lists is the IP list set admin serves; nil until the first fetch or
+	// while no list is on.
+	lists *expr.IPLists
+	// ipLists are the names of the lists holding the client address.
+	ipLists []string
 	// floor is the snapshot's browser_outdated floor by browser kind.
 	floor   [4]int
 	signals uint16
@@ -48,6 +53,7 @@ const (
 	parsedCookie
 	parsedXFF
 	parsedSignals
+	parsedIPLists
 )
 
 // once returns *v, computing it on the first call for bit. Every rule in
@@ -172,6 +178,8 @@ func (f *fields) List(name, key string) []string {
 		return f.cookieVals[i:j:j]
 	case expr.SignalsField:
 		return signalLists[f.signalBits()]
+	case expr.IPListsField:
+		return f.ipListNames()
 	default: // http.request.jwt.claims; expr only passes list fields
 		return f.claims[key]
 	}
@@ -187,6 +195,15 @@ func (f *fields) signalBits() uint16 {
 	return f.signals
 }
 
+// ipListNames looks the client address up once per request.
+func (f *fields) ipListNames() []string {
+	if f.parsed&parsedIPLists == 0 {
+		f.ipLists = f.lists.Lookup(f.c.ip)
+		f.parsed |= parsedIPLists
+	}
+	return f.ipLists
+}
+
 func (f *fields) IP(string) netip.Addr { return f.c.ip }
 
 func (f *fields) Int(string) (int64, bool) { return f.c.asn, f.c.hasASN }
@@ -195,6 +212,8 @@ func (f *fields) Bool(name string) bool {
 	switch name {
 	case "ssl":
 		return f.c.ssl
+	case expr.DenylistedField:
+		return len(f.ipListNames()) > 0
 	case "client.verified_bot":
 		// No ranges loaded means no verified crawler: an exemption fails closed.
 		return f.bots != nil && f.bots.Contains(f.c.ip)

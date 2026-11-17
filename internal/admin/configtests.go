@@ -36,11 +36,13 @@ type TestRequest struct {
 	ASN     int64             `json:"asn,omitempty"`
 	SSL     bool              `json:"ssl,omitempty"`
 	// JA4, JA3 and HTTPVersion are what the CDN would send.
-	JA4         string            `json:"ja4,omitempty"`
-	JA3         string            `json:"ja3,omitempty"`
-	HTTPVersion string            `json:"http_version,omitempty"`
-	VerifiedBot bool              `json:"verified_bot,omitempty"`
-	JWTClaims   map[string]string `json:"jwt_claims,omitempty"`
+	JA4         string `json:"ja4,omitempty"`
+	JA3         string `json:"ja3,omitempty"`
+	HTTPVersion string `json:"http_version,omitempty"`
+	VerifiedBot bool   `json:"verified_bot,omitempty"`
+	// IPLists puts the IP in these IP lists, by name.
+	IPLists   []string          `json:"ip_lists,omitempty"`
+	JWTClaims map[string]string `json:"jwt_claims,omitempty"`
 }
 
 // TestExpect lists what must hold; anything left out isn't checked.
@@ -76,7 +78,7 @@ type SimView struct {
 
 func (r TestRequest) sim() edge.SimRequest {
 	sr := edge.SimRequest{Method: r.Method, Host: r.Host, Target: r.Path, IP: r.IP, Country: r.Country, ASN: r.ASN, SSL: r.SSL,
-		JA4: r.JA4, JA3: r.JA3, HTTPVersion: r.HTTPVersion, VerifiedBot: r.VerifiedBot,
+		JA4: r.JA4, JA3: r.JA3, HTTPVersion: r.HTTPVersion, VerifiedBot: r.VerifiedBot, IPLists: r.IPLists,
 		Headers: map[string][]string{}, JWTClaims: map[string][]string{}}
 	if sr.Method == "" {
 		sr.Method = "GET"
@@ -141,7 +143,9 @@ var settingKeys = func() []string {
 	var out []string
 	t := reflect.TypeFor[edge.SimSettings]()
 	for field := range t.Fields() {
-		out = append(out, field.Tag.Get("json"))
+		// The name without options such as omitempty.
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		out = append(out, name)
 	}
 	return out
 }()

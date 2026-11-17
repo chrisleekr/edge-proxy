@@ -130,7 +130,7 @@ func TestRuntimeRoleLimits(t *testing.T) {
 func TestRolePermissions(t *testing.T) {
 	_, app := migrated(t)
 	var n int
-	if err := app.QueryRow(t.Context(), "SELECT count(*) FROM role_permissions WHERE role = 'admin'").Scan(&n); err != nil || n != 15 {
+	if err := app.QueryRow(t.Context(), "SELECT count(*) FROM role_permissions WHERE role = 'admin'").Scan(&n); err != nil || n != 16 {
 		t.Fatalf("admin has %d permissions, %v", n, err)
 	}
 	// Every role reads the autopilot; publishers and admins act on it. The
@@ -152,6 +152,10 @@ func TestRolePermissions(t *testing.T) {
 		{"editor", "attention.ack", true},
 		{"publisher", "attention.ack", true},
 		{"admin", "attention.ack", true},
+		{"viewer", "denylists.manage", false},
+		{"editor", "denylists.manage", false},
+		{"publisher", "denylists.manage", true},
+		{"admin", "denylists.manage", true},
 	} {
 		t.Run(tc.role+" "+tc.perm, func(t *testing.T) {
 			var held bool
@@ -376,5 +380,61 @@ func TestMigrationRefusesReservedPrefix(t *testing.T) {
 				t.Fatalf("err %v, migration %d applied %v; want a refusal naming %s and saying to rename it", err, reservedFrom, applied, tc.want)
 			}
 		})
+	}
+}
+
+// An install that ran the denylist migration keeps its rows when names arrive:
+// a row on a default URL takes the default's name but keeps wide false, even
+// on a default that is wide (widening an enabled row would change what it
+// matches with no audit row), a custom row is named by id, and the other
+// defaults are added off, wide where the provider's data is.
+func TestIPListNamesMigrationKeepsExistingSources(t *testing.T) {
+	const fireholURL = "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset"
+	const awsURL = "https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/aws_ips_merged.txt"
+	owner := migratedBefore(t, 22)
+	ctx := t.Context()
+	var fireholID, awsID, customID int64
+	for url, id := range map[string]*int64{fireholURL: &fireholID, awsURL: &awsID, "https://lists.example.com/mine.txt": &customID} {
+		if err := owner.QueryRow(ctx, "INSERT INTO denylist_sources (url, enabled, added_by, added_at) VALUES ($1, true, 'someone', now()) RETURNING id", url).Scan(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Migrate(ctx, owner, testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		name    string
+		wide    bool
+		enabled bool
+	}
+	get := func(id int64) (r row) {
+		if err := owner.QueryRow(ctx, "SELECT name, wide, enabled FROM denylist_sources WHERE id = $1", id).Scan(&r.name, &r.wide, &r.enabled); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if got, want := get(fireholID), (row{"firehol-abusers", false, true}); got != want {
+		t.Fatalf("firehol row %+v, want %+v", got, want)
+	}
+	if got, want := get(awsID), (row{"aws", false, true}); got != want {
+		t.Fatalf("aws row %+v, want %+v", got, want)
+	}
+	if got, want := get(customID), (row{fmt.Sprintf("list-%d", customID), false, true}); got != want {
+		t.Fatalf("custom row %+v, want %+v", got, want)
+	}
+	var total, enabled int
+	if err := owner.QueryRow(ctx, "SELECT count(*), count(*) FILTER (WHERE enabled) FROM denylist_sources").Scan(&total, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	if total != 74 || enabled != 3 {
+		t.Fatalf("%d sources, %d enabled; want 74 and 3 (the rows people added)", total, enabled)
+	}
+	var wide int
+	if err := owner.QueryRow(ctx, "SELECT count(*) FROM denylist_sources WHERE wide").Scan(&wide); err != nil {
+		t.Fatal(err)
+	}
+	// 32 wide defaults, less the aws row that existed and keeps wide false.
+	if wide != 31 {
+		t.Fatalf("%d wide sources, want 31", wide)
 	}
 }

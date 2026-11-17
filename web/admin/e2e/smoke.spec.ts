@@ -1202,7 +1202,7 @@ test('the sidebar groups pages by job', async () => {
   const main = page.getByRole('navigation', { name: 'Main' });
   // Headings and links in document order, so each link sits under its group.
   await expect(main.locator('p, a')).toHaveText([
-    'Monitor', 'Dashboard', 'Stats', 'Traffic map', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
+    'Monitor', 'Dashboard', 'Stats', 'Traffic map', 'Routes', 'Fleet', 'IP lists', 'Notifications', 'Autopilot',
     'Policy', 'Rules', 'Templates', 'CORS policies', 'Issuers', 'Settings',
     'Release', 'Tests and simulate', 'Publish', 'Versions',
     'Admin', 'Audit log', 'Users and tokens',
@@ -1580,6 +1580,42 @@ test('a draft that fails to load shows the error instead of a blank page', async
   await page.unroute('**/api/draft');
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
+});
+
+test('an IP list is added and fetched, and a banned IP is lifted after a confirmation', async () => {
+  await nav('IP lists');
+  await expect(page.getByRole('heading', { name: 'IP lists', exact: true })).toBeVisible();
+  await page.getByLabel('Name', { exact: true }).fill('smoke-list');
+  await page.getByLabel('List address').fill(process.env.SMOKE_LIST_URL!);
+  await page.getByRole('button', { name: 'Add list' }).click();
+  const row = page.getByRole('row').filter({ hasText: process.env.SMOKE_LIST_URL! });
+  // The smoke run fetches every second; the page rereads once a minute, so reload.
+  await expect(async () => {
+    await page.reload();
+    await expect(row.getByText('up to date')).toBeVisible({ timeout: 2000 });
+  }).toPass({ timeout: 30_000 });
+  await expect(row.getByRole('cell', { name: '2', exact: true })).toBeVisible();
+  await page.getByLabel('Is this IP listed?').fill('203.0.113.50');
+  await page.getByRole('button', { name: 'Check' }).click();
+  await expect(page.getByText('203.0.113.50 is on smoke-list (203.0.113.50/32)')).toBeVisible();
+  const ban = page.getByRole('row').filter({ hasText: '203.0.113.9' });
+  await expect(ban).toContainText('/wp-login.php');
+  await ban.getByRole('button', { name: 'Lift ban' }).click();
+  await expect(page.getByRole('dialog')).toContainText('is served again on every edge within about a minute, and is banned again if it trips the trap');
+  // The table cell's nowrap must not reach the dialog, or its text is cut off.
+  expect(await page.getByRole('dialog').evaluate((d) => d.scrollWidth <= d.clientWidth)).toBe(true);
+  await confirm('Lift ban');
+  await expect(ban.getByText('lifted, reaching the edges')).toBeVisible();
+  await nav('Audit log');
+  await expect(page.getByRole('cell', { name: 'ban.lifted' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'denylist.source_added' })).toBeVisible();
+  // The rule builder names the lists that are on and downloaded.
+  await nav('Rules');
+  const limits = page.getByRole('list', { name: 'Rate limit rules' }).locator('..');
+  await limits.getByRole('button', { name: 'Add rate limit rule' }).click();
+  await page.locator('.ruleGroup-addRule').first().click();
+  await page.locator('.rule').first().locator('.rule-fields').selectOption('client.ip_lists');
+  await expect(page.getByText('Lists that are on: smoke-list.')).toBeVisible();
 });
 
 test('when admin stops answering the screen says traffic is unaffected, and Try again recovers', async () => {

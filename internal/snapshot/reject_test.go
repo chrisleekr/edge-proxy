@@ -23,7 +23,7 @@ type rejectCase struct {
 func TestCompileRejects(t *testing.T) {
 	cases := []rejectCase{
 		// Top level.
-		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 9 is not supported"},
+		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 12 is not supported"},
 		{"version zero", func(c *Config) { c.Version = 0 }, nil, "version", "at least 1"},
 		{"config over 8 MB", addHugeHeaderRules, nil, "", "bytes as JSON"},
 
@@ -34,6 +34,13 @@ func TestCompileRejects(t *testing.T) {
 		{"rule naming browser_outdated while the floor is off", func(c *Config) {
 			c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "stale", Expression: mustParse(`client.signals eq "browser_outdated"`), Settings: Settings{BodyLimit: new(int64(1))}})
 		}, nil, "config_rules[3].expression.rules[0]", `"browser_outdated" can never match`},
+
+		// Ban.
+		{"ban without block", func(c *Config) { addTrap(c, nil, "10m") }, nil, "config_rules[3].settings.ban", `needs block set to "block"`},
+		{"ban with block log", func(c *Config) { addTrap(c, new("log"), "10m") }, nil, "config_rules[3].settings.ban", `needs block set to "block"`},
+		{"ban of zero seconds", func(c *Config) { addTrap(c, new("block"), "0s") }, nil, "config_rules[3].settings.ban", "whole seconds from 1s to 24h0m0s"},
+		{"ban of fractional seconds", func(c *Config) { addTrap(c, new("block"), "1500ms") }, nil, "config_rules[3].settings.ban", "whole seconds from 1s to 24h0m0s"},
+		{"ban over 24 hours", func(c *Config) { addTrap(c, new("block"), "25h") }, nil, "config_rules[3].settings.ban", "whole seconds from 1s to 24h0m0s"},
 
 		// Backstop.
 		{"backstop limit zero", func(c *Config) { c.Global.Backstop.Limit = 0 }, nil, "global.backstop.limit", "must be 1 to"},
@@ -406,4 +413,9 @@ func setCORS(c *Config, name string, f func(*CORSPolicy)) {
 	p := c.Global.CORSPolicies[name]
 	f(&p)
 	c.Global.CORSPolicies[name] = p
+}
+
+// addTrap appends a config rule that sets ban, with the given block mode.
+func addTrap(c *Config, block *string, ban string) {
+	c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "trap", Expression: mustParse(`starts_with(http.request.uri.path, "/wp-")`), Settings: Settings{Block: block, Ban: new(dur(ban))}})
 }

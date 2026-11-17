@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -211,4 +212,111 @@ func TestSlot(t *testing.T) {
 			t.Errorf("slot(%q) = %d, want %d", c.key, got, c.want)
 		}
 	}
+}
+
+func TestBans(t *testing.T) {
+	v4 := netip.MustParseAddr("198.51.100.7")
+
+	t.Run("a ban ends at its end time", func(t *testing.T) {
+		b := NewBans(100)
+		if !b.Add(v4, Ban{Rule: "trap", End: 1000}) {
+			t.Fatal("ban refused")
+		}
+		if got, ok := b.Get(v4, 999); !ok || got.Rule != "trap" {
+			t.Fatalf("ban before the end = %v, %v", got, ok)
+		}
+		if _, ok := b.Get(v4, 1000); ok {
+			t.Fatal("ban at the end is still active")
+		}
+	})
+
+	t.Run("addresses in one IPv6 /64 share a ban and another /64 does not", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(netip.MustParseAddr("2001:db8:1:2::1"), Ban{Rule: "trap", End: 1000})
+		if _, ok := b.Get(netip.MustParseAddr("2001:db8:1:2:ffff::9"), 0); !ok {
+			t.Fatal("same /64 is not banned")
+		}
+		if _, ok := b.Get(netip.MustParseAddr("2001:db8:1:3::1"), 0); ok {
+			t.Fatal("other /64 is banned")
+		}
+	})
+
+	t.Run("a full table refuses a new ban and keeps the others", func(t *testing.T) {
+		b := NewBans(numShards) // one ban per shard
+		refused := 0
+		for i := range 10 * numShards {
+			if !b.Add(netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)}), Ban{Rule: "trap", End: 1000}) {
+				refused++
+			}
+		}
+		if refused == 0 || b.Len() > numShards {
+			t.Fatalf("refused=%d len=%d", refused, b.Len())
+		}
+	})
+
+	t.Run("a repeat ban extends the end even in a full table", func(t *testing.T) {
+		b := NewBans(numShards)
+		b.Add(v4, Ban{Rule: "trap", End: 1000})
+		if !b.Add(v4, Ban{Rule: "trap", End: 5000}) {
+			t.Fatal("renewal refused")
+		}
+		if _, ok := b.Get(v4, 2000); !ok {
+			t.Fatal("ban ended at its first end")
+		}
+	})
+
+	t.Run("a shorter ban keeps the longer one and a longer ban replaces a shorter one", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000, Path: "/a"})
+		if !b.Add(v4, Ban{Rule: "minute", Start: 5, End: 2000, Path: "/b"}) {
+			t.Fatal("shorter ban reported as refused")
+		}
+		if got, _ := b.Get(v4, 0); got.Rule != "day" || got.Start != 1 || got.End != 9000 || got.Path != "/a" {
+			t.Fatalf("after the shorter ban: %+v", got)
+		}
+		b.Add(v4, Ban{Rule: "week", Start: 6, End: 20000})
+		if got, _ := b.Get(v4, 0); got.Rule != "week" || got.End != 20000 {
+			t.Fatalf("after the longer ban: %+v", got)
+		}
+	})
+
+	t.Run("a lift ends a ban that started before it and not one that started after", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "trap", Start: 100, End: 9000})
+		b.Lift(v4, 100)
+		if _, ok := b.Get(v4, 0); !ok {
+			t.Fatal("a ban that started at the lift was lifted")
+		}
+		b.Lift(v4, 101)
+		if _, ok := b.Get(v4, 0); ok {
+			t.Fatal("an older ban survived the lift")
+		}
+		b.Lift(v4, 101) // no ban: nothing to do
+	})
+
+	t.Run("sweeping drops ended bans", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "trap", End: 1000})
+		b.Sweep(1000)
+		if b.Len() != 0 {
+			t.Fatalf("len after sweep = %d", b.Len())
+		}
+	})
+
+	t.Run("the stored host and path are bounded", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "trap", End: 1000, Host: strings.Repeat("h", 1000), Path: strings.Repeat("p", 1000)})
+		got, _ := b.Get(v4, 0)
+		if len(got.Host) != maxBanHost || len(got.Path) != maxBanPath {
+			t.Fatalf("host %d bytes, path %d bytes", len(got.Host), len(got.Path))
+		}
+	})
+
+	t.Run("looking up a ban allocates nothing", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "trap", End: 1000, Host: "a.example.com", Path: "/wp-login.php"})
+		if n := testing.AllocsPerRun(100, func() { b.Get(v4, 0) }); n != 0 {
+			t.Fatalf("%v allocations", n)
+		}
+	})
 }

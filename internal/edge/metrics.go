@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync/atomic"
 
+	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 	"github.com/chrisleekr/edge-proxy/internal/tracing"
 )
 
@@ -34,6 +35,7 @@ const (
 	reasonClientGone
 	reasonPanic
 	reasonBlocked
+	reasonBanned
 	numReasons
 )
 
@@ -41,7 +43,7 @@ var reasonNames = [numReasons]string{
 	"overloaded", "streams_overloaded", "untrusted_peer", "ingress_secret",
 	"client_ip", "path", "method", "no_snapshot", "auth", "backstop", "rate_limited", "rate_limit_key",
 	"rate_limit_unavailable",
-	"payload_too_large", "upstream_timeout", "upstream_error", "upstream_tls", "body_timeout", "body_invalid", "client_gone", "panic", "blocked",
+	"payload_too_large", "upstream_timeout", "upstream_error", "upstream_tls", "body_timeout", "body_invalid", "client_gone", "panic", "blocked", "banned",
 }
 
 // metrics are process-wide counters, exposed on /metrics in Prometheus text
@@ -69,6 +71,9 @@ type metrics struct {
 	// Rate limiting.
 	rulesCapped, backstopUntracked, localUntracked atomic.Uint64
 	penaltyHits, penaltyDropped                    atomic.Uint64
+	banHits, banDropped                            atomic.Uint64
+	denylistFailures, banReportsDropped            atomic.Uint64
+	denylistEntries                                atomic.Int64
 	valkeyErrors, valkeyBreakerOpen                atomic.Uint64
 
 	corsPreflight, corsPreflightDenied atomic.Uint64
@@ -78,7 +83,9 @@ type metrics struct {
 
 	snapshotVersion atomic.Int64
 	bootstrapAge    atomic.Int64 // seconds; 0 unless serving a bootstrap file
-	ready           atomic.Bool
+	// bans is read for the edge_bans gauge.
+	bans  *ratelimit.Bans
+	ready atomic.Bool
 }
 
 func (m *metrics) writeTo(w io.Writer) {
@@ -135,6 +142,12 @@ func (m *metrics) writeTo(w io.Writer) {
 	p("# TYPE edge_ratelimit_local_untracked_total counter\nedge_ratelimit_local_untracked_total %d\n", m.localUntracked.Load())
 	p("# TYPE edge_ratelimit_penalty_cache_hits_total counter\nedge_ratelimit_penalty_cache_hits_total %d\n", m.penaltyHits.Load())
 	p("# TYPE edge_ratelimit_penalty_cache_dropped_total counter\nedge_ratelimit_penalty_cache_dropped_total %d\n", m.penaltyDropped.Load())
+	p("# TYPE edge_ban_hits_total counter\nedge_ban_hits_total %d\n", m.banHits.Load())
+	p("# TYPE edge_ban_dropped_total counter\nedge_ban_dropped_total %d\n", m.banDropped.Load())
+	p("# TYPE edge_ban_reports_dropped_total counter\nedge_ban_reports_dropped_total %d\n", m.banReportsDropped.Load())
+	p("# TYPE edge_denylist_entries gauge\nedge_denylist_entries %d\n", m.denylistEntries.Load())
+	p("# TYPE edge_denylist_fetch_failures_total counter\nedge_denylist_fetch_failures_total %d\n", m.denylistFailures.Load())
+	p("# TYPE edge_bans gauge\nedge_bans %d\n", m.bans.Len())
 	p("# TYPE edge_trace_export_errors_total counter\nedge_trace_export_errors_total %d\n", m.tracing.ExportErrors())
 	p("# TYPE edge_trace_capped_total counter\nedge_trace_capped_total %d\n", m.tracing.Capped())
 	p("# TYPE edge_valkey_errors_total counter\nedge_valkey_errors_total %d\n", m.valkeyErrors.Load())

@@ -150,7 +150,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema       = 1
-	SupportedSchema = 8
+	SupportedSchema = 11
 	// MaxInflightSchema is the first schema whose edges read
 	// global.max_inflight. A config of any schema may set it; admin then
 	// publishes it only once every live edge reads that schema.
@@ -175,6 +175,19 @@ const (
 	// signals and global.cdn_trusted_headers. A config of any schema may name
 	// them or set it; admin then waits for edges that read this schema.
 	CDNSignalSchema = 8
+	// BanSchema is the first schema whose edges read a config rule's ban.
+	// A config of any schema may set it; admin then waits for edges that
+	// read this schema.
+	BanSchema = 9
+	// DenylistSchema is the first schema whose edges know client.denylisted.
+	// A config of any schema may read it; admin then waits for edges that
+	// read this schema.
+	DenylistSchema = 10
+	// IPListsSchema is the first schema whose edges know client.ip_lists.
+	// Edges of schema 10 report it as supported but refuse the field, so it
+	// needs its own schema. A config of any schema may read it; admin then
+	// waits for edges that read this schema.
+	IPListsSchema = 11
 	// MaxDistinct bounds a distinct rule's limit: the 1024-bit estimate
 	// drifts beyond it.
 	MaxDistinct = 1000
@@ -337,6 +350,15 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	}
 	if readsSignal(c, cdnSignals...) {
 		needs = max(needs, CDNSignalSchema)
+	}
+	if slices.ContainsFunc(c.ConfigRules, func(r ConfigRule) bool { return r.Settings.Ban != nil }) {
+		needs = max(needs, BanSchema)
+	}
+	if ReadsField(c, expr.DenylistedField) {
+		needs = max(needs, DenylistSchema)
+	}
+	if ReadsField(c, expr.IPListsField) {
+		needs = max(needs, IPListsSchema)
 	}
 	templates := len(c.Global.Responses)
 	c = upgrade(c)
@@ -997,6 +1019,7 @@ func settingNames(s Settings) []string {
 	add(s.UpstreamTimeout != nil, "upstream_timeout")
 	add(s.RateLimitHeaders != nil, "ratelimit_headers")
 	add(s.Block != nil, "block")
+	add(s.Ban != nil, "ban")
 	return ns
 }
 
@@ -1034,6 +1057,13 @@ func (v *validator) settings(p string, s Settings) {
 	}
 	if s.Block != nil && !slices.Contains(BlockModes, *s.Block) {
 		v.err(p+".block", "must be %s", orList(BlockModes))
+	}
+	if s.Ban != nil {
+		// A ban outside a blocking rule would never be recorded.
+		if s.Block == nil || *s.Block != "block" {
+			v.err(p+".ban", "needs block set to \"block\" in the same rule")
+		}
+		v.period(p+".ban", *s.Ban, MaxRulePeriod)
 	}
 }
 
@@ -1656,6 +1686,20 @@ func readsAny(c *Config, match func(r expr.Node) bool) bool {
 		walk(r.Expression, false, f)
 	}
 	return found
+}
+
+// IPListNames returns the list names rules of c compare client.ip_lists with.
+func IPListNames(c *Config) []string {
+	var out []string
+	readsAny(c, func(r expr.Node) bool {
+		if r.Field == expr.IPListsField {
+			out = append(out, r.Value.One)
+			out = append(out, r.Value.List...)
+		}
+		return false
+	})
+	slices.Sort(out)
+	return slices.Compact(slices.DeleteFunc(out, func(s string) bool { return s == "" }))
 }
 
 // cdnSignals are the client.signals names added in CDNSignalSchema.

@@ -27,6 +27,9 @@ const maxCountRules = 5
 // Bounds on per-replica rate-limit state (CLAUDE.md, bounded memory).
 const maxPenalties = 100_000
 
+// maxBans bounds the IP ban table.
+const maxBans = 100_000
+
 // maxLocalState bounds fail_mode local state, split evenly between rules
 // so a rule keyed on client-chosen values can only fill its own share.
 // Tests lower it.

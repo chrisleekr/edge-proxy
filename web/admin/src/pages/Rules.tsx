@@ -30,6 +30,7 @@ const setting = ([k, v]: [string, Json]) => {
   if (k === 'upstream_timeout' && typeof v === 'string') return `upstream timeout ${short(v)}`;
   if (k === 'locale') return v ? 'detects locale' : 'no locale';
   if (k === 'ratelimit_headers') return v ? 'RateLimit headers' : 'no RateLimit headers';
+  if (k === 'ban' && typeof v === 'string') return `bans the client IP for ${short(v)}`;
   if (k === 'block') return v === 'block' ? 'blocks with 403' : 'log only, would block';
   if (k === 'responses' && v !== null && typeof v === 'object')
     return Object.entries(v)

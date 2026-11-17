@@ -35,6 +35,7 @@ type Server struct {
 	edge     *Edge
 	poller   *poller
 	reporter *reporter
+	denylist *denylistPoller
 	alog     *accessLog
 	draining atomic.Bool
 }
@@ -52,10 +53,11 @@ func New(cfg *Config, log *slog.Logger, tp *tracing.Provider) *Server {
 		edge: &Edge{
 			cfg: cfg, id: newIdentity(cfg), store: st, m: m, alog: alog, log: log,
 			pool: newBufferPool(), now: time.Now, strip: sourceHeaders(cfg.Deployment()),
-			penalties: ratelimit.NewPenalties(maxPenalties), tokens: newTokenCache(cfg.TokenCacheSize),
+			penalties: ratelimit.NewPenalties(maxPenalties), bans: ratelimit.NewBans(maxBans), tokens: newTokenCache(cfg.TokenCacheSize),
 			tracer: tp.Tracer("github.com/chrisleekr/edge-proxy/internal/edge"),
 		},
 	}
+	m.bans = s.edge.bans
 	s.edge.rp = s.edge.newReverseProxy()
 	if cfg.Valkey != nil {
 		// A dedicated client with its own short timeout.
@@ -64,9 +66,11 @@ func New(cfg *Config, log *slog.Logger, tp *tracing.Provider) *Server {
 	client := &http.Client{Timeout: 30 * time.Second}
 	s.poller = &poller{cfg: cfg, dep: cfg.Deployment(), client: client, store: st, reg: reg, keys: keys, m: m, log: log, now: time.Now}
 	if cfg.AdminURL != nil {
+		s.edge.banReports = make(chan BanReport, MaxBanReports)
+		s.denylist = &denylistPoller{p: s.poller, edge: s.edge, every: denylistInterval}
 		s.reporter = &reporter{
 			url: cfg.AdminURL.JoinPath("v1", "edge", "report").String(), token: cfg.ServiceToken, instance: cfg.Instance, deployment: cfg.Deployment().Fingerprint(), upstream: cfg.Upstream.String(),
-			interval: cfg.StatsInterval, client: client, reg: reg, store: st, m: m, log: log,
+			interval: cfg.StatsInterval, client: client, reg: reg, store: st, m: m, log: log, bans: s.edge.banReports,
 		}
 	}
 	return s
@@ -117,6 +121,9 @@ func (s *Server) Run(ctx context.Context, public, internal net.Listener) error {
 	s.poller.loadInitial(ctx)
 	wg.Go(func() { s.poller.run(bg) })
 	wg.Go(func() { s.poller.keys.run(bg) })
+	if s.denylist != nil {
+		wg.Go(func() { s.denylist.run(bg) })
+	}
 	if s.reporter != nil {
 		wg.Go(func() { s.reporter.run(bg) })
 	}
@@ -181,6 +188,7 @@ func (s *Server) sweep(ctx context.Context) {
 		case now := <-t.C:
 			guard(s.m, s.log, "sweep", func() {
 				s.edge.penalties.Sweep(now.UnixMilli())
+				s.edge.bans.Sweep(now.UnixMilli())
 				s.edge.tokens.sweep(now)
 				if ld := s.store.load(); ld != nil {
 					for _, v := range []*version{ld.active, ld.candidate} {

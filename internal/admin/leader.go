@@ -112,6 +112,10 @@ func (s *Server) runJobs(ctx context.Context) {
 			s.log.Error("background job failed", "job", jobNames[j], "error", err.Error())
 		}
 	}
+	// Apart from the loop below: a list may take a minute to download.
+	var lists sync.WaitGroup
+	defer lists.Wait()
+	lists.Go(func() { s.denylistLoop(ctx, job) })
 	job(jobJWKS, s.refreshKeys)
 	job(jobVerifiedBots, s.refreshBots)
 	job(jobAudit, s.verifyAudit)
@@ -441,6 +445,14 @@ func (s *Server) dropOldStats(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.Exec(ctx, "DELETE FROM anomalies WHERE resolved_at < $1", cutoff); err != nil {
+		return err
+	}
+	// A reported ban is shown while it runs; a week after it ended nothing needs it.
+	if _, err := s.db.Exec(ctx, "DELETE FROM bans WHERE ends_at < $1", s.now().Add(-7*24*time.Hour)); err != nil {
+		return err
+	}
+	// No ban outlasts a day, so no edge needs an older lift.
+	if _, err := s.db.Exec(ctx, "DELETE FROM ban_lifts WHERE lifted_at < $1", s.now().Add(-banLiftKeep)); err != nil {
 		return err
 	}
 	// A route with no hours left has not been seen within retention.

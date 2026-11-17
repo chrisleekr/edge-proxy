@@ -433,8 +433,16 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
         info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Would block in Stats. The block kill switch under Settings turns every block into log only."
         hint="Start with Log only and watch Stats before you block."
         issues={at('settings.block')}>
-        <Choice value={s.block as string | undefined} options={choices.block_modes} labels={blockSays} empty={unset} onChange={(x) => set('block', x)} />
+        <Choice value={s.block as string | undefined} options={choices.block_modes} labels={blockSays} empty={unset} onChange={(x) => onChange({ ...value, settings: setField(x === 'block' ? s : without(s, 'ban'), 'block', x) })} />
       </Labeled>
+      {s.block === 'block' && (
+        <Labeled
+          label="Ban the client IP on this edge for"
+          hint="Optional, 1 second to 24 hours. Once this rule blocks a request, every later request from the same client IP is refused on every host until the time is up. The ban ends early if this rule is removed or no longer sets a ban. Each edge keeps its own bans, and a restart clears them."
+          issues={at('settings.ban')}>
+          <Amount value={s.ban} units={timeUnits.slice(0, 3)} fallback="h" duration onChange={(x) => set('ban', x)} />
+        </Labeled>
+      )}
       <Labeled
         label="Token check"
         info="Checks a JWT bearer token against the issuers' keys. Optional lets requests without a token through, but a token that is sent and fails still gets 401. Required answers 401 to any request without a valid token."

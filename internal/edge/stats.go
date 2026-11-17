@@ -587,6 +587,8 @@ type StatsReport struct {
 	// Upstream is this edge's UPSTREAM_URL, shown read-only in admin.
 	Upstream string        `json:"upstream"`
 	Versions []StatsCounts `json:"versions"`
+	// Bans are the bans recorded since the last report, at most MaxBanReports.
+	Bans []BanReport `json:"bans,omitempty"`
 }
 
 // ReportAnswer is admin's reply to a stats report.
@@ -608,6 +610,7 @@ type reporter struct {
 	store                *store
 	m                    *metrics
 	log                  *slog.Logger
+	bans                 <-chan BanReport
 }
 
 func (rp *reporter) run(ctx context.Context) {
@@ -628,6 +631,17 @@ func (rp *reporter) report(ctx context.Context) {
 	if ld := rp.store.load(); ld != nil {
 		rep.ConfigSource = ld.source
 		rep.BootstrapAgeSeconds = int64(ld.bootstrapAge / time.Second)
+	}
+	// Drained before the send, so a failed report loses its bans: reports are
+	// never retried or queued.
+drain:
+	for len(rep.Bans) < MaxBanReports {
+		select {
+		case b := <-rp.bans:
+			rep.Bans = append(rep.Bans, b)
+		default:
+			break drain
+		}
 	}
 	body, _ := json.Marshal(rep) // StatsReport has only marshalable fields
 	// The URL was validated at startup, so the request can't fail to build.

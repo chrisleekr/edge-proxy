@@ -80,6 +80,8 @@ type Server struct {
 	gates   gateCache
 	agg     *aggregator
 	jwks    *jwks.Client
+	// lists fetches IP lists, which are large, so it waits longer than jwks.
+	lists *jwks.Client
 	// alertClient sends anomalies to Alertmanager.
 	alertClient *http.Client
 	// guardEvery is the leader's guard tick, fixed until leadership changes.
@@ -126,7 +128,7 @@ func NewServer(cfg *Config, db *pgxpool.Pool, log *slog.Logger) *Server {
 		overflow: ratelimit.NewLocalStore(64), known: &knownPeers{m: map[string]time.Time{}}, changeLimit: ratelimit.NewLocalStore(100_000),
 		// The start time keeps a restarted replica's rows apart from its
 		// previous run's for the same minute; readers sum replicas.
-		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil),
+		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil), lists: jwks.NewClient(cfg.JWKSAllowedHosts, denylistFetchTimeout, nil),
 		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(), trafficAgg: newTrafficAggregator(), alertClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	s.tools = configuredTools(cfg)

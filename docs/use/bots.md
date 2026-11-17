@@ -31,6 +31,148 @@ client.signals in {"ua_missing" "ua_tool" "ua_headless"} and not starts_with(htt
 
 Browser signals such as `browser_no_sec_fetch` fire for a client that claims a modern browser but leaves out what that browser always sends. They need trusted `ssl`, HTTP version or JA4 sources; validation refuses a rule naming a signal the deployment can't compute.
 
+## Trap paths
+
+An access rule that bans a client for asking for paths the site never serves, such as WordPress and dotfile probes:
+
+```text
+starts_with(http.request.uri.path, "/wp-") or starts_with(http.request.uri.path, "/wp/") or starts_with(http.request.uri.path, "/.env") or starts_with(http.request.uri.path, "/.git/") or starts_with(http.request.uri.path, "/index.php/wp-json") or http.request.uri.path in {"/xmlrpc.php" "/index.php"}
+```
+
+```json
+{ "settings": { "block": "block", "ban": "24h" } }
+```
+
+The first request that matches gets 403, and every later request from that client IP on that edge gets 403 with the decision `banned` for 24 hours, on every host. See [Banning a client](policy.md#banning-a-client) for what ends a ban early and what clears it. Bans an edge records show on the [IP lists](#ip-lists) page, where a person can lift one.
+
+Anchor the expression on paths your own sites and services never use. `/wp-` also matches a top-level path such as a GitLab group, a user or a MinIO bucket named `wp-something`, and would ban its owner on every host. Start with `"block": "log"` and no `ban`, check the `would_block` lines for this rule in the [access log](../operate/monitoring.md#logs) against your real traffic, and only then switch to `block` with `ban`.
+
+## IP lists
+
+The **IP lists** page (Monitor, IP lists) holds named lists of addresses: known abusers, and the address ranges of cloud providers, crawlers, monitors and CDNs. `client.ip_lists` holds the names of the lists that hold the request's client IP, so a rule says which ones it means:
+
+```text
+client.ip_lists in {"aws" "azure"}
+```
+
+The migration adds [73 lists](#default-ip-lists), all off. A list that is off is not downloaded and matches no one. Turn on the ones your rules name, or add your own with a name, an https address and, for a cloud provider's list, **Allows ranges up to /8**. A name is 1 to 63 lowercase letters, digits and hyphens, and it never changes: to rename a list, remove it and add it again. Lists catch known abusers and hosted clients, not a scan from rotating residential addresses, which public lists rarely carry: use them beside a trap rule, not instead of one.
+
+Admin downloads each list that is on about once an hour through the same guard as [JWKS](../deploy/admin.md#variables), keeps the last good copy, and serves the lists to the edges by name. Adding, turning on or off or removing a list reaches every edge within about a minute, with no publish. A list is plain text, one address or range per line; text after a space, tab, `;` or `#` is ignored. Ranges wider than a /16 for IPv4 or a /32 for IPv6 are skipped and counted on the page, or wider than a /8 and a /16 on a list that allows wide ranges. A download with no usable line, such as an HTML page, counts as failed and the last good list stays. There are at most 128 lists, the defaults included. The edges take at most 500,000 entries in all: lists are taken in the order they were added, and one that would pass that is left out whole, so a name never means part of a list; a later, smaller list that still fits is served.
+
+An address on several lists carries every name, because one provider's ranges can overlap another's (GitHub Actions runners are in both `github` and `azure`). Until an edge's first poll after it starts, `client.ip_lists` is empty, as `client.verified_bot` is: a rule that names a list does not match, and an exclusion does not exempt.
+
+With any list on, every [access log](../operate/monitoring.md#logs) line for a listed address carries `client.ip_lists`. Group by it and `server.address` in your log store to see which provider sends what to which host before a rule blocks anything.
+
+### Using it
+
+Find the source first: turn on the lists you care about and read the log. Then limit by name. Roll out each rule as `log` first, because the ranges come from third-party repositories:
+
+```json
+{ "settings": { "block": "log" } }
+```
+
+Known abusers, anywhere:
+
+```text
+client.ip_lists in {"firehol-abusers" "spamhaus-drop"} and not client.verified_bot
+```
+
+A lower per-IP rate limit for hosted clients, as a `rate_limit` rule with key `ip`, keeping your own monitoring out. The exclusions must be on too, or they exclude nobody:
+
+```text
+client.ip_lists in {"aws" "azure" "googlecloud" "digitalocean" "hetzner" "vultr"} and not client.ip_lists in {"statuscake" "uptimerobot" "datadog"}
+```
+
+To rate limit a whole provider at once, catching a scraper that rotates addresses inside one cloud, scope the same kind of expression to that provider and use the key `constant`: one counter is shared by every matching address.
+
+Match services, not whole providers, where a provider list mixes both: `aws` holds CloudFront and Route 53 health checks as well as EC2 compute, and `github` holds webhooks as well as the CI runners anyone can rent. Use `aws-ec2` and `github-actions` for compute, and `aws-route53-healthchecks` and `github-hooks` to exempt what you want. Other services of a provider are added by their address from the same repository.
+
+The editor warns about each name in a rule that matches no one: a list that does not exist, a list that is off or not downloaded yet, and a list that is on but left out because the lists that are on pass 500,000 entries. The second matters most for exclusions, because every default is off. A rule that reads `client.denylisted` is always warned about, since it matches every list that is on, monitors and crawlers included. The page's **Is this IP listed?** check says which lists that are on hold an address, by name.
+
+Many hosted clients are your own monitors and webhooks, such as Datadog, StatusCake, UptimeRobot checks and GitHub webhooks, which is why a rule names lists instead of matching "any list".
+
+The same page lists **Banned IPs**: addresses a [trap rule](#trap-paths) banned that are still banned on some edge, with the rule, the host and path that tripped it, and the edge. Each edge reports a ban within about a minute of recording it. **Lift ban** ends the ban on every edge within about a minute; the address is banned again if it trips the trap again. For an IPv6 address the ban covers its whole /64. A lift ends only the ban: it does not change any rule, and it is not the allowlist, which skips every rule and needs a publish. Changing lists and lifting bans needs the `denylists.manage` permission, which publishers and admins have; every role that reads stats can read the page.
+
+## Default IP lists
+
+Each row is a list the migration adds, off. An abuse list is [FireHOL `firehol_abusers_30d`](https://iplists.firehol.org/) or [Spamhaus DROP](https://www.spamhaus.org/drop/); the others are files of [rezmoss/cloud-provider-ip-addresses](https://github.com/rezmoss/cloud-provider-ip-addresses), updated daily, with each provider's IPv4 and IPv6 ranges merged. The terms of each source differ, so check them before use. **Wide** lists keep ranges up to /8 for IPv4 and /16 for IPv6. Only lists whose provider data has ranges wider than /16 or /32 allow them, so a bad file cannot widen a monitor or crawler list. The repository also has per-region lists, split and re-formatted copies of these ranges and more per-service lists; add one by its address from the page. A default you remove stays removed.
+
+| Name | Holds | Address | Wide |
+| --- | --- | --- | --- |
+| `firehol-abusers` | abuse list | `https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset` | no |
+| `spamhaus-drop` | abuse list | `https://www.spamhaus.org/drop/drop.txt` | no |
+| `akamai` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/akamai/akamai_ips_merged.txt` | yes |
+| `alibaba` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/alibaba/alibaba_ips_merged.txt` | yes |
+| `amazonbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/amazonbot/amazonbot_ips_merged.txt` | no |
+| `apple-private-relay` | VPN or anonymiser | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/apple_private_relay/apple_private_relay_ips_merged.txt` | no |
+| `applebot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/applebot/applebot_ips_merged.txt` | no |
+| `atlassian` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/atlassian/atlassian_ips_merged.txt` | no |
+| `aws` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/aws_ips_merged.txt` | yes |
+| `azure` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/azure/azure_ips_merged.txt` | yes |
+| `backblaze` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/backblaze/backblaze_ips_merged.txt` | no |
+| `baidu` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/baidu/baidu_ips_merged.txt` | yes |
+| `bingbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/bingbot/bingbot_ips_merged.txt` | no |
+| `bunny` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/bunny/bunny_ips_merged.txt` | no |
+| `cachefly` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/cachefly/cachefly_ips_merged.txt` | no |
+| `circleci` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/circleci/circleci_ips_merged.txt` | no |
+| `claudebot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/claudebot/claudebot_ips_merged.txt` | no |
+| `cloudflare` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/cloudflare/cloudflare_ips_merged.txt` | yes |
+| `commoncrawl` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/commoncrawl/commoncrawl_ips_merged.txt` | no |
+| `contabo` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/contabo/contabo_ips_merged.txt` | yes |
+| `datadog` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/datadog/datadog_ips_merged.txt` | no |
+| `digitalocean` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/digitalocean/digitalocean_ips_merged.txt` | no |
+| `discord` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/discord/discord_ips_merged.txt` | no |
+| `duckduckbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/duckduckbot/duckduckbot_ips_merged.txt` | no |
+| `fastly` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/fastly/fastly_ips_merged.txt` | yes |
+| `gabia` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gabia/gabia_ips_merged.txt` | no |
+| `gcore` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gcore/gcore_ips_merged.txt` | no |
+| `github` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/github/github_ips_merged.txt` | yes |
+| `gocache` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gocache/gocache_ips_merged.txt` | no |
+| `googlebot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/googlebot/googlebot_ips_merged.txt` | no |
+| `googlecloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/googlecloud/googlecloud_ips_merged.txt` | yes |
+| `googleservices` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/googleservices/googleservices_ips_merged.txt` | yes |
+| `gptbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gptbot/gptbot_ips_merged.txt` | no |
+| `hetzner` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/hetzner/hetzner_ips_merged.txt` | yes |
+| `hostway` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/hostway/hostway_ips_merged.txt` | no |
+| `huawei` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/huawei/huawei_ips_merged.txt` | yes |
+| `ibmcloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/ibmcloud/ibmcloud_ips_merged.txt` | yes |
+| `imperva` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/imperva/imperva_ips_merged.txt` | yes |
+| `internetarchive` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/internetarchive/internetarchive_ips_merged.txt` | no |
+| `leaseweb` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/leaseweb/leaseweb_ips_merged.txt` | yes |
+| `linode` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/linode/linode_ips_merged.txt` | yes |
+| `meta` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/meta/meta_ips_merged.txt` | yes |
+| `microsoft365` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/microsoft365/microsoft365_ips_merged.txt` | yes |
+| `mullvad` | VPN or anonymiser | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/mullvad/mullvad_ips_merged.txt` | no |
+| `nhncloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/nhncloud/nhncloud_ips_merged.txt` | no |
+| `oracle` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/oracle/oracle_ips_merged.txt` | yes |
+| `ovhcloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/ovhcloud/ovhcloud_ips_merged.txt` | yes |
+| `perplexitybot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/perplexitybot/perplexitybot_ips_merged.txt` | no |
+| `pingdom` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/pingdom/pingdom_ips_merged.txt` | no |
+| `play2go` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/play2go/play2go_ips_merged.txt` | no |
+| `quiccloud` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/quiccloud/quiccloud_ips_merged.txt` | no |
+| `rackspace` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/rackspace/rackspace_ips_merged.txt` | yes |
+| `salesforce` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/salesforce/salesforce_ips_merged.txt` | yes |
+| `scaleway` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/scaleway/scaleway_ips_merged.txt` | yes |
+| `statuscake` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/statuscake/statuscake_ips_merged.txt` | no |
+| `stormwall` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/stormwall/stormwall_ips_merged.txt` | no |
+| `sucuri` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/sucuri/sucuri_ips_merged.txt` | no |
+| `teamcity` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/teamcity/teamcity_ips_merged.txt` | no |
+| `telegram` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/telegram/telegram_ips_merged.txt` | no |
+| `tencent` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/tencent/tencent_ips_merged.txt` | yes |
+| `tor` | VPN or anonymiser | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/tor/tor_ips_merged.txt` | no |
+| `upcloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/upcloud/upcloud_ips_merged.txt` | yes |
+| `uptimerobot` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/uptimerobot/uptimerobot_ips_merged.txt` | no |
+| `vultr` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/vultr/vultr_ips_merged.txt` | yes |
+| `wasabi` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/wasabi/wasabi_ips_merged.txt` | no |
+| `yandex` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/yandex/yandex_ips_merged.txt` | yes |
+| `zoho` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/zoho/zoho_ips_merged.txt` | no |
+| `zoom` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/zoom/zoom_ips_merged.txt` | no |
+| `zscaler` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/zscaler/zscaler_ips_merged.txt` | yes |
+| `aws-ec2` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/services/ec2/aws_ec2_ips_merged.txt` | yes |
+| `aws-route53-healthchecks` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/services/route53_healthchecks/aws_route53_healthchecks_ips_merged.txt` | no |
+| `github-hooks` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/github/services/hooks/github_hooks_ips_merged.txt` | yes |
+| `github-actions` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/github/services/actions/github_actions_ips_merged.txt` | yes |
+
 ## CDN headers
 
 The headers your CDN sets are [logged on every access line](../deploy/edge.md#cdn-headers) and readable in rules as `http.request.headers["<name>"]`, with the value as the CDN sent it. On Cloudflare that is, for example, the city, the bot score and whether the bot is verified. Read the log first, then write the rule:

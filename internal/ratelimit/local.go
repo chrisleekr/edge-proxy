@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"hash/maphash"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,6 +78,34 @@ func (t *table[K, V]) put(k K, v V) bool {
 	}
 	s.m[k] = v
 	return true
+}
+
+// putUnless sets k unless keep(old) holds for its current entry, or k is new
+// and its shard is full. It reports whether k now holds an entry. The check
+// and the write share one lock, so concurrent writers can't undo each other.
+func (t *table[K, V]) putUnless(k K, v V, keep func(old V) bool) bool {
+	s := t.shard(k)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.m[k]
+	if ok && keep(old) {
+		return true
+	}
+	if !ok && len(s.m) >= t.perShard {
+		return false
+	}
+	s.m[k] = v
+	return true
+}
+
+// deleteIf removes k when del holds for its entry, under the shard lock.
+func (t *table[K, V]) deleteIf(k K, del func(V) bool) {
+	s := t.shard(k)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.m[k]; ok && del(v) {
+		delete(s.m, k)
+	}
 }
 
 // sweep drops expired entries, one shard at a time, off the request path. A
@@ -192,6 +221,68 @@ func (p *Penalties) Sweep(now int64) { p.t.sweep(now) }
 
 // Len counts cached penalties, for metrics.
 func (p *Penalties) Len() int { return p.t.len() }
+
+// Ban is one banned client: the config rule ID that set it, when it started
+// and ends in Unix milliseconds, and the host and path of the request that
+// tripped the rule, for the access log.
+type Ban struct {
+	Rule       string
+	Start, End int64
+	Host, Path string
+}
+
+func (b Ban) expiry() int64 { return b.End }
+
+// maxBanPath and maxBanHost bound the stored strings: the client picks them
+// and the table holds up to maxEntries of them.
+const (
+	maxBanPath = 128
+	maxBanHost = 255
+)
+
+// Bans holds IP bans set by trap rules, per replica.
+type Bans struct{ t *table[netip.Addr, Ban] }
+
+// NewBans returns an empty table holding at most maxEntries bans.
+func NewBans(maxEntries int) *Bans {
+	return &Bans{t: newTable[netip.Addr, Ban](maxEntries, hashAddr)}
+}
+
+// BanKey masks IPv6 to /64 as the backstop does: one host holds a /64.
+func BanKey(ip netip.Addr) netip.Addr {
+	if ip.Is6() {
+		return netip.PrefixFrom(ip, 64).Masked().Addr()
+	}
+	return ip
+}
+
+// Get returns the active ban on ip.
+func (b *Bans) Get(ip netip.Addr, now int64) (Ban, bool) {
+	x, _ := b.t.get(BanKey(ip))
+	return x, x.End > now
+}
+
+// Add records a ban and reports whether the client is now banned. A ban that
+// ends later than x stays as it is, so a short trap never cuts a long ban;
+// otherwise x replaces it. A full table refuses a new client: it is then not
+// banned (fail open) and the caller counts the drop.
+// Host and path are copied, so the entry never keeps the request's buffers.
+func (b *Bans) Add(ip netip.Addr, x Ban) bool {
+	x.Host, x.Path = strings.Clone(x.Host[:min(len(x.Host), maxBanHost)]), strings.Clone(x.Path[:min(len(x.Path), maxBanPath)])
+	return b.t.putUnless(BanKey(ip), x, func(old Ban) bool { return old.End > x.End })
+}
+
+// Lift ends the ban on ip if it started before at (Unix ms), so a client
+// that trips a trap again after the lift is banned again.
+func (b *Bans) Lift(ip netip.Addr, at int64) {
+	b.t.deleteIf(BanKey(ip), func(x Ban) bool { return x.Start < at })
+}
+
+// Sweep drops bans that have ended.
+func (b *Bans) Sweep(now int64) { b.t.sweep(now) }
+
+// Len counts bans in the table, for metrics.
+func (b *Bans) Len() int { return b.t.len() }
 
 // Backstop is the per-replica, per-IP token bucket.
 type Backstop struct {

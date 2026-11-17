@@ -45,6 +45,9 @@ var runtimeGrants = []string{
 	"GRANT USAGE ON SEQUENCE autopilot_exclusions_id_seq TO %[1]s",
 	// An ack is removed when its condition clears.
 	"GRANT SELECT, INSERT, DELETE ON attention_acks TO %[1]s",
+	"GRANT SELECT, INSERT, UPDATE, DELETE ON denylist_sources, denylist_sets, denylist_status, bans TO %[1]s",
+	"GRANT SELECT, INSERT, DELETE ON ban_lifts TO %[1]s",
+	"GRANT USAGE ON SEQUENCE denylist_sources_id_seq, ban_lifts_id_seq TO %[1]s",
 }
 
 // Migrate applies new migrations in order, each in its own transaction,

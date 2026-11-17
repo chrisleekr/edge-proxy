@@ -313,7 +313,11 @@ func (s *Server) validateDraft(ctx context.Context, q querier, c *snapshot.Confi
 			warns = append(warns, expr.Issue{Path: fmt.Sprintf("config.rate_limit_rules[%d].expires_at", i), Msg: "is already past; the rule will not run"})
 		}
 	}
-	return compiled, warns, err
+	if err != nil {
+		return compiled, warns, err
+	}
+	dw, err := s.ipListWarnings(ctx, q, c)
+	return compiled, append(warns, dw...), err
 }
 
 // validate compiles c against d as the next version and checks the tests.

@@ -68,6 +68,17 @@ func FuzzDecodeAndCompile(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(tb)
+	// A trap rule that bans the client IP.
+	trap := validEnvelope()
+	addTrap(trap.Active, new("block"), "24h")
+	if _, errs := CompileEnvelope(trap, testDeployment); errs != nil {
+		f.Fatalf("ban seed doesn't compile: %v", expr.Issues(errs))
+	}
+	trb, err := json.Marshal(trap)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(trb)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e, err := Decode(bytes.NewReader(data))
 		if err != nil {
