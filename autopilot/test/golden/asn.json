@@ -1177,6 +1177,8 @@
       "required": [
         "verdict",
         "summary",
+        "needs_you",
+        "details",
         "proposals"
       ],
       "additionalProperties": false,
@@ -1190,6 +1192,33 @@
           ]
         },
         "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "needs_you": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule",
+              "ask"
+            ],
+            "properties": {
+              "rule": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "ask": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "details": {
           "type": "string",
           "maxLength": 4000
         },

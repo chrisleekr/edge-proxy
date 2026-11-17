@@ -510,18 +510,23 @@ func (s *Server) lifetimeEnd(ctx context.Context, q querier, set AutopilotSettin
 // numbers that decided it. A first ttl can be as short as the policy allows,
 // so a shorter life is never idle: pausing traffic for one short ttl must not
 // end a sensor. A log-only rule past the per-request cap counts as capped, not
-// evaluated, so both are matches. Without a stats row for it the answer is no:
-// a stats outage must not end a sensor.
+// evaluated, so both are matches. Dropped stats reports must never end a
+// sensor, and edges report every rate-limit rule every interval, zero counts
+// included, so it is idle only when every whole minute of the window has a
+// stats row naming the rule. The current minute may not be reported yet and
+// is not required.
 func (s *Server) idleSensor(ctx context.Context, q querier, r apRule, maxTTL time.Duration, to time.Time) (bool, map[string]any, error) {
 	if r.LiveSince == nil || to.Sub(*r.LiveSince) < maxTTL {
 		return false, nil, nil
 	}
 	from := to.Add(-maxTTL).Truncate(time.Minute)
-	var rows, matches int64
-	err := q.QueryRow(ctx, `SELECT count(e), coalesce(sum(coalesce((e->>'evaluated')::bigint, 0) + coalesce((e->>'capped')::bigint, 0)), 0)::bigint
-		FROM (SELECT (SELECT x FROM jsonb_array_elements(rate_limit) x WHERE x->>'id' = $1 LIMIT 1) e FROM edge_stats_minute WHERE minute >= $2 AND minute <= $3) m`,
-		r.ID, from, to).Scan(&rows, &matches)
-	return rows > 0 && matches == 0, map[string]any{"window_from": from, "window_to": to, "stats_minutes": rows, "matches": matches}, err
+	last := to.Truncate(time.Minute)
+	var covered, matches int64
+	err := q.QueryRow(ctx, `SELECT count(DISTINCT minute) FILTER (WHERE e IS NOT NULL AND minute < $4), coalesce(sum(coalesce((e->>'evaluated')::bigint, 0) + coalesce((e->>'capped')::bigint, 0)), 0)::bigint
+		FROM (SELECT minute, (SELECT x FROM jsonb_array_elements(rate_limit) x WHERE x->>'id' = $1 LIMIT 1) e FROM edge_stats_minute WHERE minute >= $2 AND minute <= $3) m`,
+		r.ID, from, to, last).Scan(&covered, &matches)
+	need := int64(last.Sub(from) / time.Minute)
+	return covered == need && matches == 0, map[string]any{"window_from": from, "window_to": to, "stats_minutes": covered, "window_minutes": need, "matches": matches}, err
 }
 
 // renew extends a rule a quarter of whose ttl is left: a sensor unless it

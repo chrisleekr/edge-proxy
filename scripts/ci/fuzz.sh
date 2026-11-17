@@ -16,7 +16,7 @@ base="${BASE:-}"
 
 changed=""
 if [[ -n "${base}" ]]; then
-  files="$(git diff --name-only "${base}" HEAD)"
+  files="$(git diff --no-renames --name-only "${base}" HEAD)"
   if grep -Eq '^go\.(mod|sum)$' <<<"${files}"; then
     base=""
   else

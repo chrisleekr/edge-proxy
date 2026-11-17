@@ -1574,6 +1574,7 @@ func unusedSensor(t *testing.T, h *harness, pub, agent *client) string {
 	pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
 	id := idleFor(t, h, pub, agent, 0, 0)
 	h.advance(11 * time.Minute)
+	ruleMinutes(h, pub, 61, 1_000, 0, 0, 0, id, "[]")
 	h.tick()
 	return id
 }
@@ -1610,6 +1611,8 @@ func TestAutopilotIdleSensors(t *testing.T) {
 			t.Fatalf("%d renewals, want 1: %v", n, h.actions())
 		}
 		h.advance(11 * time.Minute)
+		// The window to the expiry at 110 minutes needs every minute from 50 to 109.
+		ruleMinutes(h, pub, 61, 1_000, 0, 0, 0, id, "[]")
 		h.tick()
 		if st, o := ruleState(t, h, id), ruleOutcome(t, h, id); st != "expired" || o != "unused" {
 			t.Fatalf("rule %s outcome %q", st, o)
@@ -1617,13 +1620,32 @@ func TestAutopilotIdleSensors(t *testing.T) {
 		if got := lastReason(t, h, id, "expired"); got != "it matched no requests before its expiry" {
 			t.Fatalf("reason %q", got)
 		}
-		var minutes, matches int64
-		if err := h.db.QueryRow(t.Context(), `SELECT (numbers->>'stats_minutes')::bigint, (numbers->>'matches')::bigint FROM autopilot_transitions WHERE rule_id = $1 AND to_state = 'expired'`, id).Scan(&minutes, &matches); err != nil || minutes != 50 || matches != 0 {
-			t.Fatalf("transition numbers: %d stats minutes, %d matches, err %v", minutes, matches, err)
+		var minutes, window, matches int64
+		if err := h.db.QueryRow(t.Context(), `SELECT (numbers->>'stats_minutes')::bigint, (numbers->>'window_minutes')::bigint, (numbers->>'matches')::bigint FROM autopilot_transitions WHERE rule_id = $1 AND to_state = 'expired'`, id).Scan(&minutes, &window, &matches); err != nil || minutes != 60 || window != 60 || matches != 0 {
+			t.Fatalf("transition numbers: %d stats minutes of %d, %d matches, err %v", minutes, window, matches, err)
 		}
-		var audited int64
-		if err := h.db.QueryRow(t.Context(), `SELECT (details->'numbers'->>'stats_minutes')::bigint FROM audit_events WHERE action = 'autopilot.expire' AND target = $1`, "rule "+id).Scan(&audited); err != nil || audited != 50 {
-			t.Fatalf("audit numbers: %d stats minutes, err %v", audited, err)
+		var audited, auditedWindow int64
+		if err := h.db.QueryRow(t.Context(), `SELECT (details->'numbers'->>'stats_minutes')::bigint, (details->'numbers'->>'window_minutes')::bigint FROM audit_events WHERE action = 'autopilot.expire' AND target = $1`, "rule "+id).Scan(&audited, &auditedWindow); err != nil || audited != 60 || auditedWindow != 60 {
+			t.Fatalf("audit numbers: %d stats minutes of %d, err %v", audited, auditedWindow, err)
+		}
+	})
+	t.Run("a sensor whose stats miss a minute of the window, as during an ingest outage, is renewed and not ended unused", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+		h.advance(50 * time.Minute)
+		h.tick()
+		h.advance(50 * time.Minute)
+		ruleMinutes(h, pub, 60, 1_000, 0, 0, 0, id, "[]")
+		if _, err := h.db.Exec(t.Context(), "DELETE FROM edge_stats_minute WHERE minute = $1", h.now().UTC().Truncate(time.Minute).Add(-30*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		h.tick()
+		if n := renewals(h, id); n != 2 {
+			t.Fatalf("%d renewals, want 2: %v", n, h.actions())
+		}
+		if st, o := ruleState(t, h, id), ruleOutcome(t, h, id); st != "observing" || o == "unused" {
+			t.Fatalf("rule %s outcome %q", st, o)
 		}
 	})
 	t.Run("a sensor live less than max_ttl that matched nothing is still renewed", func(t *testing.T) {
