@@ -138,6 +138,17 @@ func TestRoutesAreGroupedFromAccessLines(t *testing.T) {
 	h.wantMetrics(`admin_log_lines_total{result="accepted"} 6`, `admin_log_lines_total{result="rejected"} 5`)
 }
 
+// A would_limit line is a request that went through: its decision is counted,
+// but the log-only rule it names is not shown as limiting the route.
+func TestWouldLimitLineIsNotCountedAsLimited(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/users/42", "edge.decision", "would_limit", "edge.rate_limit_rule", "login")), http.StatusAccepted)
+	users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
+	if users == nil || users.Decisions["would_limit"] != 1 || len(users.RateLimitRules) != 0 {
+		t.Fatalf("users route = %+v", users)
+	}
+}
+
 // When the edges log a sample of allowed requests, each sampled line counts
 // for 1/rate requests, so shares match the traffic; lines the edge always
 // logs count once. The scaled part is reported as an estimate.

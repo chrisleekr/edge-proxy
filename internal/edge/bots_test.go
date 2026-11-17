@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -352,6 +353,8 @@ func TestClientSignalsClassifyRealUserAgents(t *testing.T) {
 		{"Chrome 85, before client hints", browser(chrome85), nil},
 		{"Chrome on iOS", browser(criOS), nil},
 		{"Firefox", browser(firefoxUA), nil},
+		{"Firefox user agent with Sec-CH-UA", browser(firefoxUA, "Sec-CH-UA", hints("125")), []string{"client_hints_mismatch"}},
+		{"Lightpanda", []string{"User-Agent", "Lightpanda/1.0"}, []string{"ua_headless"}},
 		{"Firefox without Sec-Fetch-Mode", browser(firefoxUA, "Sec-Fetch-Mode", ""), []string{"browser_no_sec_fetch"}},
 		{"Safari 17.4", browser(safari17), nil},
 		{"Safari 15.6, before Sec-Fetch", browser(safari15, "Sec-Fetch-Mode", ""), nil},
@@ -461,4 +464,73 @@ func TestBlockKillSwitchTurnsBlocksIntoLogs(t *testing.T) {
 	c.Version = 2
 	h.loadJSON(envelope(c), func(env map[string]any) { setBlock(activeJSON(env), "tools", "block") })
 	edgeError(t, h.do("GET", "/", nil, "User-Agent", "curl/8.5.0"), 403, "forbidden")
+}
+
+// fleetHarness has the rules a fleet on one fingerprint is limited by: a
+// site-wide ip rule, which a rule keyed on ja4 alone needs beside it, and a
+// shared ja4 bucket of 3 for requests with a stale-browser signal.
+func fleetHarness(t *testing.T, scope string) *harness {
+	t.Helper()
+	h := valkeyHarness(t, map[string]string{"VIEWER_HEADERS": ja4Viewer})
+	c := testConfig(1)
+	c.Global.BrowserFloor = map[string]int{"chromium": 130}
+	fleet := rlRule(uniq("fleet"), scope, "sliding_window", 3, "ja4")
+	fleet.OnMissingKey = "skip"
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule(uniq("site"), "true", "sliding_window", 1000, "ip"), fleet}
+	h.load(envelope(c))
+	return h
+}
+
+const (
+	fleetScope = `client.signals in {"browser_outdated" "client_hints_mismatch"}`
+	// fleetJA4 is made up: TLS 1.3, h2, and hashes no browser produces.
+	fleetJA4 = "t13d1516h2_0123456789ab_ba9876543210"
+	staleUA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	freshUA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+
+// fleetGet sends one HTTPS request on the fleet's fingerprint from address n
+// of a documentation range.
+func fleetGet(h *harness, n int, headers ...string) int {
+	h.t.Helper()
+	base := []string{"CloudFront-Viewer-Address", fmt.Sprintf("192.0.2.%d:443", n), "CloudFront-Forwarded-Proto", "https",
+		"CloudFront-Viewer-JA4-Fingerprint", fleetJA4, "Accept-Language", "en", "Sec-Fetch-Mode", "navigate"}
+	resp := h.do("GET", "/", nil, append(base, headers...)...)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestFingerprintFleetSharesOneBucket(t *testing.T) {
+	stale := []string{"User-Agent", staleUA, "Sec-CH-UA", `"Chromium";v="120", "Google Chrome";v="120"`}
+	fresh := []string{"User-Agent", freshUA, "Sec-CH-UA", `"Chromium";v="130", "Google Chrome";v="130"`}
+	firefox := []string{"User-Agent", firefoxUA, "Sec-CH-UA", `"Chromium";v="120", "Google Chrome";v="120"`}
+
+	t.Run("stale browsers from many addresses on one fingerprint share one bucket", func(t *testing.T) {
+		h := fleetHarness(t, fleetScope)
+		var got []int
+		for i := 1; i <= 5; i++ {
+			got = append(got, fleetGet(h, i, stale...))
+		}
+		if !eqInts(got, 200, 200, 200, 429, 429) {
+			t.Fatalf("five addresses, one request each: %v", got)
+		}
+	})
+
+	t.Run("a current browser on the same fingerprint is not limited", func(t *testing.T) {
+		h := fleetHarness(t, fleetScope)
+		for i := 1; i <= 5; i++ {
+			fleetGet(h, i, stale...)
+		}
+		if got := fleetGet(h, 100, fresh...); got != 200 {
+			t.Fatalf("Chrome 130 after the bucket is full: %d", got)
+		}
+	})
+
+	t.Run("Firefox with Chrome client hints counts in the fleet's bucket", func(t *testing.T) {
+		h := fleetHarness(t, fleetScope)
+		got := []int{fleetGet(h, 1, stale...), fleetGet(h, 2, stale...), fleetGet(h, 3, firefox...), fleetGet(h, 4, stale...)}
+		if !eqInts(got, 200, 200, 200, 429) {
+			t.Fatalf("two stale Chrome, one Firefox, then Chrome: %v", got)
+		}
+	})
 }

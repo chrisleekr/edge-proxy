@@ -127,7 +127,21 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 		// Validation takes any uppercase token; these are what a form offers.
 		"methods": []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
 	}
-	return writeJSON(w, http.StatusOK, map[string]any{"fields": fields, "operators": ops, "rules": rules})
+	// Rules may not read managed headers, such as source headers: the rule builder offers only the rest, and Fleet names both.
+	cdn, cdnSources, cdnDefault := []string{}, []string{}, []string{}
+	for _, h := range s.cfg.Deployment.CDNHeaders {
+		if h = strings.ToLower(h); s.cfg.Deployment.Managed(h) {
+			cdnSources = append(cdnSources, h)
+		} else {
+			cdn = append(cdn, h)
+		}
+	}
+	for _, h := range s.cfg.Deployment.CDNTrustedDefault {
+		if h = strings.ToLower(h); !s.cfg.Deployment.Managed(h) {
+			cdnDefault = append(cdnDefault, h)
+		}
+	}
+	return writeJSON(w, http.StatusOK, map[string]any{"fields": fields, "operators": ops, "rules": rules, "cdn_headers": cdn, "cdn_source_headers": cdnSources, "cdn_trusted_default": cdnDefault})
 }
 
 func (s *Server) exprParse(w http.ResponseWriter, r *http.Request, _ *principal) error {

@@ -1023,3 +1023,109 @@ func TestConfigTestsRunForATrustedClient(t *testing.T) {
 		}
 	}
 }
+
+func TestSchemaCDNHeaders(t *testing.T) {
+	headers := func(t *testing.T, set map[string]string) []string {
+		t.Helper()
+		h := newHarnessWith(t, set)
+		h.user("ed", "editor")
+		return decode[struct {
+			CDNHeaders []string `json:"cdn_headers"`
+		}](t, h.signedIn("ed").do("GET", "/api/expr/schema", nil)).CDNHeaders
+	}
+	t.Run("cloudflare offers its headers in lower case, minus the ones mapped to a field", func(t *testing.T) {
+		got := headers(t, map[string]string{"CLIENT_IP_SOURCE": "cloudflare"})
+		if !slices.Contains(got, "cf-ipcity") || slices.Contains(got, "cf-ipcountry") {
+			t.Fatalf("cdn_headers %v", got)
+		}
+	})
+	t.Run("CDN_HEADERS replaces the preset", func(t *testing.T) {
+		if got := headers(t, map[string]string{"CDN_HEADERS": "X-Geo-City"}); !slices.Equal(got, []string{"x-geo-city"}) {
+			t.Fatalf("cdn_headers %v", got)
+		}
+	})
+	t.Run("a name the edge manages is listed apart, since rules can't read it", func(t *testing.T) {
+		h := newHarnessWith(t, map[string]string{"CDN_HEADERS": "X-Edge-Colo,X-Geo-City"})
+		h.user("ed", "editor")
+		got := decode[struct {
+			CDN     []string `json:"cdn_headers"`
+			Sources []string `json:"cdn_source_headers"`
+		}](t, h.signedIn("ed").do("GET", "/api/expr/schema", nil))
+		if !slices.Equal(got.CDN, []string{"x-geo-city"}) || !slices.Equal(got.Sources, []string{"x-edge-colo"}) {
+			t.Fatalf("cdn_headers %v, cdn_source_headers %v", got.CDN, got.Sources)
+		}
+	})
+	t.Run("none offers empty lists, not null", func(t *testing.T) {
+		h := newHarnessWith(t, map[string]string{"CDN_HEADERS": "none"})
+		h.user("ed", "editor")
+		if b := body(h.signedIn("ed").do("GET", "/api/expr/schema", nil)); !strings.Contains(b, `"cdn_headers":[]`) || !strings.Contains(b, `"cdn_source_headers":[]`) || !strings.Contains(b, `"cdn_trusted_default":[]`) {
+			t.Fatalf("schema %s", b)
+		}
+	})
+	t.Run("source headers are listed apart, so Fleet shows everything logged", func(t *testing.T) {
+		h := newHarnessWith(t, map[string]string{"CLIENT_IP_SOURCE": "cloudflare"})
+		h.user("ed", "editor")
+		got := decode[struct {
+			CDN     []string `json:"cdn_headers"`
+			Sources []string `json:"cdn_source_headers"`
+		}](t, h.signedIn("ed").do("GET", "/api/expr/schema", nil))
+		if !slices.Contains(got.Sources, "cf-ipcountry") || slices.Contains(got.CDN, "cf-ipcountry") {
+			t.Fatalf("cdn_headers %v, cdn_source_headers %v", got.CDN, got.Sources)
+		}
+	})
+	t.Run("describe_fields gives the autopilot the same list and the live policy's trust", func(t *testing.T) {
+		h := newHarnessWith(t, map[string]string{"CLIENT_IP_SOURCE": "cloudflare"})
+		h.user("ed", "admin")
+		ed := h.signedIn("ed")
+		cs := h.mcpSession(ed.userToken("config.read"), 0)
+		out := mustCall(t, cs, "describe_fields", nil)
+		schema, _ := out["schema"].(map[string]any)
+		if list, _ := schema["cdn_headers"].([]any); !slices.Contains(list, any("cf-ipcity")) {
+			t.Fatalf("cdn_headers %v", schema["cdn_headers"])
+		}
+		if got := fmt.Sprint(out["cdn_trusted"]); got != "[cf-ipcountry cf-ray cf-visitor]" {
+			t.Fatalf("with no live version, cdn_trusted %s, want the default", got)
+		}
+		c := testConfig()
+		c.Global.CDNTrustedHeaders = &[]string{"Cf-Bot-Score", "Cf-Verified-Bot"}
+		status(t, ed.save(`"0"`, c, adminTest), 200)
+		// A draft is not live, so it changes nothing yet.
+		if got := fmt.Sprint(mustCall(t, cs, "describe_fields", nil)["cdn_trusted"]); got != "[cf-ipcountry cf-ray cf-visitor]" {
+			t.Fatalf("with an unpublished draft, cdn_trusted %s", got)
+		}
+		status(t, ed.publishDraft("trust the bot headers"), 201)
+		if got := fmt.Sprint(mustCall(t, cs, "describe_fields", nil)["cdn_trusted"]); got != "[cf-bot-score cf-ipcountry cf-verified-bot]" {
+			t.Fatalf("after publishing, cdn_trusted %s", got)
+		}
+	})
+	t.Run("the default trust is what the CDN adds to every request", func(t *testing.T) {
+		for set, want := range map[string][]string{"cloudflare": {"cf-ray", "cf-visitor"}, "cloudfront": {}} {
+			h := newHarnessWith(t, map[string]string{"CLIENT_IP_SOURCE": set})
+			h.user("ed", "editor")
+			b := body(h.signedIn("ed").do("GET", "/api/expr/schema", nil))
+			// Raw JSON, since decoding reads null and [] alike.
+			if raw, _ := json.Marshal(want); !strings.Contains(b, `"cdn_trusted_default":`+string(raw)) {
+				t.Fatalf("%s schema %s, want cdn_trusted_default %s", set, b, raw)
+			}
+		}
+	})
+}
+
+// A CDN signal reads headers that must be trusted: on Cloudflare the bot
+// headers need an optional feature, so the policy has to say they are on.
+func TestSavingACDNSignalNeedsTrustedHeaders(t *testing.T) {
+	h := newHarnessWith(t, map[string]string{"CLIENT_IP_SOURCE": "cloudflare"})
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	cfg := func(trusted *[]string) *snapshot.Config {
+		c := testConfig()
+		c.Global.CDNTrustedHeaders = trusted
+		c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "bots", Expression: mustParse(`client.signals eq "cdn_likely_automated"`), Settings: snapshot.Settings{CORSPolicy: new("")}})
+		return c
+	}
+	resp := ed.save(`"0"`, cfg(nil))
+	if b := body(resp); resp.StatusCode != 422 || !strings.Contains(b, "listed in CDN_HEADERS and trusted in global.cdn_trusted_headers") {
+		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
+	status(t, ed.save(`"0"`, cfg(&[]string{"Cf-Bot-Score", "Cf-Verified-Bot"})), 200)
+}

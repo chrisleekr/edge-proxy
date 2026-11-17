@@ -43,7 +43,7 @@ type geoPoint struct {
 // notBlocked are the decisions where the edge did not refuse the request.
 // Anything else, including a name added later, is a refusal.
 var notBlocked = map[string]bool{
-	"allow": true, "would_block": true, "upstream_timeout": true, "upstream_error": true, "upstream_tls": true, "client_gone": true,
+	"allow": true, "would_block": true, "would_limit": true, "upstream_timeout": true, "upstream_error": true, "upstream_tls": true, "client_gone": true,
 }
 
 type trafficKey struct {

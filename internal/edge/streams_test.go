@@ -135,6 +135,10 @@ func TestWebSocket(t *testing.T) {
 		if l["http.response.status_code"] != 101.0 {
 			t.Errorf("WebSocket logged as %v", l["http.response.status_code"])
 		}
+		// What passes over a hijacked connection never reaches Write.
+		if _, ok := l["http.response.body.size"]; ok {
+			t.Errorf("WebSocket logged a body size: %v", l)
+		}
 	}
 	if h.srv.m.codes[1][101].Load() != 2 || h.srv.m.codes[0][0].Load()+h.srv.m.codes[1][0].Load() != 0 {
 		t.Errorf("upstream 101s %d, no answer %d", h.srv.m.codes[1][101].Load(), h.srv.m.codes[0][0].Load()+h.srv.m.codes[1][0].Load())

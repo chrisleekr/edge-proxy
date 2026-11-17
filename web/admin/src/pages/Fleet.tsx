@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Fragment, type PointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { api, useCan } from '../api';
+import { api, type Schema, useCan } from '../api';
 import { LogLink, useLogSearch } from '../logSearch';
 import { Link, useSearch } from '../router';
 import { Badge, Button, Card, ErrorBox, Notice, Page, Rolling, Table, Title, ago, plural, when } from '../ui';
@@ -15,6 +15,7 @@ export interface Edge {
   versions: number[];
   upstream: string;
   live: boolean;
+  settings_differ: boolean;
 }
 
 // useRole names a version's role, so "4, 5" reads as "v4 live, v5 canary".
@@ -37,18 +38,25 @@ export function Fleet() {
   const gone = edges.filter((e) => !e.live).length;
   const toggle = gone > 0 && gone < edges.length;
   const shown = toggle && !showGone ? edges.filter((e) => e.live) : edges;
+  const differing = edges.filter((e) => e.live && e.settings_differ).map((e) => e.instance);
   return (
     <Page
       title="Fleet"
-      info="Edges that fetched config from this admin. Reporting means it reported in the last minute. Versions loaded are the live version and, during a canary, the canary version. Config from says where an edge got the version it serves: admin, its cache file from an earlier run, or the bootstrap file it starts from when admin is unreachable. An edge on cache or bootstrap keeps serving; it switches to admin once it can reach it. Upstream is the edge's UPSTREAM_URL, the load balancer or gateway it forwards every request to. It is set in the edge's deployment, not here."
+      info="Edges that fetched config from this admin. Reporting means it reported in the last minute. Versions loaded are the live version and, during a canary, the canary version. Config from says where an edge got the version it serves: admin, its cache file from an earlier run, or the bootstrap file it starts from when admin is unreachable. An edge on cache or bootstrap keeps serving; it switches to admin once it can reach it. Upstream is the edge's UPSTREAM_URL, the load balancer or gateway it forwards every request to. It is set in the edge's deployment, not here. An edge marked settings differ holds publishing until its deployment settings match admin's."
     >
       <ErrorBox error={q.error} />
+      {differing.length > 0 && (
+        <Notice tone="amber">
+          Publishing is held: {differing.join(', ')} {differing.length === 1 ? 'runs' : 'run'} with different deployment settings than admin. CLIENT_IP_SOURCE, VIEWER_HEADERS, INGRESS_SECRET_HEADER, CDN_HEADERS and ALLOW_REGEX must be the same on admin and every edge.
+        </Notice>
+      )}
       <Table head={['Edge', 'State', 'Versions loaded', 'Upstream', 'Config from', 'Last report']} empty={q.data && 'No edge has reported to this admin yet. Edges report once they fetch a snapshot.'}>
         {q.data && shown.map((e) => (
           <tr key={e.instance}>
             <td className="font-mono">{e.instance}</td>
             <td>
               <Badge tone={e.live ? 'green' : 'slate'}>{e.live ? 'reporting' : 'gone'}</Badge>
+              {e.live && e.settings_differ && <Badge tone="amber">settings differ</Badge>}
             </td>
             <td className="tabular-nums">{e.versions.map(role).join(', ')}</td>
             <td className="font-mono break-all">{e.upstream || 'not reported'}</td>
@@ -70,7 +78,41 @@ export function Fleet() {
         </Button>
       )}
       <CrawlerRanges />
+      <CdnHeaders />
     </Page>
+  );
+}
+
+// CdnHeaders lists every CDN_HEADERS entry the edge logs; absent when none are set.
+function CdnHeaders() {
+  const q = useQuery({ queryKey: ['schema'], queryFn: () => api<Schema>('GET', '/api/expr/schema'), staleTime: Infinity });
+  const names = q.data?.cdn_headers ?? [];
+  const sources = q.data?.cdn_source_headers ?? [];
+  if (names.length === 0 && sources.length === 0) return null;
+  return (
+    <Card id="cdn-headers" title="CDN headers" intro={
+        <>
+          Logged on every access line, as the CDN sent them, and suggested in the rule builder. Set with CDN_HEADERS. Which of them rules can trust is set in{' '}
+          <Link to="/settings#trusted-cdn-headers" className="underline">
+            the policy settings
+          </Link>
+          .
+        </>
+      }
+    >
+      <ul className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-sm">
+        {names.map((n) => (
+          <li key={n} className="break-all">
+            {n}
+          </li>
+        ))}
+      </ul>
+      {sources.length > 0 && (
+        <p className="text-sm">
+          Also logged. Rules can't read these: a source header through its field, such as <code>ip.src.country</code>; an edge-managed name not at all: <span className="font-mono break-all">{sources.join(', ')}</span>
+        </p>
+      )}
+    </Card>
   );
 }
 
@@ -176,6 +218,8 @@ export interface Row {
   status_codes: { edge?: Record<string, number>; upstream?: Record<string, number> };
   // The edge's upstream failures by cause; causes with none are left out.
   upstream_errors: Record<string, number>;
+  // Requests per client signal, in the order of the schema's signal names; empty for minutes stored before edges counted them.
+  client_signals: number[] | null;
 }
 
 type Origin = 'edge' | 'upstream';
@@ -597,6 +641,13 @@ export function Stats() {
   }
   const none = `No traffic reported ${r.phrase}.`;
   const requests = sum(rows, (x) => x.requests);
+  // Share of the requests that edges counted signals for, so minutes stored before that don't dilute it.
+  const signalNames = useQuery({ queryKey: ['schema'], queryFn: () => api<Schema>('GET', '/api/expr/schema'), staleTime: Infinity });
+  const counted = sum(rows.filter((x) => x.client_signals?.length), (x) => x.requests);
+  const signals = (signalNames.data?.rules.signals ?? [])
+    .map((s, i) => ({ name: s.name, n: sum(rows, (x) => x.client_signals?.[i] ?? 0) }))
+    .filter((s) => s.n > 0)
+    .sort((a, b) => b.n - a.n);
   return (
     <Page title="Stats" actions={<RangePicker r={r} />}>
       <ErrorBox error={q.error} />
@@ -639,6 +690,21 @@ export function Stats() {
             <td>{c.origin === 'edge' ? 'The edge' : 'The upstream'}</td>
             <Cell text={count(c.n)} />
             <Cell text={pct(c.n, requests)} />
+          </tr>
+        ))}
+      </Table>
+      <Title
+        className="-mb-2"
+        info="How many requests showed each client signal, counted exactly. One request can show several, so shares add up to more than 100%. The share is of the requests counted since edges began reporting signals. browser_outdated counts only when a browser floor is set."
+      >
+        Client signals
+      </Title>
+      <Table head={['Signal', 'Requests', 'Share']} num={[1, 2]} empty={q.data && `No request showed a client signal ${r.phrase}.`}>
+        {signals.map((x) => (
+          <tr key={x.name}>
+            <td className="font-mono">{x.name}</td>
+            <Cell text={count(x.n)} />
+            <Cell text={pct(x.n, counted)} />
           </tr>
         ))}
       </Table>

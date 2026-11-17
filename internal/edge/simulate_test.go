@@ -410,3 +410,54 @@ func TestSimulateTrustedClient(t *testing.T) {
 		})
 	}
 }
+
+// A config test sees the CDN signals as live traffic would: from the headers
+// the policy trusts, the headers the test sends and its country.
+func TestSimulateEvaluatesCDNSignals(t *testing.T) {
+	c := testConfig(1)
+	c.ConfigRules = append(c.ConfigRules,
+		snapshot.ConfigRule{ID: "automated", Expression: mustParse(`client.signals eq "cdn_likely_automated"`), Settings: snapshot.Settings{CORSPolicy: new("")}},
+		snapshot.ConfigRule{ID: "impersonated", Expression: mustParse(`client.signals eq "crawler_impersonated"`), Settings: snapshot.Settings{Locale: new(false)}},
+		snapshot.ConfigRule{ID: "tor", Expression: mustParse(`client.signals eq "cdn_tor"`), Settings: snapshot.Settings{BodyLimit: new(int64(2048))}},
+	)
+	c.Global.CDNTrustedHeaders = &[]string{"Cf-Bot-Score", "Cf-Verified-Bot"}
+	flare, _, errs := snapshot.Compile(c, snapshot.Deployment{ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"CF-IPCountry"}, CDNHeaders: []string{"Cf-Ipcountry", "Cf-Ray", "Cf-Bot-Score", "Cf-Verified-Bot"}, CDNTrustedDefault: []string{"Cf-Ray"}})
+	if errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	tlsOld := testConfig(1)
+	tlsOld.ConfigRules = append(tlsOld.ConfigRules,
+		snapshot.ConfigRule{ID: "tls_old", Expression: mustParse(`client.signals eq "browser_tls_old"`), Settings: snapshot.Settings{Locale: new(false)}})
+	tlsOld.Global.CDNTrustedHeaders = &[]string{"Cloudfront-Viewer-Tls"}
+	front, _, errs := snapshot.Compile(tlsOld, snapshot.Deployment{ViewerFields: []string{"ssl"}, SourceHeaders: []string{"CloudFront-Forwarded-Proto"}, CDNHeaders: []string{"Cloudfront-Viewer-Tls"}})
+	if errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	const base = `"Method": "GET", "Host": "api.example.com", "Target": "/", "IP": "198.51.100.7"`
+	const browser = `"User-Agent": ["` + chromeUA + `"], "Accept-Language": ["en"], "Sec-Fetch-Mode": ["navigate"], "Sec-Ch-Ua": ["\"Chromium\";v=\"124\""]`
+	cases := []struct {
+		name string
+		cc   *snapshot.Compiled
+		req  string
+		want []string
+	}{
+		{"low bot score", flare, `{` + base + `, "Headers": {"Cf-Bot-Score": ["12"], "Cf-Verified-Bot": ["false"]}}`, []string{"automated"}},
+		{"forged Googlebot", flare, `{` + base + `, "Headers": {"User-Agent": ["Googlebot/2.1"], "Cf-Verified-Bot": ["false"]}}`, []string{"impersonated"}},
+		{"Tor exit", flare, `{` + base + `, "Country": "T1"}`, []string{"tor"}},
+		{"ordinary request", flare, `{` + base + `, "Country": "AU", "Headers": {"Cf-Bot-Score": ["80"], "Cf-Verified-Bot": ["false"]}}`, nil},
+		{"modern Chrome on TLS 1.2", front, `{` + base + `, "SSL": true, "HTTPVersion": "HTTP/2", "Headers": {` + browser + `, "Cloudfront-Viewer-Tls": ["TLSv1.2:ECDHE-RSA-AES128-GCM-SHA256:fullHandshake"]}}`, []string{"tls_old"}},
+		{"TLS 1.2 on a plain HTTP request", front, `{` + base + `, "HTTPVersion": "HTTP/1.1", "Headers": {` + browser + `, "Cloudfront-Viewer-Tls": ["TLSv1.2:ECDHE-RSA-AES128-GCM-SHA256:fullHandshake"]}}`, nil},
+		{"modern Chrome on TLS 1.3", front, `{` + base + `, "SSL": true, "HTTPVersion": "HTTP/2", "Headers": {` + browser + `, "Cloudfront-Viewer-Tls": ["TLSv1.3:TLS_AES_128_GCM_SHA256:fullHandshake"]}}`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Simulate(tc.cc, simRequest(t, tc.req))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got.ConfigRules, tc.want) {
+				t.Fatalf("config rules %v, want %v", got.ConfigRules, tc.want)
+			}
+		})
+	}
+}

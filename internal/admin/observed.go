@@ -484,7 +484,8 @@ func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, w int64
 	for _, id := range l.ConfigRules {
 		addCapped(t.config, id, w, maxRuleKeys)
 	}
-	if l.RateLimitRule != "" {
+	// A would_limit line names a log-only rule that limited nothing.
+	if l.RateLimitRule != "" && l.Decision != "would_limit" {
 		addCapped(t.rateLimit, l.RateLimitRule, w, maxRuleKeys)
 	}
 	keys := make([]string, len(l.QueryKeys))

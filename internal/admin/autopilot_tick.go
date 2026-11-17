@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/chrisleekr/edge-proxy/internal/admindb"
+	"github.com/chrisleekr/edge-proxy/internal/edge"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -29,7 +30,7 @@ var (
 // anomalySignals open a case when they fire. A sensor's would-block or
 // dominant subject is the autopilot's own early warning; on a person's
 // rule it is already handled by that rule.
-var anomalySignals = []string{"traffic_surge", "auth_failure_ratio", "rule_auth_failure_ratio", "rule_match_surge"}
+var anomalySignals = []string{"traffic_surge", "auth_failure_ratio", "rule_auth_failure_ratio", "rule_match_surge", "signal_surge"}
 
 // overlaySignals are the signals on an autopilot rule that open a case.
 var overlaySignals = []string{"rule_would_block", "rule_subject_dominates"}
@@ -581,7 +582,7 @@ func (s *Server) ruleGuard(ctx context.Context, q querier, g GuardSettings, set 
 	if !g.Enabled || sig.Mode == "off" || r.EnforcingSince == nil || now.Sub(*r.EnforcingSince) > time.Duration(g.Window) {
 		return nil, nil
 	}
-	c, err := s.cohortWhere(ctx, q, "minute >= $1 AND minute < $2", r.EnforcingSince.Truncate(time.Minute), now)
+	c, err := s.cohortWhere(ctx, q, map[string]bool{r.ID: snapshot.SharedKey(r.Rule.Key)}, "minute >= $1 AND minute < $2", r.EnforcingSince.Truncate(time.Minute), now)
 	if err != nil || c.Requests < g.MinRequests {
 		return nil, err
 	}
@@ -605,8 +606,26 @@ func (s *Server) ruleGuard(ctx context.Context, q querier, g GuardSettings, set 
 	}
 	maxShare := blockShare(set, notes)
 	limitedRatio, fleetShare := ratio(rc.Limited, rc.Evaluated), ratio(rc.Limited, c.Requests)
+	var sb sharedBound
+	scope := sharedScope(r.Rule)
+	if scope != nil {
+		// The fleet on the fingerprint is most of what a working shared rule
+		// limits, so its share is the collateral bound, not the raw count.
+		from := r.EnforcingSince.Truncate(time.Minute)
+		rows, err := s.statsWhere(ctx, q, "minute >= $1 AND minute < $2", from, now)
+		if err != nil {
+			return nil, err
+		}
+		if sb, err = s.newSharedBound(ctx, q, scope, r.ID, rows, from, now, func(rc edge.RuleCounts) uint64 { return rc.Limited }); err != nil {
+			return nil, err
+		}
+		fleetShare = ratio(sb.collateral(rc.Limited), c.Requests)
+	}
 	numbers := map[string]any{"limited_ratio": limitedRatio, "shadow_ratio": shadow, "max_vs_shadow": sig.MaxVsShadow, "bound": bound, "fleet_share": fleetShare,
 		"max_block_share": maxShare, "fleet_requests": c.Requests}
+	if scope != nil {
+		sb.add(numbers)
+	}
 	if !(limitedRatio > bound || fleetShare > maxShare) {
 		return nil, nil
 	}

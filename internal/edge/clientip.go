@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
+	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
 // client is what step 2 learns about the client.
@@ -24,6 +25,11 @@ type client struct {
 	asn               int64
 	hasASN            bool
 	ssl, certVerified bool
+	// hasSSL is set when the deployment has an ssl source, so ssl false means http.
+	hasSSL bool
+	// cdn is which CDN headers the policy trusts the signals to read, set
+	// from the snapshot serving the request.
+	cdn snapshot.CDNTrust
 }
 
 // Reasons step 2 rejects a request. Each is a 400 with the bad_request template.
@@ -206,7 +212,7 @@ func (id *identity) viewer(h http.Header, c *client) {
 	if id.ssl != "" {
 		// A scheme from most CDNs, true or false from GCP's {client_encrypted}.
 		v := h.Get(id.ssl)
-		c.ssl = strings.EqualFold(v, "https") || strings.EqualFold(v, "true")
+		c.ssl, c.hasSSL = strings.EqualFold(v, "https") || strings.EqualFold(v, "true"), true
 	}
 	if id.version != "" {
 		c.version = expr.HTTPVersion(h.Get(id.version))

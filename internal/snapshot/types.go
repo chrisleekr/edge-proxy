@@ -81,6 +81,14 @@ type Global struct {
 	// blocks and rate limits, and need no token where one is required (a
 	// token sent is still verified). Added in schema 6, omitted when empty.
 	ClientAllowlist []string `json:"client_allowlist,omitempty"`
+	// BrowserFloor maps "chromium" and "firefox" to the lowest major version
+	// of that browser a User-Agent may claim before the browser_outdated
+	// signal fires. Omitted or empty turns the signal off. Added in schema 7.
+	BrowserFloor map[string]int `json:"browser_floor,omitempty"`
+	// CDNTrustedHeaders lists the CDN_HEADERS entries whose values the CDN
+	// sets on every request. Nil uses the deployment's default and an empty
+	// list trusts none, so it is a pointer. Added in schema 8.
+	CDNTrustedHeaders *[]string `json:"cdn_trusted_headers,omitempty"`
 }
 
 // Backstop is the per-replica, per-IP token bucket.

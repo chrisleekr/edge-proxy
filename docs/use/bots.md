@@ -5,6 +5,7 @@ The edge has no bot score. It gives rules the facts a score would be built from,
 | Fact | Field or setting | From |
 |---|---|---|
 | Automation hints in the headers | `client.signals` | The request's headers and viewer fields ([signals](../reference/expressions.md#client-signals)) |
+| CDN verdicts and measurements | `http.request.headers["<name>"]`, and the CDN signals in `client.signals` | The headers in [`CDN_HEADERS`](../deploy/edge.md#cdn-headers), and for the signals only those trusted in **Settings → Trusted CDN headers**, or a listed source header for `cdn_tor` |
 | TLS fingerprint | `tls.client.ja4`, `tls.client.ja3` | The CDN, through [`VIEWER_HEADERS`](../deploy/edge.md#client-ip-presets) |
 | Crawler whose IP is in its operator's published crawler ranges | `client.verified_bot` | Ranges admin fetches from [`VERIFIED_BOT_SOURCES`](../deploy/admin.md) |
 | Many different paths, IDs or IPs | `distinct` rate limits | Valkey ([Distinct](rate-limiting.md#distinct)) |
@@ -29,6 +30,79 @@ client.signals in {"ua_missing" "ua_tool" "ua_headless"} and not starts_with(htt
 ```
 
 Browser signals such as `browser_no_sec_fetch` fire for a client that claims a modern browser but leaves out what that browser always sends. They need trusted `ssl`, HTTP version or JA4 sources; validation refuses a rule naming a signal the deployment can't compute.
+
+## CDN headers
+
+The headers your CDN sets are [logged on every access line](../deploy/edge.md#cdn-headers) and readable in rules as `http.request.headers["<name>"]`, with the value as the CDN sent it. On Cloudflare that is, for example, the city, the bot score and whether the bot is verified. Read the log first, then write the rule:
+
+```text
+http.request.headers["cf-ipcity"] eq "Sydney"
+```
+
+Four [client signals](../reference/expressions.md#client-signals) come from them, each available only when the headers it reads are in `CDN_HEADERS` and trusted in **Settings → Trusted CDN headers** (`global.cdn_trusted_headers`). `cdn_tor` reads a source header, which is trusted whenever it is listed:
+
+| Signal | Evidence | Known false positives |
+|---|---|---|
+| `cdn_likely_automated` | `Cf-Bot-Score` is 1 to 29 (Cloudflare: 1 automated, 2 to 29 [likely automated](https://developers.cloudflare.com/bots/concepts/bot-score/)) and `Cf-Verified-Bot` is not `true`. Needs `cf-bot-score` and `cf-verified-bot` trusted | Cloudflare's model is wrong sometimes; verified crawlers are left out |
+| `crawler_impersonated` | A `User-Agent` naming googlebot, bingbot, applebot, duckduckbot, yandexbot or baiduspider and `Cf-Verified-Bot` is `false`; a request without the header never sets it. Needs `cf-verified-bot` trusted | A real crawler on an address Cloudflare doesn't yet verify |
+| `cdn_tor` | `ip.src.country` is `T1`, Cloudflare's code for Tor. Needs `cf-ipcountry` listed and the `ip.src.country` header, as on the `cloudflare` preset (a listed source header is always trusted); `T1` is not an ISO 3166 country code | None: it describes the address, not the client |
+| `browser_tls_old` | A modern browser whose `CloudFront-Viewer-TLS` doesn't start with `TLSv1.3:`, never on a request the CDN saw as plain HTTP when `ssl` is mapped. Needs `cloudfront-viewer-tls` trusted | Corporate TLS-inspecting proxies that only speak TLS 1.2. [CloudFront's header](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html) |
+
+Cloudflare sends the bot headers only with Enterprise Bot Management, and a client can send them itself without it, so they are not trusted by default: turn on the feature, then trust them. Without it, `cdn_likely_automated` and `crawler_impersonated` are accepted on a Cloudflare preset but never fire. A config naming any of the four needs schema 8 edges, and admin waits for them. Each signal only narrows what a rule matches; none exempts anyone.
+
+## Stale browsers
+
+A scraper fleet often forges a browser `User-Agent` that is years old, or rewrites a Firefox or Safari one while the rest of the request is Chromium. Two signals separate it from real browsers on the same TLS fingerprint:
+
+- `browser_outdated` fires when the claimed Chrome (or other Chromium) or Firefox major version is below **Settings → Oldest browser version** (`global.browser_floor`, for example `{"chromium": 130, "firefox": 128}`). Safari has no floor, because its version follows the operating system. With no floor set the signal is off, and validation refuses a rule that names it. The floor needs schema 7 edges: admin holds the publish while a live edge reads an older schema, naming it.
+- `client_hints_mismatch` also fires for a Firefox or Safari `User-Agent` that sends `Sec-CH-UA`, because only Chromium sends it. Its known false positive is a Chrome user whose User-Agent switcher claims Firefox.
+
+You set the floor by hand and must raise it about once a year, as browsers release. Real users on devices pinned to an old operating system can't update, so start with `log`:
+
+```text
+client.signals in {"browser_outdated" "client_hints_mismatch"} and not client.verified_bot
+```
+
+```json
+{ "settings": { "block": "log" } }
+```
+
+`ua_headless` also names `Lightpanda`, whose default `User-Agent` is `Lightpanda/1.0`.
+
+## A fleet on one browser fingerprint
+
+A fleet can spread over thousands of IPs, send a few requests from each, and share one [JA4](../deploy/edge.md#client-ip-presets) with the real browsers it imitates. A per-IP limit never sees enough from any one address. A limit keyed on `ja4` alone sees the fleet, but also counts every real user on that fingerprint and limits them with it.
+
+Scope the shared bucket with a [client signal](#stale-browsers) the fleet carries and real browsers don't. The rule limits only requests with the signal, so a real user without it is never counted or limited, even on the same JA4:
+
+```text
+not client.verified_bot and client.signals in {"browser_outdated" "client_hints_mismatch"} and http.request.method eq "GET"
+```
+
+```json
+{ "id": "fingerprint-fleet", "algorithm": "sliding_window", "limit": 300, "period": "1m", "key": ["ja4"],
+  "on_missing_key": "skip", "action": "log", "fail_mode": "open" }
+```
+
+It needs:
+
+- A JA4 source in [`VIEWER_HEADERS`](../deploy/edge.md#client-ip-presets). A request without a JA4, such as plain HTTP, skips the rule. On Cloudflare that is `tls.client.ja4=cf-ja4`, which needs Enterprise Bot Management.
+- A site-wide rule keyed on `ip` that counts in Valkey: the expression `true`, no `count_statuses`, any algorithm but `distinct`. Validation refuses a rule keyed only on client-written values without one.
+- `global.browser_floor` set, as in [Stale browsers](#stale-browsers), for `browser_outdated`.
+- Optionally, `browser_tls_old` (CloudFront) or `cdn_likely_automated` (Cloudflare with Bot Management) in the signal set, where the deployment has their headers.
+- `VERIFIED_BOT_SOURCES`, for `not client.verified_bot`. Leave the clause out without it.
+
+Pick the limit from **Stats → Client signals**, which shows how many requests carried each signal and their share. Set it well above what real users with the signal send in a minute, and below the fleet's rate.
+
+Roll it out as every recipe here does: `log` first, watch **Over limit, log only** on **Stats** and the `would_limit` lines in the [access log](../operate/monitoring.md#logs), which name the rule and carry the JA4, JA3, User-Agent and browser headers of each request it would have limited, publish `block` through a [canary](publishing.md#canary), then keep it. Give it no `penalty`: the edge checks a penalty before the rule, so on a `ja4` key it would block every client on the fingerprint for its duration.
+
+Trade-offs:
+
+- The signals are client-written. They only narrow what the rule limits and never exempt anyone, so a fleet that forges them escapes the rule, and a client can't push a real user into it.
+- A fleet that rotates JA4s splits its bucket across them. Key `["constant"]` gives every flagged request one bucket, at the cost of putting real users on old browsers in it, so use it only while the flagged requests are almost all the fleet.
+- `client_hints_mismatch` has a known false positive: a Chrome user whose User-Agent switcher claims Firefox.
+
+The [autopilot](autopilot.md#cases) opens a case when `signal_surge` fires and proposes this shape, a `ja4`-only key with an expression that requires a signal and no penalty, if the deployment has the site-wide `ip` rule. See the [checks](autopilot.md#proposals-and-the-checks) it applies.
 
 ## JSON answers on API paths
 

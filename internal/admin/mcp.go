@@ -74,7 +74,7 @@ var mcpTools = []mcpTool{
 	{"list_cases", "autopilot.read", "Past cases and their verdicts, newest first, on one rule when rule is set.",
 		object(map[string]any{"rule": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}})},
 	{"list_rules", "config.read", "The active version's rules, people's and the autopilot's, with expressions as text.", object(nil)},
-	{"describe_fields", "config.read", "Expression fields, rate-limit key kinds and algorithms the edge accepts.", object(nil)},
+	{"describe_fields", "config.read", "Expression fields, rate-limit key kinds and algorithms the edge accepts, the CDN headers the edge logs (schema.cdn_headers) and the headers the live policy trusts (cdn_trusted), which also holds listed source headers such as cf-ipcountry that rules read only through their field (ip.src.country); a rule on an untrusted header is client-controlled.", object(nil)},
 	{"get_stats", "stats.read", "Per-minute fleet, rule, status code and upstream cause counts. Windows over 360 minutes come in hourly steps.",
 		object(map[string]any{"minutes": minutesProp})},
 	{"get_rule_stats", "stats.read", "Evaluated, limited, would_limit, failed and capped per minute for one rate-limit rule, in hourly steps past 360 minutes, and its 50 most-limited subjects.",
@@ -428,6 +428,26 @@ func strict(args json.RawMessage, v any) error {
 }
 
 // untrusted marks a value whose strings clients wrote.
+// namedSignals replaces each row's client_signals array, which is in the
+// edge's bit order, with counts by signal name, so the model can read them.
+func namedSignals(raw json.RawMessage) any {
+	var rows []map[string]any
+	if json.Unmarshal(raw, &rows) != nil {
+		return raw
+	}
+	for _, r := range rows {
+		counts, _ := r["client_signals"].([]any)
+		named := map[string]any{}
+		for i, d := range expr.Signals {
+			if i < len(counts) {
+				named[d.Name] = counts[i]
+			}
+		}
+		r["client_signals"] = named
+	}
+	return rows
+}
+
 func untrusted(v any) map[string]any { return map[string]any{"untrusted": v} }
 
 func minutesArg(m int) (int, error) {
@@ -524,7 +544,11 @@ func (s *Server) tool(ctx context.Context, name string, call *mcpCall, args json
 		return s.listRulesTool(ctx)
 	case "describe_fields":
 		raw, err := s.viaHandler(ctx, call.p, s.exprSchema, "/api/expr/schema")
-		return map[string]any{"schema": raw, "key_kinds": snapshot.KeyKinds, "algorithms": snapshot.Algorithms, "max_rules_per_phase": snapshot.MaxRulesPerPhase}, err
+		if err != nil {
+			return nil, err
+		}
+		trusted, err := s.cdnTrustedLive(ctx)
+		return map[string]any{"schema": raw, "key_kinds": snapshot.KeyKinds, "algorithms": snapshot.Algorithms, "max_rules_per_phase": snapshot.MaxRulesPerPhase, "cdn_trusted": trusted}, err
 	case "get_stats":
 		var in struct {
 			Minutes int `json:"minutes"`
@@ -541,7 +565,10 @@ func (s *Server) tool(ctx context.Context, name string, call *mcpCall, args json
 			q.Set("step", "60")
 		}
 		raw, err := s.viaHandler(ctx, call.p, s.stats, "/api/stats?"+q.Encode())
-		return map[string]any{"minutes": m, "stats": untrusted(raw)}, err
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"minutes": m, "stats": untrusted(namedSignals(raw))}, nil
 	case "get_rule_stats":
 		return s.ruleStatsTool(ctx, args)
 	case "list_anomalies":
@@ -650,6 +677,24 @@ func (s *Server) tool(ctx context.Context, name string, call *mcpCall, args json
 		return s.connectorTool(ctx, name, args)
 	}
 	return nil, fail(http.StatusNotFound, "no tool "+name)
+}
+
+// cdnTrustedLive is the CDN headers the live version trusts, lower case and
+// sorted, with the deployment's default when none is live.
+func (s *Server) cdnTrustedLive(ctx context.Context) ([]string, error) {
+	var c snapshot.Config
+	av, err := activeVersion(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	if av != nil {
+		v, err := s.loadVersion(ctx, s.db, *av)
+		if err != nil {
+			return nil, err
+		}
+		c = v.Config
+	}
+	return snapshot.CDNTrusted(&c, s.cfg.Deployment), nil
 }
 
 func (s *Server) listRulesTool(ctx context.Context) (any, error) {

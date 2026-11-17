@@ -1,20 +1,35 @@
-// Five attacks against the autopilot, with the scripted agent (tools agent)
-// answering its cases from loadtest/tools/autopilot-plan.json. For each
-// attack a sensor watches its route; the attack makes the sensor would-block,
-// which opens a case; the agent enforces a block rule citing the sensor;
-// the rule blocks the attack and not the background, and expires once the
-// attack stops. load-full.sh starts the agent before this and stops it after.
+// Six attacks against the autopilot, with the scripted agent (tools agent)
+// answering its cases from loadtest/tools/autopilot-plan.json. For each of
+// the first five a sensor watches its route; the attack makes the sensor
+// would-block, which opens a case; the agent enforces a block rule citing the
+// sensor; the rule blocks the attack and not the background, and expires once
+// the attack stops. The sixth has no sensor and no rule: a fleet on one browser
+// fingerprint, which opens a case through the signal_surge notification, and
+// the agent enforces a rule keyed on the fingerprint alone, scoped to a stale
+// browser signal, so the real users on that fingerprint are never limited.
+// load-full.sh starts the agent before this and stops it after.
 import http from 'k6/http';
 import { sleep } from 'k6';
 import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import { call, session, publish, converged } from '../admin.js';
-import { edges, path, pick, thresholdReport, viewer, waitReady } from '../lib.js';
+import { browserFloor, edges, path, pick, siteWideIP, thresholdReport, viewer, waitReady } from '../lib.js';
+import { cohortRequest, fleetRequest } from '../fleet.js';
 
 const MAX_BLOCK_SHARE = Number(__ENV.MAX_BLOCK_SHARE ?? 0.05);
 const BACKGROUND = Number(__ENV.BACKGROUND_RPS ?? 800);
 const ATTACK = '8m';
 const attackMs = 8 * 60_000;
+// The fingerprint fleet starts after normal traffic has been counting signals
+// for 6m, so its surge has a baseline to be judged against. A shared rule's
+// collateral bound is the median per-minute count of its signal over the hour
+// before the rule went live, which includes the minutes of the burst itself
+// until the rule is live, about 4. With fewer minutes of normal traffic than
+// that the median is the burst's own count and the rule is refused.
+const WARMUP = '6m';
+const warmupMs = 6 * 60_000;
+const BACKGROUND_FOR = '14m';
+const FLEET_RULE = 'ap-fingerprint-fleet-';
 // An enforcing rule renews while it limited within 10m; then its 5m ttl
 // runs out. 5m, not shorter: admin refuses a ttl under 4 x (30s tick +
 // min_publish_interval), which is 4m with the 30s interval set below.
@@ -36,6 +51,9 @@ const collateral = new Rate('collateral_429');
 const blocked = new Rate('attack_blocked');
 const expired = new Counter('expired');
 const asnKeyRefused = new Counter('asn_key_refused');
+const fleetReached = new Rate('fleet_reached_upstream');
+const cohortLimited = new Rate('cohort_429');
+const timeToFirstBlock = new Trend('time_to_first_block_seconds');
 
 const attackScenario = (exec, rate) => ({ executor: 'constant-arrival-rate', exec, rate, timeUnit: '1s', duration: ATTACK, preAllocatedVUs: 10, maxVUs: 100, tags: { attack: exec } });
 const thresholds = { collateral_429: [`rate<${MAX_BLOCK_SHARE}`], asn_key_refused: ['count==1'] };
@@ -45,19 +63,29 @@ for (const a of Object.keys(attacks)) {
   thresholds[`attack_blocked{attack:${a}}`] = ['rate>0.5'];
   thresholds[`expired{attack:${a}}`] = ['count==1'];
 }
+// The fleet's rule ends with its ttl like the others; the run doesn't wait for it.
+thresholds['time_to_case_seconds{attack:fleet}'] = ['max<180'];
+thresholds['time_to_enforce_seconds{attack:fleet}'] = ['max<180'];
+// Once enforcing, 300 a minute of 100 a second is 5%; 10% is a 90% cut.
+thresholds.fleet_reached_upstream = ['rate<0.1'];
+thresholds.cohort_429 = ['rate==0'];
+thresholds.time_to_first_block_seconds = ['min<600'];
 
 export const options = {
   setupTimeout: '600s',
-  summaryTrendStats: ['p(99)', 'max'],
+  summaryTrendStats: ['p(99)', 'max', 'min'],
   insecureSkipTLSVerify: true,
   scenarios: {
-    background: { executor: 'constant-arrival-rate', exec: 'background', rate: BACKGROUND, timeUnit: '1s', duration: '10m', preAllocatedVUs: 100, maxVUs: 1000 },
+    background: { executor: 'constant-arrival-rate', exec: 'background', rate: BACKGROUND, timeUnit: '1s', duration: BACKGROUND_FOR, preAllocatedVUs: 100, maxVUs: 1000 },
     idor: attackScenario('idor', 20),
     scraping: attackScenario('scraping', 20),
     stuffing: attackScenario('stuffing', 20),
     scanner: attackScenario('scanner', 6),
     asn: attackScenario('asn', 11),
     watch: { executor: 'per-vu-iterations', exec: 'watch', vus: 1, iterations: 1, maxDuration: '27m' },
+    cohort: { executor: 'constant-arrival-rate', exec: 'cohort', rate: 30, timeUnit: '1s', duration: BACKGROUND_FOR, preAllocatedVUs: 10, maxVUs: 100 },
+    fleet: { executor: 'constant-arrival-rate', exec: 'fleet', rate: 100, timeUnit: '1s', startTime: WARMUP, duration: ATTACK, preAllocatedVUs: 20, maxVUs: 200 },
+    watchFleet: { executor: 'per-vu-iterations', exec: 'watchFleet', vus: 1, iterations: 1, maxDuration: '15m' },
   },
   thresholds,
 };
@@ -68,19 +96,24 @@ const sensorID = (list, name) => list.find((r) => new RegExp(`^ap-${name}-\\d+$`
 export function setup() {
   waitReady();
   const cookie = session();
-  // No base rate-limit rules, so only the autopilot's limit the attacks. The
-  // catalog verifies a token when one is sent, so the scraper's sub is a key.
+  // No base rate-limit rules but the site-wide ip rule a ja4-only rule needs, so
+  // only the autopilot's limit the attacks: the site-wide limit is far above
+  // any one IP's rate here. The catalog verifies a token when one is sent, so the scraper's sub is a key.
   // Config rules are replaced too: an earlier scenario can leave the phase
   // full, and none of its rules apply to these routes.
   const catalog = { id: 'catalog-auth', expression: path('starts_with', '/api/catalog/'), settings: { auth: { mode: 'optional' } } };
   converged(
     cookie,
-    publish(cookie, (c) => ({ ...c, rate_limit_rules: [], config_rules: [catalog] }), { message: 'autopilot attacks: no base rate limits', tests: [] }),
+    publish(cookie, (c) => ({ ...c, global: { ...c.global, browser_floor: browserFloor }, rate_limit_rules: [siteWideIP], config_rules: [catalog] }), { message: 'autopilot attacks: no base rate limits', tests: [] }),
   );
   // A sensor's anomaly fires on the first check that sees it: checks run
   // every minute over whole minutes 30s old, and the autopilot ticks every
   // 30s, so a case opens within about 3 minutes of an attack starting.
-  call(cookie, 'PUT', '/api/settings/notifications', { ...call(cookie, 'GET', '/api/settings/notifications').json(), fire_after: 1 });
+  // The fleet's signal_surge compares the last window with the baseline before
+  // it. The 5m window and 60m baseline would hold the fleet's burst under the
+  // signal's 5% floor and need an hour of history, so both are shortened to
+  // fit the run.
+  call(cookie, 'PUT', '/api/settings/notifications', { ...call(cookie, 'GET', '/api/settings/notifications').json(), window: '1m', baseline: '5m', fire_after: 1 });
   call(cookie, 'PUT', '/api/settings/autopilot', {
     ...call(cookie, 'GET', '/api/settings/autopilot').json(),
     mode: 'auto',
@@ -91,7 +124,7 @@ export function setup() {
     cases_per_hour: 60,
     max_sensors: 10,
     max_enforcing: 10,
-    reason: 'load test: five attacks',
+    reason: 'load test: six attacks',
   });
   // The agent's first sweep proposes the plan's sensors; they observe within a tick or two.
   const sensors = {};
@@ -115,29 +148,35 @@ const send = (d, method, url, headers, attack) => {
   const r = http.request(method, `${pick(edges)}${url}`, method === 'POST' ? '{}' : null, { headers, responseCallback: http.expectedStatuses(200, 401, 404, 429) });
   if (!attack) {
     collateral.add(r.status === 429);
-  } else if (enforcingFor(d, attack)) {
+  } else if (enforcingFor(d, attack, `ap-${attacks[attack].sensor}-block-`)) {
     blocked.add(r.status === 429, { attack });
   }
 };
 
-// enforcingFor reports whether the attack's block rule has been enforcing
-// for 15s, long enough to reach every edge. Each VU asks admin every 10s.
+// enforcingFor reports whether the attack's block rule, the one whose id
+// starts with prefix, has been enforcing for 15s, long enough to reach every
+// edge. Each VU asks admin every 10s.
 const seen = {};
-function enforcingFor(d, attack) {
+function enforcingFor(d, attack, prefix) {
   const s = seen[attack] || (seen[attack] = { checked: 0, since: null });
   if (s.since === null && Date.now() - s.checked > 10_000) {
     s.checked = Date.now();
-    const r = rules(d.cookie).find((x) => x.id.startsWith(`ap-${attacks[attack].sensor}-block-`) && x.enforcing_since);
+    const r = rules(d.cookie).find((x) => x.id.startsWith(prefix) && x.enforcing_since);
     if (r) s.since = Date.parse(r.enforcing_since);
   }
   return s.since !== null && Date.now() - s.since > 15_000;
 }
 
 export function background(d) {
-  send(d, 'GET', '/pages/home', viewer(n++ % 100_000));
-  // Legitimate logins and searches, on the attacked routes, from ordinary clients.
-  if (n % 400 === 0) send(d, 'POST', '/login?status=200', viewer(200_000 + (n % 100)));
-  if (n % 160 === 0) send(d, 'POST', '/api/search', viewer(300_000 + (n % 300), 64500));
+  // iterationInTest is one count across VUs: a per-VU counter moves every VU
+  // through the same addresses together, so a few ordinary clients would send
+  // enough to be limited and keep the attacks' rules renewing.
+  const i = exec.scenario.iterationInTest;
+  send(d, 'GET', '/pages/home', viewer(i % 100_000));
+  // Legitimate logins and searches, on the attacked routes, from ordinary clients:
+  // 100 and 300 addresses, each about once a minute.
+  if (i % 400 === 0) send(d, 'POST', '/login?status=200', viewer(200_000 + ((i / 400) % 100)));
+  if (i % 160 === 0) send(d, 'POST', '/api/search', viewer(300_000 + ((i / 160) % 300), 64500));
 }
 
 const ip = (a, i) => viewer(attacks[a].ips + i);
@@ -227,6 +266,68 @@ export function watch(d) {
   }
 }
 
+// 100 requests a second from thousands of addresses on one fingerprint, each
+// claiming an old browser. No address sends more than a few, so no per-IP
+// rule sees it. Once its rule enforces, a request answered 200 reached the
+// upstream and a 429 was the edge's own.
+let blockSeen = false;
+export function fleet(d) {
+  const r = fleetRequest(exec.scenario.iterationInTest);
+  if (r.status === 429 && !blockSeen) {
+    blockSeen = true;
+    timeToFirstBlock.add((Date.now() - d.started - warmupMs) / 1000);
+  }
+  if (enforcingFor(d, 'fleet', FLEET_RULE)) fleetReached.add(r.status === 200);
+}
+
+// 300 real users on the fleet's fingerprint with a current browser, from the
+// start of the run. None may be limited: the rule is scoped to old-browser signals.
+export function cohort() {
+  cohortLimited.add(cohortRequest(exec.scenario.iterationInTest).status === 429);
+}
+
+// watchFleet follows the fleet's case, opened by a signal_surge anomaly that
+// names browser_outdated after the burst began, until its rule enforces.
+export function watchFleet(d) {
+  const burst = d.started + warmupMs;
+  let opened = null;
+  let enforced = false;
+  let reported = 0;
+  for (let end = burst + attackMs; !enforced && Date.now() < end; ) {
+    sleep(5);
+    const cases = call(d.cookie, 'GET', '/api/autopilot/cases').json();
+    const found = cases.find((x) => x.kind === 'anomaly' && x.brief?.signal === 'signal_surge' && JSON.stringify(x.brief.summary).includes('browser_outdated') && Date.parse(x.created_at) >= burst);
+    if (!found) continue;
+    if (!opened) {
+      opened = { id: found.id, at: Date.parse(found.created_at) };
+      timeToCase.add((opened.at - burst) / 1000, { attack: 'fleet' });
+      console.log(`fleet: case ${found.id} opened ${Math.round((opened.at - burst) / 1000)}s into the burst`);
+    }
+    const c = call(d.cookie, 'GET', `/api/autopilot/cases/${opened.id}`).json();
+    for (const p of c.proposals.slice(reported)) {
+      console.log(`fleet: proposal ${p.id} accepted ${p.accepted}: ${JSON.stringify((p.checks ?? []).filter((k) => !k.ok))}`);
+    }
+    reported = c.proposals.length;
+    const rule = c.rules.find((r) => r.id.startsWith(FLEET_RULE));
+    if (rule?.enforcing_since) {
+      enforced = true;
+      timeToEnforce.add((Date.parse(rule.enforcing_since) - opened.at) / 1000, { attack: 'fleet' });
+      console.log(`fleet: ${rule.id} enforcing ${Math.round((Date.parse(rule.enforcing_since) - opened.at) / 1000)}s after its case opened`);
+    } else if (rule?.outcome) {
+      const why = c.transitions.filter((t) => t.rule_id === rule.id).map((t) => `${t.to_state}: ${t.reason} ${JSON.stringify(t.numbers)}`);
+      console.log(`fleet: ${rule.id} ended ${rule.outcome} before it enforced: ${why.join('; ')}`);
+      break;
+    }
+  }
+  // A step never reached fails its threshold rather than having no data.
+  if (!opened) timeToCase.add(1e6, { attack: 'fleet' });
+  if (!enforced) {
+    timeToEnforce.add(1e6, { attack: 'fleet' });
+    fleetReached.add(true);
+    timeToFirstBlock.add(1e6);
+  }
+}
+
 export function handleSummary(data) {
-  return { stdout: '\nAutopilot: five attacks, enforced by the scripted agent\n' + thresholdReport(data) };
+  return { stdout: '\nAutopilot: six attacks, enforced by the scripted agent\n' + thresholdReport(data) };
 }

@@ -278,6 +278,8 @@ func TestClientSignalsRejectLiteralsThatCanNeverMatch(t *testing.T) {
 		// Browsers send Sec-Fetch-* and client hints only in secure contexts.
 		{"Sec-Fetch signal without HTTPS", rule("client.signals", "eq", "browser_no_sec_fetch"), only("http.request.version"), []string{`"browser_no_sec_fetch" can never match`, "ssl"}},
 		{"client hints signal without HTTPS", listRule("client.signals", "in", "chromium_no_client_hints"), none, []string{`"chromium_no_client_hints" can never match`, "ssl"}},
+		{"outdated browser signal with a floor set", rule("client.signals", "eq", "browser_outdated"), Env{Phase: PhaseConfig, BrowserFloor: true}, nil},
+		{"outdated browser signal without a floor", rule("client.signals", "eq", "browser_outdated"), all, []string{`"browser_outdated" can never match`, "global.browser_floor"}},
 		{"substring match on signal names", rule("client.signals", "contains", "ua_"), none, []string{`operator "contains" can't be used with field "client.signals"`}},
 		{"JA4 of the wrong shape", rule("tls.client.ja4", "eq", "not-a-fingerprint"), all, []string{`"not-a-fingerprint" can never match`, "JA4"}},
 		{"JA4 with an uppercase hash", listRule("tls.client.ja4", "in", "t13d1516h2_8DAAF6152771_02713d6af862"), all, []string{"can never match", "JA4"}},

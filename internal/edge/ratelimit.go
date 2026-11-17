@@ -252,6 +252,7 @@ func (e *Edge) countResponse(st *reqState, status int) {
 		}
 		if shadow {
 			v.stats.rules[c.idx].wouldLimit.Add(1)
+			st.markWouldLimit(c.rule.ID)
 			if sampleTop() {
 				v.stats.wouldTop.add(c.key, c.rule.ID, st.display(c))
 			}
@@ -305,6 +306,8 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 		c := &checks[i]
 		rs := &st.ver.stats.rules[c.idx]
 		rs.evaluated.Add(1)
+		st.rlIdx[st.nRL] = c.idx
+		st.nRL++
 		shadow := c.rule.Shadow || kill
 		if c.o.Err != nil {
 			rs.failed.Add(1)
@@ -338,6 +341,7 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 		}
 		if shadow {
 			rs.wouldLimit.Add(1)
+			st.markWouldLimit(c.rule.ID)
 			if sampleTop() {
 				st.ver.stats.wouldTop.add(c.key, c.rule.ID, st.display(c))
 			}
@@ -367,6 +371,14 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 		return false
 	}
 	return true
+}
+
+// markWouldLimit records a log-only rule over its limit, so the access line
+// is always written. The first rule is the one named.
+func (st *reqState) markWouldLimit(id string) {
+	if !st.wouldLimit {
+		st.wouldLimit, st.wlRule = true, id
+	}
 }
 
 // localParams divides a rule across the fleet for fail_mode local: each

@@ -8,6 +8,9 @@ x-trust: &trust
   # k6 sends the CloudFront viewer header itself, standing in for the CDN.
   # make demo widens this so curl on the host can stand in for the CDN.
   TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.77.0.0/24}
+  # Admin must match the edges, or it holds publishes for a deployment mismatch.
+  # Adds the JA4 header to the CloudFront preset's viewer headers.
+  VIEWER_HEADERS: tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint
   JWKS_ALLOWED_HOSTS: idp
   SSL_CERT_FILE: /shared/ca.pem
 

@@ -54,6 +54,7 @@ With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** 
 | `edge_5xx_ratio` | 5xx the edge sent itself are over 2 times their baseline share and over 1%, with at least 20 of them | critical |
 | `upstream_5xx_ratio` | 5xx from the upstream are over 2 times their baseline share and over 2%, with at least 20 of them | critical |
 | `auth_failure_ratio` | Requests failing their token check are over 2 times their baseline share and over 5%, with at least 20 of them | warning |
+| `signal_surge` | A [client signal](../reference/expressions.md#client-signals) is over 3 times its baseline share of requests and over 5%, with at least 300 requests showing it. The summary names the signal with the largest share. Shares count only the requests of minutes whose edges reported signals, so a baseline from before they did is not read as a share of zero | warning |
 | `p99_latency` | p99 latency is over 1.5 times the baseline's and over 100ms, with at least 1,000 requests, so p99 rests on the 10 slowest or more | warning |
 
 **Per rule**, for every rule of the active and canary versions:
@@ -68,7 +69,7 @@ With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** 
 | `rule_block_spike` | rate limit, config | The rule blocks over 3 times its baseline share of the requests it checks, and over 1%. An access rule checks every request, and blocks with its `block` setting | warning |
 | `rule_would_block` | rate limit, config | A rule that isn't blocking (set to log only, or under the rate-limit or block kill switch) would have refused at least one request | info |
 | `rule_fail_mode` | rate limit | Shown as **Valkey down**: at least `min_requests` requests took the rule's `fail_mode` because Valkey did not answer | critical |
-| `rule_subject_dominates` | rate limit | One client got over half of the rule's blocks, with at least 100 blocks: a targeted flood, or one client misbehaving | warning |
+| `rule_subject_dominates` | rate limit | One client got over half of the rule's blocks, with at least 100 blocks: a targeted flood, or one client misbehaving. Never for a rule whose key has no per-client part (no `ip`, `jwt_claim`, `header`, `cookie` or `query`), since its bucket holds many clients | warning |
 
 **Autopilot**, from [autopilot](../use/autopilot.md)'s own state while it is on. They have no thresholds: each holds while its condition does.
 

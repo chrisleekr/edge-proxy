@@ -1,7 +1,7 @@
 import * as DndKit from '@dnd-kit/core';
 import { QueryBuilderDnD } from '@react-querybuilder/dnd';
 import { createDndKitAdapter } from '@react-querybuilder/dnd/dnd-kit';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import {
   type FieldSelectorProps,
   QueryBuilder,
@@ -72,6 +72,9 @@ function Select(props: ValueSelectorProps) {
 function FieldSelector(props: FieldSelectorProps) {
   const { schema } = props.context as Ctx;
   const keyed = schema.fields.find((f) => f.name === props.value)?.keyed;
+  const listId = useId();
+  // Suggestions only: any header name can still be typed.
+  const suggest = props.value === 'http.request.headers' && schema.cdn_headers.length > 0;
   return (
     <>
       <Select {...props} />
@@ -79,11 +82,13 @@ function FieldSelector(props: FieldSelectorProps) {
         <input
           aria-label="Key"
           placeholder={keyExample[props.value ?? ''] ?? 'name'}
+          list={suggest ? listId : undefined}
           value={(props.rule as { key?: string }).key ?? ''}
           // RuleType has no key property; the API's AST does.
           onChange={(e) => props.schema.dispatchQuery(setKey(props.schema.getQuery() as RuleGroupType, props.path, e.target.value))}
         />
       )}
+      {suggest && <datalist id={listId}>{schema.cdn_headers.map((h) => <option key={h} value={h} />)}</datalist>}
     </>
   );
 }

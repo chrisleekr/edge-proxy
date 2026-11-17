@@ -183,16 +183,17 @@ type cohort struct {
 	configRules map[string]bool
 }
 
-func (s *Server) cohort(ctx context.Context, version int64, from, to time.Time) (*cohort, error) {
+func (s *Server) cohort(ctx context.Context, shared map[string]bool, version int64, from, to time.Time) (*cohort, error) {
 	// Uses the (version, minute) index: only this version's minutes are
 	// read and decoded.
-	return s.cohortWhere(ctx, s.db, "version = $1 AND minute >= $2 AND minute < $3", version, from, to)
+	return s.cohortWhere(ctx, s.db, shared, "version = $1 AND minute >= $2 AND minute < $3", version, from, to)
 }
 
 // cohortWhere is the cohort of the stats rows cond selects. cond is a
 // constant; values go in args. A rule's heavy subjects are found minute by
-// minute and left out of its limited count once, over the whole window.
-func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args ...any) (*cohort, error) {
+// minute and left out of its limited count once, over the whole window,
+// except for the rules in shared (see sharedRules), whose count stays raw.
+func (s *Server) cohortWhere(ctx context.Context, q querier, shared map[string]bool, cond string, args ...any) (*cohort, error) {
 	rows, err := s.statsWhere(ctx, q, cond, args...)
 	if err != nil {
 		return nil, err
@@ -215,7 +216,9 @@ func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args .
 				sum = &edge.RuleCounts{ID: rc.ID}
 				c.rules[rc.ID] = sum
 			}
-			heavy[rc.ID] += heavyIn(rc.Limited, top[rc.ID])
+			if !shared[rc.ID] {
+				heavy[rc.ID] += heavyIn(rc.Limited, top[rc.ID])
+			}
 			addRule(sum, rc)
 		}
 		// A config rule's block setting refuses requests like a rate limit,
@@ -237,6 +240,19 @@ func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args .
 		c.rules[id].Limited = withoutHeavy(c.rules[id].Limited, h)
 	}
 	return c, nil
+}
+
+// sharedRules are the IDs of cfg's rate-limit rules whose key has no
+// per-client part. Their one bucket holds many clients, so leaving its
+// heaviest subject out would leave out the rule's whole count.
+func sharedRules(cfg *snapshot.Config) map[string]bool {
+	m := map[string]bool{}
+	for _, r := range cfg.RateLimitRules {
+		if snapshot.SharedKey(r.Key) {
+			m[r.ID] = true
+		}
+	}
+	return m
 }
 
 // heavyShare: a subject is left out of a rule's limited count only when it
@@ -456,10 +472,10 @@ func (s *Server) runGuard(ctx context.Context) error {
 		started = c.StartedAt
 		// Both cohorts over the same minutes.
 		from := maxTime(c.StepStartedAt, now.Add(-time.Duration(g.Window))).Truncate(time.Minute)
-		if sub, err = s.cohort(ctx, subject.Version, from, now); err != nil {
+		if sub, err = s.cohort(ctx, sharedRules(&subject.Config), subject.Version, from, now); err != nil {
 			return err
 		}
-		if base, err = s.cohort(ctx, baseline.Version, from, now); err != nil {
+		if base, err = s.cohort(ctx, sharedRules(&baseline.Config), baseline.Version, from, now); err != nil {
 			return err
 		}
 	} else {
@@ -481,10 +497,10 @@ func (s *Server) runGuard(ctx context.Context) error {
 		if baseline, err = s.previousVersion(ctx, subject); err != nil || baseline == nil {
 			return err
 		}
-		if sub, err = s.cohortWhere(ctx, s.db, judgedOrAfter+" AND minute >= $2 AND minute < $3", subject.Version, subject.PublishedAt.Truncate(time.Minute), now); err != nil {
+		if sub, err = s.cohortWhere(ctx, s.db, sharedRules(&subject.Config), judgedOrAfter+" AND minute >= $2 AND minute < $3", subject.Version, subject.PublishedAt.Truncate(time.Minute), now); err != nil {
 			return err
 		}
-		if base, err = s.cohortWhere(ctx, s.db, "version < $1 AND minute >= $2 AND minute < $3", subject.Version,
+		if base, err = s.cohortWhere(ctx, s.db, sharedRules(&baseline.Config), "version < $1 AND minute >= $2 AND minute < $3", subject.Version,
 			subject.PublishedAt.Add(-time.Duration(g.Window)).Truncate(time.Minute), subject.PublishedAt); err != nil {
 			return err
 		}

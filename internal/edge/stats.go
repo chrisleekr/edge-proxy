@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math/bits"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -32,6 +34,9 @@ type versionStats struct {
 	// slot. One add per request; requests, 5xx and auth failures are derived.
 	codes   [2][maxCodeSlot + 1]atomic.Uint64
 	latency [len(LatencyBoundsMS) + 1]atomic.Uint64
+	// signals counts requests per client signal bit, exactly, so admin can
+	// bound a signal-scoped rule by the signal's real share of traffic.
+	signals [numSignals]atomic.Uint64
 	// causes counts upstream failures by upstreamCause, on the error path.
 	causes [len(UpstreamCauses)]atomic.Uint64
 	// rules counts each rate-limit rule, by index.
@@ -61,14 +66,19 @@ type Totals struct {
 	Upstream5xx  uint64   `json:"upstream_5xx"`
 	AuthFailures uint64   `json:"auth_failures"`
 	LatencyMS    []uint64 `json:"latency_ms_buckets"`
+	// Signals counts requests per client signal, in expr.Signals order.
+	Signals []uint64 `json:"client_signals"`
 }
 
-// Counters lists every count in t, latency buckets last. Differences,
+// Counters lists every count in t, latency buckets then signals last. Differences,
 // sums and range checks all walk it, so none can miss a field.
 func (t *Totals) Counters() []*uint64 {
 	c := []*uint64{&t.Requests, &t.Edge5xx, &t.Upstream5xx, &t.AuthFailures}
 	for i := range t.LatencyMS {
 		c = append(c, &t.LatencyMS[i])
+	}
+	for i := range t.Signals {
+		c = append(c, &t.Signals[i])
 	}
 	return c
 }
@@ -77,6 +87,7 @@ func (t *Totals) Counters() []*uint64 {
 func (t *Totals) since(prev Totals) Totals {
 	d := *t
 	d.LatencyMS = slices.Clone(t.LatencyMS)
+	d.Signals = slices.Clone(t.Signals)
 	dc := d.Counters()
 	for i, p := range prev.Counters() {
 		*dc[i] -= *p
@@ -235,6 +246,13 @@ func (s *versionStats) observe(status int, fromUpstream bool, elapsed time.Durat
 	s.latency[i].Add(1)
 }
 
+// countSignals counts one request under each signal bit set in mask.
+func (s *versionStats) countSignals(mask uint16) {
+	for m := mask; m != 0; m &= m - 1 {
+		s.signals[bits.TrailingZeros16(m)].Add(1)
+	}
+}
+
 // block counts the outcome of config rule i's block setting.
 func (s *versionStats) block(i int, blocked bool) {
 	if blocked {
@@ -245,7 +263,7 @@ func (s *versionStats) block(i int, blocked bool) {
 }
 
 func (s *versionStats) counts() StatsCounts {
-	c := StatsCounts{Version: s.version, LatencyMS: make([]uint64, len(s.latency))}
+	c := StatsCounts{Version: s.version, LatencyMS: make([]uint64, len(s.latency)), Signals: make([]uint64, len(s.signals))}
 	var codes [2]map[int]uint64
 	for origin := range s.codes {
 		for code := range s.codes[origin] {
@@ -279,6 +297,9 @@ func (s *versionStats) counts() StatsCounts {
 	}
 	for i := range s.latency {
 		c.LatencyMS[i] = s.latency[i].Load()
+	}
+	for i := range s.signals {
+		c.Signals[i] = s.signals[i].Load()
 	}
 	for i := range s.rules {
 		r := &s.rules[i]
@@ -411,6 +432,7 @@ type statsRegistry struct {
 	// the totals /metrics exports never go down. rules keeps only IDs some
 	// version in byV still has, so it is bounded by the held versions' rules.
 	latency [len(LatencyBoundsMS) + 1]uint64
+	signals [numSignals]uint64
 	rules   map[string]*[numRuleOutcomes]uint64
 }
 
@@ -473,6 +495,9 @@ func (g *statsRegistry) retire(s *versionStats) {
 	for i := range s.latency {
 		g.latency[i] += s.latency[i].Load()
 	}
+	for i := range s.signals {
+		g.signals[i] += s.signals[i].Load()
+	}
 	for i := range s.rules {
 		c := g.rules[s.ruleIDs[i]]
 		if c == nil {
@@ -499,12 +524,12 @@ func (g *statsRegistry) prune() {
 	}
 }
 
-// writeTo writes the latency histogram and per-rule rate-limit counts, held
+// writeTo writes the latency histogram, per-signal counts and per-rule rate-limit counts, held
 // versions plus forgotten ones, in Prometheus text format. The histogram has
 // no _sum: the edge keeps only bucket counts.
 func (g *statsRegistry) writeTo(w io.Writer) {
 	g.mu.Lock()
-	lat := g.latency
+	lat, sig := g.latency, g.signals
 	rules := make(map[string][numRuleOutcomes]uint64, len(g.rules))
 	for id, c := range g.rules {
 		rules[id] = *c
@@ -512,6 +537,9 @@ func (g *statsRegistry) writeTo(w io.Writer) {
 	for _, s := range g.byV {
 		for i := range s.latency {
 			lat[i] += s.latency[i].Load()
+		}
+		for i := range s.signals {
+			sig[i] += s.signals[i].Load()
 		}
 		for i := range s.rules {
 			c := rules[s.ruleIDs[i]]
@@ -532,6 +560,10 @@ func (g *statsRegistry) writeTo(w io.Writer) {
 	}
 	n += lat[len(LatencyBoundsMS)]
 	p("edge_request_duration_seconds_bucket{le=\"+Inf\"} %d\nedge_request_duration_seconds_count %d\n", n, n)
+	p("# TYPE edge_client_signal_total counter\n")
+	for i, d := range expr.Signals {
+		p("edge_client_signal_total{signal=%q} %d\n", d.Name, sig[i])
+	}
 	p("# TYPE edge_ratelimit_rule_total counter\n")
 	for _, id := range slices.Sorted(maps.Keys(rules)) {
 		for j, c := range rules[id] {

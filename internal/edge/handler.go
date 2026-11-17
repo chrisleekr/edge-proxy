@@ -189,7 +189,16 @@ type reqState struct {
 	rejected  bool
 	// wouldBlock is set when a block rule in log mode matched.
 	wouldBlock bool
-	upstream   bool // response came from the upstream
+	// wouldLimit is set when a log-only rate-limit rule found the request over
+	// its limit, and wlRule names the first such rule.
+	wouldLimit bool
+	wlRule     string
+	// rlIdx holds the rate-limit rules step 8 checked, as indexes into the
+	// version's rules, so the access line can name them without an allocation
+	// here. The array is as large as step 8's checks can be.
+	rlIdx    [maxRateLimitCalls + maxCountRules]int
+	nRL      int
+	upstream bool // response came from the upstream
 	// upErr is why the upstream exchange failed, and cause its class, for
 	// the access line. The writer goroutine formats it, so the request path
 	// keeps only the value.
@@ -276,10 +285,12 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 		return
 	}
 	st.ver, st.cohort = pin(ld, cl.ip, st.start)
+	st.client.cdn = st.ver.c.CDN
 
 	// Step 4: config phase.
 	st.fields = newFields(r, &st.client, p)
 	st.fields.bots = &ld.snap.Bots
+	st.fields.floor = browserFloor(st.ver.c)
 	st.set, st.matched = resolve(st.ver.c, st.ver.defaults, &st.fields, cl.ip, st.matchBuf[:0])
 	st.resolved = true
 	if st.set.allowlist != "" {
@@ -509,6 +520,10 @@ func (e *Edge) finish(st *reqState, r *http.Request) {
 			lat = st.headersAt.Sub(st.start)
 		}
 		st.ver.stats.observe(status, st.upstream, lat, st.matched, st.hdrMatch)
+		// Fields exist only once the config step ran; earlier sheds have none.
+		if st.resolved {
+			st.ver.stats.countSignals(st.fields.signalBits())
+		}
 		if st.resolved && st.set.block != "" {
 			st.ver.stats.block(st.set.blockRule, st.reason == reasonBlocked)
 		}
@@ -518,12 +533,22 @@ func (e *Edge) finish(st *reqState, r *http.Request) {
 	e.alog.write(st, r, elapsed, decision)
 }
 
-// statusWriter records the status for logs and stats. Every writer in this
-// package calls WriteHeader before Write, so Write needs no hook. Unwrap lets
-// http.ResponseController reach the real writer for Flush and Hijack.
+// statusWriter records the status and the body bytes written, for logs and
+// stats. Every writer in this package calls WriteHeader before Write. Unwrap
+// lets http.ResponseController reach the real writer for Flush and Hijack.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+	bytes  int64
+	// hijacked means the connection left net/http, so bytes would miss what
+	// the proxy copies over it.
+	hijacked bool
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(b)
+	s.bytes += int64(n)
+	return n, err
 }
 
 func (s *statusWriter) WriteHeader(code int) {
@@ -540,7 +565,7 @@ func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 func (s *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	c, b, err := http.NewResponseController(s.ResponseWriter).Hijack()
 	if err == nil {
-		s.status = http.StatusSwitchingProtocols
+		s.status, s.hijacked = http.StatusSwitchingProtocols, true
 	}
 	return c, b, err
 }

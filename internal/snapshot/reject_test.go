@@ -23,9 +23,17 @@ type rejectCase struct {
 func TestCompileRejects(t *testing.T) {
 	cases := []rejectCase{
 		// Top level.
-		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 7 is not supported"},
+		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 9 is not supported"},
 		{"version zero", func(c *Config) { c.Version = 0 }, nil, "version", "at least 1"},
 		{"config over 8 MB", addHugeHeaderRules, nil, "", "bytes as JSON"},
+
+		// Browser floor.
+		{"browser floor for an unknown family", func(c *Config) { c.Global.BrowserFloor = map[string]int{"safari": 17} }, nil, "global.browser_floor", `no "safari"; use chromium or firefox`},
+		{"browser floor of zero", func(c *Config) { c.Global.BrowserFloor = map[string]int{"chromium": 0} }, nil, "global.browser_floor.chromium", "must be 1 to 999"},
+		{"browser floor over 999", func(c *Config) { c.Global.BrowserFloor = map[string]int{"firefox": 1000} }, nil, "global.browser_floor.firefox", "must be 1 to 999"},
+		{"rule naming browser_outdated while the floor is off", func(c *Config) {
+			c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "stale", Expression: mustParse(`client.signals eq "browser_outdated"`), Settings: Settings{BodyLimit: new(int64(1))}})
+		}, nil, "config_rules[3].expression.rules[0]", `"browser_outdated" can never match`},
 
 		// Backstop.
 		{"backstop limit zero", func(c *Config) { c.Global.Backstop.Limit = 0 }, nil, "global.backstop.limit", "must be 1 to"},

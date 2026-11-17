@@ -45,8 +45,20 @@ type planSensor struct {
 	FirstTry map[string]any `json:"first_try,omitempty"`
 }
 
+// planSignal is a fleet signal with no sensor behind it: the agent enforces
+// Rule when a case opens on Signal and its summary names Mentions. The rule
+// cites no sensor, as a case with nothing watching its traffic has none.
+type planSignal struct {
+	Signal   string         `json:"signal"`
+	Mentions string         `json:"mentions"`
+	Name     string         `json:"name"`
+	Rule     map[string]any `json:"rule"`
+	TTL      string         `json:"ttl"`
+}
+
 type plan struct {
 	Sensors []planSensor `json:"sensors"`
+	Signals []planSignal `json:"signals"`
 }
 
 // step is one MCP call.
@@ -93,6 +105,12 @@ func (p plan) steps(kind string, brief map[string]any, l live) ([]step, string) 
 		return out, "benign"
 	case "anomaly":
 		rule, _ := brief["rule"].(string)
+		if j := slices.IndexFunc(p.Signals, func(g planSignal) bool { return g.matches(brief) }); j >= 0 {
+			g := p.Signals[j]
+			return []step{getCase, {"get_autopilot_state", none}, {"get_stats", none},
+				{"propose", map[string]any{"action": "enforce", "name": g.Name, "rule": g.Rule, "ttl": g.TTL,
+					"evidence": map[string]any{"evidence_ids": l.Evidence}, "rationale": "The signal's surge is the load-test attack it watches"}}}, "attack"
+		}
 		m := sensorRule.FindStringSubmatch(rule)
 		i := -1
 		if m != nil {
@@ -119,6 +137,14 @@ func (p plan) steps(kind string, brief map[string]any, l live) ([]step, string) 
 		return append(out, enforce(s.Block)), "attack"
 	}
 	return []step{getCase}, "benign"
+}
+
+// matches reports whether brief is a case on g's signal that names g's
+// Mentions. The summary is the untrusted wrapper admin puts around it.
+func (g planSignal) matches(brief map[string]any) bool {
+	sum, _ := brief["summary"].(map[string]any)
+	text, _ := sum["untrusted"].(string)
+	return brief["signal"] == g.Signal && strings.Contains(text, g.Mentions)
 }
 
 // absorb adds what a read answered to l.

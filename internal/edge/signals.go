@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/chrisleekr/edge-proxy/internal/expr"
+	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
 // Signal bits, in expr.Signals order.
@@ -19,6 +20,13 @@ const (
 	sigHintsMismatch
 	sigHTTP1
 	sigTLSMismatch
+	sigBrowserOutdated
+	sigCDNAutomated
+	sigCrawlerImpersonated
+	sigCDNTor
+	sigBrowserTLSOld
+	// The bits are uint16, which leaves room for 16 signals. Past that, and
+	// 1<<numSignals entries in signalLists, it needs a different structure.
 	numSignals = iota
 )
 
@@ -34,6 +42,10 @@ var signalLists = func() (t [1 << numSignals][]string) {
 	}
 	return t
 }()
+
+// crawlerTokens are lowercase User-Agent names of search crawlers the CDN
+// verifies by address.
+var crawlerTokens = [][]byte{[]byte("googlebot"), []byte("bingbot"), []byte("applebot"), []byte("duckduckbot"), []byte("yandexbot"), []byte("baiduspider")}
 
 // toolTokens are lowercase User-Agent substrings of HTTP libraries, CLI
 // tools and scanners. The scanners come from the OWASP Core Rule Set's
@@ -63,7 +75,10 @@ var toolTokens = func() [][]byte {
 }()
 
 // headlessTokens name automation browsers that say so in their User-Agent.
-var headlessTokens = [][]byte{[]byte("headlesschrome"), []byte("phantomjs")}
+// Lightpanda's default is "Lightpanda/1.0" and it refuses any User-Agent
+// containing "Mozilla" (src/Config.zig in
+// https://github.com/lightpanda-io/browser).
+var headlessTokens = [][]byte{[]byte("headlesschrome"), []byte("phantomjs"), []byte("lightpanda")}
 
 // uaScan bounds how much of a User-Agent the tool and headless checks read.
 // A tool that pads its User-Agent past it could as well send another one.
@@ -96,11 +111,14 @@ func (v version2) atLeast(w version2) bool {
 }
 
 // signalsOf computes a request's client signals. It reads only headers and
-// the trusted viewer fields, and allocates nothing.
-func signalsOf(h http.Header, c *client) uint16 {
+// the trusted viewer fields, and allocates nothing. floor is the lowest
+// major version per browser kind a User-Agent may claim; 0 is off.
+func signalsOf(h http.Header, c *client, floor [4]int) uint16 {
+	// The CDN's facts hold whatever the User-Agent says, so they come first.
+	m := cdnSignals(h, c)
 	ua, _ := first(h["User-Agent"])
 	if ua == "" {
-		return sigUAMissing
+		return m | sigUAMissing
 	}
 	var lower [uaScan]byte
 	n := copy(lower[:], ua)
@@ -109,7 +127,6 @@ func signalsOf(h http.Header, c *client) uint16 {
 			lower[i] = b + 'a' - 'A'
 		}
 	}
-	var m uint16
 	for _, t := range toolTokens {
 		if bytes.Contains(lower[:n], t) {
 			m |= sigUATool
@@ -122,8 +139,26 @@ func signalsOf(h http.Header, c *client) uint16 {
 			break
 		}
 	}
+	// A crawler claim the CDN refused to verify is a forged User-Agent.
+	// Cloudflare sends cf-verified-bot only with Bot Management; a missing
+	// header is no verdict.
+	if c.cdn.VerifiedBot && hasHeaderToken(h["Cf-Verified-Bot"], "false") {
+		for _, t := range crawlerTokens {
+			if bytes.Contains(lower[:n], t) {
+				m |= sigCrawlerImpersonated
+				break
+			}
+		}
+	}
 	kind, v := browserOf(ua)
-	if kind == notBrowser || !v.atLeast(secFetchSince[kind]) {
+	if kind == notBrowser {
+		return m
+	}
+	// Before the modern gate: a claim older than Sec-Fetch is the stalest.
+	if f := floor[kind]; f > 0 && v.major < f {
+		m |= sigBrowserOutdated
+	}
+	if !v.atLeast(secFetchSince[kind]) {
 		return m
 	}
 	if s, _ := first(h["Accept-Language"]); s == "" {
@@ -139,6 +174,12 @@ func signalsOf(h http.Header, c *client) uint16 {
 		case hints == "" && v.atLeast(clientHintsSince):
 			m |= sigNoClientHints
 		case ok && b != v.major:
+			m |= sigHintsMismatch
+		}
+	} else if kind != chromium {
+		// Only Chromium sends Sec-CH-UA, so a Firefox or Safari User-Agent
+		// with it was rewritten.
+		if hints, _ := first(h["Sec-Ch-Ua"]); hints != "" {
 			m |= sigHintsMismatch
 		}
 	}
@@ -157,7 +198,53 @@ func signalsOf(h http.Header, c *client) uint16 {
 	if j := c.ja4; j != "" && (j[1:3] != "13" || !ws && j[8:10] != "h2" && j[8:10] != "h3") {
 		m |= sigTLSMismatch
 	}
+	// Every modern browser negotiates TLS 1.3, and the CDN offers it. On a
+	// request the CDN saw as plain HTTP, any TLS value came from the client.
+	if c.cdn.TLS && (!c.hasSSL || c.ssl) {
+		if t, _ := first(h["Cloudfront-Viewer-Tls"]); t != "" && !strings.HasPrefix(t, "TLSv1.3:") {
+			m |= sigBrowserTLSOld
+		}
+	}
 	return m
+}
+
+// cdnSignals are the signals from the CDN's own verdicts and facts.
+func cdnSignals(h http.Header, c *client) uint16 {
+	var m uint16
+	// Cloudflare's scale: 1 is automated and 2 to 29 likely automated.
+	// Verified crawlers score low too, so they are left out.
+	if c.cdn.BotScore && c.cdn.VerifiedBot {
+		s, _ := first(h["Cf-Bot-Score"])
+		if n := smallInt(s); n >= 1 && n <= 29 && !cdnVerified(h) {
+			m |= sigCDNAutomated
+		}
+	}
+	// Cloudflare reports Tor exits as country T1 in cf-ipcountry.
+	if c.cdn.Country && c.country == "T1" {
+		m |= sigCDNTor
+	}
+	return m
+}
+
+func cdnVerified(h http.Header) bool {
+	v, _ := first(h["Cf-Verified-Bot"])
+	return strings.EqualFold(v, "true")
+}
+
+// smallInt parses one or two digits, or returns 0. strconv would allocate an
+// error for a malformed value.
+func smallInt(v string) int {
+	if len(v) == 0 || len(v) > 2 {
+		return 0
+	}
+	n := 0
+	for i := 0; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return 0
+		}
+		n = n*10 + int(v[i]-'0')
+	}
+	return n
 }
 
 // hasHeaderToken reports whether any comma-separated element of values,
@@ -251,4 +338,10 @@ func leadingInt(s string) (v, n int) {
 		n++
 	}
 	return v, n
+}
+
+// browserFloor is the compiled floors indexed by browser kind. Safari has
+// none: its version follows the OS, so an old one is a real user.
+func browserFloor(c *snapshot.Compiled) [4]int {
+	return [4]int{chromium: c.ChromiumFloor, firefox: c.FirefoxFloor}
 }

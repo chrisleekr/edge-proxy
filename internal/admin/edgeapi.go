@@ -35,6 +35,9 @@ const (
 	maxTopPerStep = 20
 	// maxLatencyBuckets bounds a reported histogram; the edge sends 14.
 	maxLatencyBuckets = 64
+	// maxClientSignals bounds a reported signal list; the edge sends one
+	// entry per client signal it knows.
+	maxClientSignals = 32
 	// maxCount is far above what one edge serves between reports, and low
 	// enough that sums never overflow the bigint columns.
 	maxCount = 1 << 40
@@ -303,7 +306,7 @@ func (s *Server) checkDeployment(ctx context.Context, q querier) error {
 	if err != nil {
 		return err
 	}
-	p := fail(http.StatusConflict, fmt.Sprintf("edge %s runs with different deployment settings than admin; CLIENT_IP_SOURCE, VIEWER_HEADERS, INGRESS_SECRET_HEADER and ALLOW_REGEX must match", instance))
+	p := fail(http.StatusConflict, fmt.Sprintf("edge %s runs with different deployment settings than admin; CLIENT_IP_SOURCE, VIEWER_HEADERS, INGRESS_SECRET_HEADER, CDN_HEADERS and ALLOW_REGEX must match", instance))
 	p.held = "deployment"
 	return p
 }
@@ -347,6 +350,7 @@ func (a *aggregator) add(now time.Time, counts []edge.StatsCounts) {
 		}
 		t := c.Totals
 		t.LatencyMS = t.LatencyMS[:min(len(t.LatencyMS), maxLatencyBuckets)]
+		t.Signals = t.Signals[:min(len(t.Signals), maxClientSignals)]
 		addTotals(&m.Totals, t)
 		addCodes(&m.codes, c.StatusCodes)
 		m.causes = addCodeCounts(m.causes, c.UpstreamErrors)
@@ -404,6 +408,7 @@ func (a *aggregator) take(now time.Time) map[aggKey]*minuteAgg {
 		c := &minuteAgg{Totals: m.Totals, rules: map[string]*edge.RuleCounts{}, ruleOrder: slices.Clone(m.ruleOrder), top: map[string]*edge.TopCount{},
 			outcomes: map[string]*edge.RuleOutcome{}, outcomeOrder: slices.Clone(m.outcomeOrder)}
 		c.LatencyMS = slices.Clone(m.LatencyMS)
+		c.Signals = slices.Clone(m.Signals)
 		c.codes = edge.StatusCodes{Edge: maps.Clone(m.codes.Edge), Upstream: maps.Clone(m.codes.Upstream)}
 		c.causes = maps.Clone(m.causes)
 		for id, r := range m.rules {
@@ -456,13 +461,13 @@ func (s *Server) flush(ctx context.Context, now time.Time) error {
 		if causes == nil {
 			causes = map[string]uint64{}
 		}
-		b.Queue(`INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited, rules, status_codes, upstream_errors)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		b.Queue(`INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, client_signals, rate_limit, top_limited, rules, status_codes, upstream_errors)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::bigint[], '{}'), $10, $11, $12, $13, $14)
 			ON CONFLICT (minute, version, replica) DO UPDATE SET requests = EXCLUDED.requests, edge_5xx = EXCLUDED.edge_5xx,
 				upstream_5xx = EXCLUDED.upstream_5xx, auth_failures = EXCLUDED.auth_failures, latency_ms = EXCLUDED.latency_ms,
-				rate_limit = EXCLUDED.rate_limit, top_limited = EXCLUDED.top_limited, rules = EXCLUDED.rules, status_codes = EXCLUDED.status_codes,
+				client_signals = EXCLUDED.client_signals, rate_limit = EXCLUDED.rate_limit, top_limited = EXCLUDED.top_limited, rules = EXCLUDED.rules, status_codes = EXCLUDED.status_codes,
 				upstream_errors = EXCLUDED.upstream_errors`,
-			k.minute, k.version, s.replica, m.Requests, m.Edge5xx, m.Upstream5xx, m.AuthFailures, m.LatencyMS, rules, top, outcomes, m.codes, causes)
+			k.minute, k.version, s.replica, m.Requests, m.Edge5xx, m.Upstream5xx, m.AuthFailures, m.LatencyMS, m.Signals, rules, top, outcomes, m.codes, causes)
 	}
 	if err := s.edgeDB.SendBatch(ctx, b).Close(); err != nil {
 		return fmt.Errorf("stats flush dropped %d minutes: %w", len(done), err)
@@ -471,7 +476,7 @@ func (s *Server) flush(ctx context.Context, now time.Time) error {
 }
 
 func (s *Server) fleet(w http.ResponseWriter, r *http.Request, _ *principal) error {
-	rows, err := s.db.Query(r.Context(), "SELECT instance, last_seen, config_source, bootstrap_age_seconds, versions, upstream FROM fleet ORDER BY instance")
+	rows, err := s.db.Query(r.Context(), "SELECT instance, last_seen, config_source, bootstrap_age_seconds, versions, upstream, deployment FROM fleet ORDER BY instance")
 	if err != nil {
 		return err
 	}
@@ -483,10 +488,15 @@ func (s *Server) fleet(w http.ResponseWriter, r *http.Request, _ *principal) err
 		Versions     []int64   `json:"versions"`
 		Upstream     string    `json:"upstream"`
 		Live         bool      `json:"live"`
+		// Same rule as checkDeployment: an empty fingerprint is an older edge, not checked.
+		SettingsDiffer bool `json:"settings_differ"`
 	}
+	want := s.cfg.Deployment.Fingerprint()
 	list, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (item, error) {
 		var it item
-		err := row.Scan(&it.Instance, &it.LastSeen, &it.ConfigSource, &it.BootstrapAge, &it.Versions, &it.Upstream)
+		var fp string
+		err := row.Scan(&it.Instance, &it.LastSeen, &it.ConfigSource, &it.BootstrapAge, &it.Versions, &it.Upstream, &fp)
+		it.SettingsDiffer = fp != "" && fp != want
 		it.Live = it.LastSeen.After(s.now().Add(-fleetWindow))
 		return it, err
 	})
@@ -574,7 +584,7 @@ func (s *Server) statsOf(ctx context.Context, q querier, top, cond string, args 
 // queryStats selects stored rows in minute, version and replica order. top
 // is the top subjects column or a constant standing in for it.
 func (s *Server) queryStats(ctx context.Context, q querier, top, cond string, args ...any) (pgx.Rows, error) {
-	return q.Query(ctx, `SELECT minute, version, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, `+top+`, rules, status_codes, upstream_errors
+	return q.Query(ctx, `SELECT minute, version, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, client_signals, rate_limit, `+top+`, rules, status_codes, upstream_errors
 		FROM edge_stats_minute WHERE `+cond+` ORDER BY minute, version, replica`, args...)
 }
 
@@ -610,16 +620,23 @@ func mergeReplicas(parts []statsRow) []statsRow {
 	return out
 }
 
-// addTotals adds o into t. Latency buckets add by index and t grows to fit,
-// so replicas with different histograms keep every bucket.
+// addTotals adds o into t. Latency buckets and signal counts add by index
+// and both pad to the longer list, so replicas with different histograms or
+// signal sets (a rolling deploy) keep every entry and line up for Counters.
 func addTotals(t *edge.Totals, o edge.Totals) {
-	if n := len(o.LatencyMS) - len(t.LatencyMS); n > 0 {
-		t.LatencyMS = append(t.LatencyMS, make([]uint64, n)...)
-	}
+	t.LatencyMS, o.LatencyMS = padTo(t.LatencyMS, o.LatencyMS)
+	t.Signals, o.Signals = padTo(t.Signals, o.Signals)
 	tc := t.Counters()
 	for i, p := range o.Counters() {
 		*tc[i] += *p
 	}
+}
+
+// padTo returns a and b grown with zeros to the longer length. b is cloned
+// first so growing it never writes into the caller's backing array.
+func padTo(a, b []uint64) ([]uint64, []uint64) {
+	n := max(len(a), len(b))
+	return append(a, make([]uint64, n-len(a))...), append(slices.Clone(b), make([]uint64, n-len(b))...)
 }
 
 // addCodes adds o into c, by origin and code.

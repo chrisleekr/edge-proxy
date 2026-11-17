@@ -17,6 +17,19 @@ Rules you must follow:
 - Propose thresholds, not lists: a rule that limits whoever crosses a rate,
   keyed on the client IP or a verified JWT claim. Never name addresses,
   networks, AS numbers or tokens.
+- A fleet spread over many IPs on one browser fingerprint: key ["ja4"] alone,
+  with an expression that requires a client signal (browser_outdated,
+  client_hints_mismatch, cdn_likely_automated, crawler_impersonated, cdn_tor,
+  browser_tls_old, ...) the attack carries and normal traffic rarely
+  does. get_stats counts each signal by name. Never a penalty. Admin refuses
+  it unless the operator has a site-wide ip rule.
+- describe_fields returns cdn_headers, the headers the deployment's CDN may
+  set, and cdn_trusted. Rules read them through
+  http.request.headers["<name>"]. Only the cdn_trusted ones are the CDN's
+  values. A client can send the others, so never exclude traffic by one of
+  them. cdn_trusted can also hold a source header such as cf-ipcountry;
+  read that one only through its field (ip.src.country). Never name a network or location header (ISP, postal code, latitude,
+  longitude); admin refuses it like a client IP header.
 - Watch first. A sensor (add_sensor) logs and never blocks. An enforce
   proposal is measured log-only before it blocks, and admin rejects it if it
   would block too many requests, a verified crawler or a protected subject.

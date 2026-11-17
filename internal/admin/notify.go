@@ -76,6 +76,7 @@ func defaultNotify() NotifySettings {
 			// p99 of fewer than 1000 requests is its 10 slowest, too few to
 			// judge a latency bound by.
 			"p99_latency":             {Mode: "notify", Severity: "warning", Factor: 1.5, FloorMS: 100, MinRequests: 1000},
+			"signal_surge":            share("warning", 3, 0.05, 300, 300),
 			"rule_stopped_matching":   n("warning", 0, 0, 100),
 			"rule_match_surge":        n("info", 5, 0, 500),
 			"rule_edge_5xx_ratio":     share("warning", 2, 0.01, 100, 10),
@@ -147,6 +148,7 @@ var notifyChecks = map[string]notifyCheck{
 	"edge_5xx_ratio":     relativeMin.on(fleetOnly, shareCheck("5xx the edge sent", func(t *edge.Totals) (uint64, uint64) { return t.Edge5xx, t.Requests })),
 	"upstream_5xx_ratio": relativeMin.on(fleetOnly, shareCheck("5xx from the upstream", func(t *edge.Totals) (uint64, uint64) { return t.Upstream5xx, t.Requests })),
 	"auth_failure_ratio": relativeMin.on(fleetOnly, shareCheck("requests failing their token check", func(t *edge.Totals) (uint64, uint64) { return t.AuthFailures, t.Requests })),
+	"signal_surge":       relativeMin.on(fleetOnly, signalSurge),
 	"p99_latency": notifyNeeds(func(s NotifySignal) bool { return s.Factor >= 1 && s.FloorMS >= 0 && s.MinRequests > 0 },
 		"factor of at least 1, floor_ms not negative, min_requests of at least 1").on(fleetOnly, func(s NotifySignal, w, b *span, _ string) (bool, string) {
 		now, before := (&cohort{Totals: w.Totals}).p99(), (&cohort{Totals: b.Totals}).p99()
@@ -233,6 +235,30 @@ func shareCheck(what string, get func(*edge.Totals) (uint64, uint64)) func(Notif
 		return wd >= s.MinRequests && wn >= s.MinEvents && now > max(s.Floor, s.Factor*before),
 			fmt.Sprintf("%s: %s of requests in the last %s, against %s in the %s before", what, pct(now), w.length(), pct(before), b.length())
 	}
+}
+
+// signalSurge trips when a client signal's share of requests is over factor
+// times its baseline share and over the floor. Shares divide by the requests
+// of minutes that reported signals, so a baseline stored before edges
+// counted them is never read as a share of zero.
+func signalSurge(s NotifySignal, w, b *span, _ string) (bool, string) {
+	if w.sigRequests < s.MinRequests || b.sigRequests == 0 {
+		return false, ""
+	}
+	worst, wShare, bShare := -1, 0.0, 0.0
+	for i := range min(len(w.Signals), len(expr.Signals)) {
+		now, before := ratio(w.Signals[i], w.sigRequests), 0.0
+		if i < len(b.Signals) {
+			before = ratio(b.Signals[i], b.sigRequests)
+		}
+		if w.Signals[i] >= s.MinEvents && now > max(s.Floor, s.Factor*before) && now > wShare {
+			worst, wShare, bShare = i, now, before
+		}
+	}
+	if worst < 0 {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s: %s of requests in the last %s, against %s in the %s before", expr.Signals[worst].Name, pct(wShare), w.length(), pct(bShare), b.length())
 }
 
 // outcomeShare is shareCheck for the requests one rule matched. The rule's
@@ -350,8 +376,10 @@ func loadNotify(ctx context.Context, q querier) (NotifySettings, error) {
 type span struct {
 	minutes int
 	edge.Totals
-	limits   map[string]*edge.RuleCounts
-	outcomes map[string]*edge.RuleOutcome
+	// sigRequests is the requests of the rows that carry signal counts.
+	sigRequests uint64
+	limits      map[string]*edge.RuleCounts
+	outcomes    map[string]*edge.RuleOutcome
 	// live is the requests of the minutes and versions whose reports
 	// list each rule. Edges list every rule of their version, matched or
 	// not, so a rule missing from a report was not live there.
@@ -368,6 +396,9 @@ func newSpan(minutes int) *span {
 
 func (s *span) add(r statsRow) {
 	addTotals(&s.Totals, r.Totals)
+	if len(r.Signals) > 0 {
+		s.sigRequests += r.Requests
+	}
 	// Rule IDs are unique across phases and a row lists each once.
 	for _, rc := range r.RateLimit {
 		s.live[rc.ID] += r.Requests
@@ -471,7 +502,11 @@ type finding struct {
 }
 
 // subject is a rule the live versions have, or the fleet (ID "").
-type subject struct{ ID, Phase string }
+type subject struct {
+	ID, Phase string
+	// Shared is a rate-limit rule whose key has no per-client part.
+	Shared bool
+}
 
 // liveRules lists every rule of the active and canary versions.
 func (s *Server) liveRules(ctx context.Context) ([]subject, error) {
@@ -485,21 +520,21 @@ func (s *Server) liveRules(ctx context.Context) ([]subject, error) {
 	}
 	seen := map[string]bool{}
 	var out []subject
-	add := func(id string, p expr.Phase) {
+	add := func(id string, p expr.Phase, shared bool) {
 		if !seen[id] {
 			seen[id] = true
-			out = append(out, subject{id, string(p)})
+			out = append(out, subject{id, string(p), shared})
 		}
 	}
 	for _, c := range cs {
 		for _, r := range c.ConfigRules {
-			add(r.ID, expr.PhaseConfig)
+			add(r.ID, expr.PhaseConfig, false)
 		}
 		for _, r := range c.RateLimitRules {
-			add(r.ID, expr.PhaseRateLimit)
+			add(r.ID, expr.PhaseRateLimit, snapshot.SharedKey(r.Key))
 		}
 		for _, r := range c.RequestHeaderRules {
-			add(r.ID, expr.PhaseRequestHeaders)
+			add(r.ID, expr.PhaseRequestHeaders, false)
 		}
 	}
 	return out, nil
@@ -520,6 +555,10 @@ func evaluateNotify(n NotifySettings, w, b *span, rules []subject) []finding {
 			c := notifyChecks[name]
 			sig := n.signalFor(sub.ID, name)
 			if sig.Mode != "notify" || !slices.Contains(c.phases, sub.Phase) || ownTransition(sub.ID, name) {
+				continue
+			}
+			// One client can't dominate a bucket that holds a population.
+			if sub.Shared && name == "rule_subject_dominates" {
 				continue
 			}
 			tripped, summary := c.check(sig, w, b, sub.ID)
@@ -1069,6 +1108,7 @@ func alertName(signal string) string {
 var signalTitles = map[string]string{
 	"traffic_drop":               "Traffic dropped",
 	"traffic_surge":              "Traffic surged",
+	"signal_surge":               "A client signal surged",
 	"edge_5xx_ratio":             "More 5xx from the edge",
 	"upstream_5xx_ratio":         "More 5xx from the upstream",
 	"auth_failure_ratio":         "More failed token checks",

@@ -45,7 +45,7 @@ func New(cfg *Config, log *slog.Logger, tp *tracing.Provider) *Server {
 	m := &metrics{tracing: tp}
 	st := &store{}
 	reg := newStatsRegistry()
-	alog := newAccessLog(log, m, cfg.LogSampleRate, 4096)
+	alog := newAccessLog(log, m, cfg.LogSampleRate, 4096, cfg.CDNHeaders)
 	keys := newKeyStore(jwks.NewClient(cfg.JWKSAllowedHosts, jwksTimeout, jwksRoots), m, log)
 	s := &Server{
 		cfg: cfg, log: log, m: m, store: st, alog: alog,

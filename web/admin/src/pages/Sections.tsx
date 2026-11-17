@@ -454,6 +454,18 @@ export function Settings({ canManage }: { canManage: boolean }) {
   const backstop = part('backstop');
   const setBackstop = (k: string, v: Json) => setPart('backstop', setField(backstop, k, v));
   const defaults = g.defaults;
+  const floor = part('browser_floor');
+  const setFloor = (k: string, v: Json) => {
+    const next = setField(floor, k, v);
+    d.setConfig((c) => ({ ...c, global: { ...setField(c.global, 'browser_floor', Object.keys(next).length ? next : undefined), defaults: c.global.defaults } }));
+  };
+  const cdnNames = schema.data.cdn_headers;
+  // Unset shows the deployment's default; any change writes the whole list.
+  const cdnSet = Array.isArray(g.cdn_trusted_headers);
+  const cdnTrusted = cdnSet ? (g.cdn_trusted_headers as string[]).map((h) => h.toLowerCase()) : schema.data.cdn_trusted_default;
+  // Entries not in CDN_HEADERS stay in the list but get no checkbox. A listed source header gets a warning on save saying the entry does nothing.
+  const cdnStale = cdnSet ? cdnTrusted.filter((n) => !cdnNames.includes(n) && !schema.data.cdn_source_headers.includes(n)) : [];
+  const setCdnTrusted = (v: string[] | undefined) => d.setConfig((c) => ({ ...c, global: { ...setField(c.global, 'cdn_trusted_headers', v), defaults: c.global.defaults } }));
   const allowlist = Array.isArray(g.client_allowlist) ? (g.client_allowlist as string[]) : [];
   const setDefault = (k: string, v: Json) => d.setConfig((c) => ({ ...c, global: { ...c.global, defaults: setField(c.global.defaults, k, v) } }));
   const locale = part('locale');
@@ -471,6 +483,8 @@ export function Settings({ canManage }: { canManage: boolean }) {
           ['trusted-clients', 'Trusted client allowlist'],
           ['backstop', 'Backstop'],
           ['requests-in-progress', 'Requests in progress'],
+          ['browser-floor', 'Oldest browser version'],
+          ...(cdnNames.length > 0 || cdnSet ? [['trusted-cdn-headers', 'Trusted CDN headers'] as [string, string]] : []),
           ['defaults', 'Defaults'],
           ['locale', 'Locale'],
           ['request-headers', 'Request headers'],
@@ -591,6 +605,51 @@ export function Settings({ canManage }: { canManage: boolean }) {
             </Labeled>
           </Editable>
         </Card>
+        <Card
+          id="browser-floor"
+          title="Oldest browser version"
+          intro="Browser versions below these count as outdated, so a rule can act on clients that claim a stale browser."
+          info="Match the outdated browser signal in a rule. Real users on devices that can't update still exist, so log first. Raise these about once a year by hand. Safari has no floor because its version follows the operating system."
+        >
+          <Editable>
+            <Labeled label="Chrome and other Chromium browsers" hint="Lowest major version, such as 130. Leave empty for no floor." issues={d.at('global.browser_floor.chromium')}>
+              <Count value={floor.chromium} min={1} placeholder="no floor" onChange={(v) => setFloor('chromium', v)} />
+            </Labeled>
+            <Labeled label="Firefox" hint="Lowest major version, such as 128. Leave empty for no floor." issues={d.at('global.browser_floor.firefox')}>
+              <Count value={floor.firefox} min={1} placeholder="no floor" onChange={(v) => setFloor('firefox', v)} />
+            </Labeled>
+            <Errors issues={d.at('global.browser_floor')} name="Browser floor" />
+          </Editable>
+        </Card>
+        {(cdnNames.length > 0 || cdnSet) && (
+          <Card
+            id="trusted-cdn-headers"
+            title="Trusted CDN headers"
+            intro="Headers you declare your CDN sets on every request. A rule on one gets no client-controlled warning, and the signals that read it can be used. The edge doesn't check: where the CDN doesn't set a header, a client can."
+          >
+            <Editable>
+              <fieldset className="flex flex-col gap-2">
+                <legend className="text-sm text-body">Trust a header only when your CDN sets it on every request, such as after turning on the Cloudflare feature that adds it. A client can send an untrusted header itself.</legend>
+                {cdnNames.map((n) => (
+                  <Check key={n} label={n} checked={cdnTrusted.includes(n)} onChange={(e) => setCdnTrusted(e.target.checked ? [...cdnTrusted, n] : cdnTrusted.filter((x) => x !== n))} />
+                ))}
+              </fieldset>
+              {cdnStale.length > 0 && (
+                <p className="text-sm">
+                  Not in CDN_HEADERS, so not trusted: <span className="font-mono break-all">{cdnStale.join(', ')}</span>
+                </p>
+              )}
+              <Errors issues={d.at('global.cdn_trusted_headers')} name="Trusted CDN headers" />
+              {cdnSet ? (
+                <div>
+                  <Button onClick={() => setCdnTrusted(undefined)}>Use the default</Button>
+                </div>
+              ) : (
+                <Hint>{schema.data.cdn_trusted_default.length > 0 ? `Using the default: ${schema.data.cdn_trusted_default.join(', ')}, which your CDN adds to every request.` : 'Using the default: none trusted.'}</Hint>
+              )}
+            </Editable>
+          </Card>
+        )}
         <Section
           id="defaults"
           title="Defaults"

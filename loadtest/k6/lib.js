@@ -32,6 +32,14 @@ export const path = (operator, value) => ({ combinator: 'and', rules: [{ field: 
 // scenarios share; extra sets the algorithm and limits.
 export const rule = (id, expression, extra) => ({ id, expression, key: ['ip'], on_missing_key: 'fallback_ip', action: 'block', fail_mode: 'open', ...extra });
 
+// siteWideIP is the rule a ja4-only rate limit needs beside it: it matches
+// every request and counts per IP. The limit is far above any one IP's rate
+// in these scenarios, so it never limits them.
+export const siteWideIP = rule('site-per-ip', { combinator: 'and', rules: [] }, { algorithm: 'sliding_window', limit: 6000, period: '1m' });
+
+// browserFloor is the oldest browser the policy treats as current.
+export const browserFloor = { chromium: 130, firefox: 130 };
+
 export const pick = (list) => list[Math.floor(Math.random() * list.length)];
 
 const ms = (v) => (v === undefined ? 'n/a' : `${v.toFixed(2)} ms`);
@@ -53,7 +61,8 @@ export function thresholdReport(data) {
   for (const [name, m] of Object.entries(data.metrics)) {
     for (const [expr, t] of Object.entries(m.thresholds ?? {})) {
       const v = m.values;
-      const shown = v.count ?? v.rate ?? v['p(99)'];
+      // A threshold on min reports the minimum, not the p99 shown for other trends.
+      const shown = v.count ?? v.rate ?? (/^min\b/.test(expr) ? v.min : v['p(99)']);
       lines.push(`${t.ok ? 'pass' : 'FAIL'}  ${name} ${expr}  (${typeof shown === 'number' ? shown.toFixed(3) : shown})`);
     }
   }

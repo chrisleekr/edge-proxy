@@ -122,6 +122,12 @@ const VerifiedBotField = "client.verified_bot"
 type SignalDef struct {
 	Name  string   `json:"name"`
 	Needs []string `json:"needs,omitempty"`
+	// NeedsHeaders are CDN headers (lower case) the signal reads, which must be
+	// listed in CDN_HEADERS and trusted.
+	NeedsHeaders []string `json:"needs_headers,omitempty"`
+	// NeedsFloor marks a signal that fires only when global.browser_floor
+	// is set.
+	NeedsFloor bool `json:"needs_floor,omitempty"`
 }
 
 // Signals lists every client.signals name in the edge's bit order. Browsers
@@ -137,6 +143,11 @@ var Signals = []SignalDef{
 	{Name: "client_hints_mismatch", Needs: []string{"ssl"}},
 	{Name: "browser_http1", Needs: []string{"ssl", "http.request.version"}},
 	{Name: "browser_tls_mismatch", Needs: []string{"tls.client.ja4"}},
+	{Name: "browser_outdated", NeedsFloor: true},
+	{Name: "cdn_likely_automated", NeedsHeaders: []string{"cf-bot-score", "cf-verified-bot"}},
+	{Name: "crawler_impersonated", NeedsHeaders: []string{"cf-verified-bot"}},
+	{Name: "cdn_tor", Needs: []string{"ip.src.country"}, NeedsHeaders: []string{"cf-ipcountry"}},
+	{Name: "browser_tls_old", NeedsHeaders: []string{"cloudfront-viewer-tls"}},
 }
 
 var fieldsByName = func() map[string]FieldDef {

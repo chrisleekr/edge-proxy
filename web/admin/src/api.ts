@@ -42,13 +42,18 @@ export interface RuleChoices {
   methods: string[];
   block_modes: string[];
   distinct_of_kinds: string[];
-  signals: { name: string; needs?: string[] }[];
+  signals: { name: string; needs?: string[]; needs_headers?: string[] }[];
 }
 
 export interface Schema {
   fields: FieldDef[];
   operators: OpDef[];
   rules: RuleChoices;
+  // Headers the CDN sets, in lower case, that rules may read.
+  cdn_headers: string[];
+  cdn_source_headers: string[];
+  // The cdn_headers trusted until global.cdn_trusted_headers is set.
+  cdn_trusted_default: string[];
 }
 
 export interface Checked {

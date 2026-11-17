@@ -101,10 +101,11 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	if err != nil {
 		return SimResult{Rejected: reasonNames[reasonPath]}, nil
 	}
-	cl := client{ip: clean(ip), country: isoCode(req.Country), ssl: req.SSL, asn: req.ASN, hasASN: req.ASN > 0, version: expr.HTTPVersion(req.HTTPVersion)}
+	hasSSL := slices.Contains(c.Deployment.ViewerFields, "ssl")
+	cl := client{ip: clean(ip), country: isoCode(req.Country), ssl: req.SSL, hasSSL: hasSSL, asn: req.ASN, hasASN: req.ASN > 0, version: expr.HTTPVersion(req.HTTPVersion), cdn: c.CDN}
 	// As in identify: with an ssl source, a fingerprint on a plain request is
 	// absent, since only TLS has one.
-	if req.SSL || !slices.Contains(c.Deployment.ViewerFields, "ssl") {
+	if req.SSL || !hasSSL {
 		if expr.ValidJA4(req.JA4) {
 			cl.ja4 = req.JA4
 		}
@@ -116,6 +117,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	st := &reqState{client: cl, requestID: "simulated", start: time.Now()}
 	st.fields = newFields(r, &st.client, p)
 	f := &st.fields
+	f.floor = browserFloor(c)
 	if req.VerifiedBot {
 		bots := expr.NewIPSet([]netip.Prefix{netip.PrefixFrom(cl.ip, cl.ip.BitLen())})
 		f.bots = &bots

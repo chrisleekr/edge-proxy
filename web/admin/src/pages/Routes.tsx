@@ -111,6 +111,7 @@ const decisionWords: Record<string, string> = {
   rate_limited: 'Blocked by a rate limit rule',
   blocked: 'Blocked by an access rule',
   would_block: 'Forwarded; a log only access rule would block it',
+  would_limit: 'Forwarded; a log only rate limit rule would limit it',
   backstop: 'Blocked by the per-edge backstop',
   method: 'Refused: the method is not in upper case',
   path: 'Refused: the path is malformed or has an ambiguous encoding such as %5C or a .. segment',
@@ -149,7 +150,7 @@ const page = 100;
 // Decisions that are not the edge refusing or shedding: the request was
 // forwarded, also by a log only rule, or limited (its own column), or the
 // upstream or client failed it.
-const notRefused = new Set(['allow', 'would_block', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
+const notRefused = new Set(['allow', 'would_block', 'would_limit', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
 
 // Derived figures for one route, shared by the list and the detail page.
 function figures(r: RouteStats) {
