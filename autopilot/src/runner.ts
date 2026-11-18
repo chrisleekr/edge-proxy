@@ -35,9 +35,13 @@ export const noUsage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_to
 
 // The verdict admin's output schema describes, checked again here so a
 // provider that does not enforce the schema can't send admin a bad result.
+// Postgres refuses NUL in text and jsonb, so admin does too.
+const noNul = (s: string) => !s.includes('\0');
 export const verdictSchema = z.strictObject({
   verdict: z.enum(['attack', 'benign', 'unsure']),
-  summary: z.string().max(4000),
+  summary: z.string().max(300).refine(noNul),
+  needs_you: z.array(z.strictObject({ rule: z.string().max(64).refine(noNul), ask: z.string().min(1).max(300).refine(noNul) })).max(5),
+  details: z.string().max(4000).refine(noNul),
   proposals: z.array(z.int()).max(50),
 });
 
@@ -229,6 +233,8 @@ async function runCase(ctx: Ctx, claim: Claim): Promise<void> {
     status: 'ok',
     error_category: out.error,
     summary: '',
+    needs_you: [],
+    details: '',
     proposals: [],
     turns: out.turns,
     tool_calls: out.toolCalls,

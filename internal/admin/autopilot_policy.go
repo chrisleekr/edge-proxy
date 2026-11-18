@@ -177,8 +177,8 @@ func ipFirst(key []string) []string {
 
 // policy checks a proposal against the rule shape, the deployment, the
 // live rules, the budgets and the confirmed notes it cites. It writes
-// nothing.
-func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, in proposeIn, notes []apNote) (*candidate, error) {
+// nothing. kind is the case kind making the proposal.
+func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, in proposeIn, kind string, notes []apNote) (*candidate, error) {
 	c := &candidate{}
 	now := s.now()
 	if in.Action == "retire" {
@@ -307,6 +307,17 @@ func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, i
 		return nil, err
 	}
 	c.check("suppressed", !suppressed, "the same rule was not rolled back or marked a false positive within max_lifetime")
+	// Only sweeps: another case may propose a looser sensor of the same shape.
+	if kind == "sweep" && in.Action == "add_sensor" {
+		var repeat bool
+		if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM autopilot_rules WHERE shape_sha256 = $1 AND ended_at > $2
+			AND (outcome = 'unused' OR (outcome = 'retired_by_review' AND EXISTS (SELECT 1 FROM autopilot_proposals p JOIN autopilot_cases c ON c.id = p.case_id
+				WHERE p.rule_id = autopilot_rules.id AND p.action = 'retire' AND p.accepted AND c.kind = 'review'))))`,
+			c.shape[:], now.Add(-time.Duration(set.MaxLifetime))).Scan(&repeat); err != nil {
+			return nil, err
+		}
+		c.check("sweep_repeat", !repeat, "a sweep does not propose a sensor that ended unused or was retired by a daily review within max_lifetime")
+	}
 	merged := *active
 	merged.RateLimitRules = append(slices.Clone(baseOf(active).RateLimitRules), overlayOf(active, now)...)
 	merged.RateLimitRules = append(append(merged.RateLimitRules, pending...), c.rule)

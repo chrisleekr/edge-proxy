@@ -23,7 +23,9 @@
     "opened_by": "system:autopilot",
     "created_at": "2026-10-28T22:50:26.335583Z",
     "closed_at": "2026-10-28T22:50:27.193446Z",
-    "ablation_of": null
+    "ablation_of": null,
+    "needs_you": [],
+    "details": ""
   },
   "run": {
     "id": 8,
@@ -45,7 +47,65 @@
     "status": "ok",
     "telemetry_complete": true,
     "tool_calls": 8,
-    "turns": 9
+    "turns": 9,
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "summary",
+        "needs_you",
+        "details",
+        "proposals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "attack",
+            "benign",
+            "unsure"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "needs_you": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule",
+              "ask"
+            ],
+            "properties": {
+              "rule": {
+                "type": "string",
+                "maxLength": 43
+              },
+              "ask": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 50
+        }
+      }
+    }
   },
   "calls": [
     {
@@ -1092,6 +1152,8 @@
       "required": [
         "verdict",
         "summary",
+        "needs_you",
+        "details",
         "proposals"
       ],
       "additionalProperties": false,
@@ -1105,6 +1167,33 @@
           ]
         },
         "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "needs_you": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule",
+              "ask"
+            ],
+            "properties": {
+              "rule": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "ask": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "details": {
           "type": "string",
           "maxLength": 4000
         },

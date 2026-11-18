@@ -110,5 +110,5 @@ While bypassed, nothing the edge does applies:
 
 1. Read the release notes.
 2. Run `admin migrate` with the new image.
-3. Roll admin, then roll edges.
+3. Roll admin, then roll edges. Roll the autopilot runner with admin: a runner and admin from different releases disagree on the verdict schema. An older runner refuses the newer verdict and reports the run as `invalid_output`, so admin queues the case again once and marks it `failed` if that attempt fails too; an older admin refuses a newer runner's result, so the case stays running until its lease lapses.
 4. Publish config that uses a new schema only after every edge is upgraded. Admin enforces this: it refuses the publish while any live edge can't read the schema.

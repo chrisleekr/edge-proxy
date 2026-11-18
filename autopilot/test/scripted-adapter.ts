@@ -15,6 +15,8 @@ interface Plan {
   steps?: { tool: string; arguments: Record<string, unknown> }[];
   verdict?: string;
   summary?: string;
+  needs_you?: { rule: string; ask: string }[];
+  details?: string;
   hang?: boolean;
 }
 
@@ -42,5 +44,5 @@ export const scripted: Adapter = async (input) => {
   } finally {
     await admin.close();
   }
-  return { output: { verdict: plan.verdict, summary: plan.summary ?? '', proposals }, error: '', turns: steps.length + 1, toolCalls: steps.length, usage: noUsage, costUSD: null };
+  return { output: { verdict: plan.verdict, summary: plan.summary ?? '', needs_you: plan.needs_you ?? [], details: plan.details ?? '', proposals }, error: '', turns: steps.length + 1, toolCalls: steps.length, usage: noUsage, costUSD: null };
 };

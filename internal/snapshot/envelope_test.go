@@ -399,7 +399,7 @@ func TestCompileEnvelopeRejects(t *testing.T) {
 		{"no export time", func(e *Envelope) { e.ExportedAt = time.Time{} }, "exported_at", "is required"},
 		{"no active config", func(e *Envelope) { e.Active = nil }, "active", "is required"},
 		{"error inside the active config", func(e *Envelope) { e.Active.RateLimitRules[1].Limit = 0 }, "active.rate_limit_rules[1].limit", "must be 1 to"},
-		{"error at the root of the candidate", func(e *Envelope) { e.Candidate.Schema = 9 }, "candidate.schema", "not supported"},
+		{"error at the root of the candidate", func(e *Envelope) { e.Candidate.Schema = SupportedSchema + 1 }, "candidate.schema", "not supported"},
 		{"candidate over 8 MB", func(e *Envelope) { addHugeHeaderRules(e.Candidate) }, "candidate", "bytes as JSON"},
 		{"canary percent without a candidate", func(e *Envelope) { e.Candidate = nil }, "canary_percent", "need a candidate"},
 		{"canary expiry without a candidate", func(e *Envelope) { e.Candidate, e.CanaryPercent = nil, 0 }, "canary_percent", "need a candidate"},

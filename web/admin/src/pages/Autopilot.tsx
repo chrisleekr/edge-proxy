@@ -174,7 +174,7 @@ interface ToolCall {
 }
 
 interface CaseRead {
-  case: CaseRow;
+  case: CaseRow & { needs_you: { rule: string; ask: string }[]; details: string };
   runs: Run[];
   proposals: Proposal[];
   transitions: Transition[];
@@ -240,11 +240,12 @@ const states: Record<string, string> = {
 const outcomes: Record<string, string> = {
   expired: 'ran out',
   retired: 'retired by a person',
-  retired_by_review: 'retired by the daily review',
+  retired_by_review: 'retired by the autopilot',
   rolled_back: 'rolled back by its guard',
   false_positive: 'marked a false positive',
   adopted: 'adopted as your rule',
   rejected: 'rejected before blocking',
+  unused: 'ran out unused: it matched no requests',
 };
 const kinds: Record<string, string> = {
   anomaly: 'Anomaly',
@@ -272,6 +273,7 @@ const checks: Record<string, string> = {
   named_subjects: 'Names no client',
   duplicate: 'Not the same as a live rule',
   suppressed: 'Not a rule marked wrong recently',
+  sweep_repeat: 'Not a sensor that recently ran unused or a daily review retired',
   compile: 'Passes validation with every live rule',
   budget_enforcing: 'Within the enforce rule budget',
   budget_sensors: 'Within the sensor budget',
@@ -293,6 +295,39 @@ const n = (x: number | null | undefined) => (x ?? 0).toLocaleString();
 const short = (d: string) => d.replace(/(\D)0s$/, '$1').replace(/(\D)0m$/, '$1');
 const json = (v: Json) => JSON.stringify(v, null, 2);
 const seconds = (x: number) => (x % 3600 === 0 ? `${x / 3600}h` : x % 60 === 0 ? `${x / 60}m` : `${x}s`);
+
+// The model writes paragraphs and "- " lists; the first paragraph is its answer.
+function Paragraphs({ text, lead }: { text: string; lead?: boolean }) {
+  return text.split('\n\n').map((para, i) => (
+    <p key={i} className={`whitespace-pre-wrap ${lead && i === 0 ? 'text-heading font-medium' : 'text-body'}`}>
+      {para}
+    </p>
+  ));
+}
+
+function CheckList({ checks: list }: { checks: Proposal['checks'] }) {
+  return (
+    <ul className="flex flex-col gap-0.5">
+      {list.map((x) => (
+        <li key={x.name} className={x.ok ? 'text-body' : 'text-danger'}>
+          {x.ok ? 'Passed' : 'Failed'}: {checks[x.name] ?? x.name.replaceAll('_', ' ')}
+          {x.detail && ` (${x.detail})`}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// From admin's own proposal records, never from model text.
+function done(ps: Proposal[]) {
+  if (ps.length === 0) return 'Proposed nothing.';
+  const ok = ps.filter((p) => p.accepted).length;
+  const outcome = ok === ps.length ? 'all accepted' : `${ok} accepted, ${ps.length - ok} refused`;
+  // Only sensors can be retired by a proposal.
+  const what = { retire: ['retiring', 'sensor'], add_sensor: ['adding', 'sensor'], enforce: ['enforcing', 'rule'] }[ps[0]!.action];
+  if (what && ps.every((p) => p.action === ps[0]!.action)) return `Proposed ${what[0]} ${ps.length} ${what[1]}${ps.length === 1 ? '' : 's'}: ${outcome}.`;
+  return `Proposed ${ps.length}: ${outcome}.`;
+}
 
 // target says what a case is about, linked where it has a page.
 function Target({ c }: { c: CaseRow }) {
@@ -974,6 +1009,8 @@ export function AutopilotCase({ id }: { id: number }) {
       return d && !['queued', 'running'].includes(d.case.state) && !d.rules.some((r) => r.state === 'proposed') ? 30_000 : 2_000;
     },
   });
+  // A rule Needs you names may come from another case, so look it up among the live ones too.
+  const live = useQuery(autopilotQuery);
   // The draft lists the live autopilot rules Adopt can copy. A rule that went
   // live after the draft loaded needs a fresh one.
   const qc = useQueryClient();
@@ -1020,72 +1057,48 @@ export function AutopilotCase({ id }: { id: number }) {
           </dd>
         </dl>
       </Card>
-      <Card title="Evidence" intro="What the model cited for each rule it proposed, as it wrote it.">
-        {evidence.length === 0 ? (
-          <p className="text-body">{proposals.length ? 'The proposals cite no evidence.' : 'The model proposed nothing.'}</p>
-        ) : (
-          evidence.map((p) => (
-            <div key={p.id} className="mb-3 flex flex-col gap-1 text-sm last:mb-0">
-              <p className="text-heading">
-                <span className="text-body">{p.accepted ? `For ${p.rule_id ?? 'its proposal'}: ` : 'For a refused proposal: '}</span>
-                {p.rationale}
-              </p>
-              <pre className="wrap-anywhere whitespace-pre-wrap">{json(p.evidence)}</pre>
-            </div>
-          ))
-        )}
-      </Card>
-      <Card title="Tool calls" intro="Every call the model made to admin, in order, with what admin answered.">
-        {calls.length === 0 ? (
-          <p className="text-body">No tool calls yet.</p>
-        ) : (
-          <ol className="flex flex-col gap-1 text-sm">
-            {calls.map((t) => (
-              <li key={`${t.run_id}-${t.seq}`}>
-                {t.payload.cut ? (
-                  <p className="rounded-control px-3 py-1.5 text-body shadow-field">
-                    Too large to keep: {t.payload.bytes} bytes, SHA-256 <span className="font-mono wrap-anywhere">{t.payload.sha256}</span>
-                    {runs.length > 1 && `, run ${t.run_id}`}
-                  </p>
-                ) : (
-                  <details className="rounded-control shadow-field">
-                    <summary className="cursor-pointer px-3 py-1.5">
-                      <span className="font-mono text-heading">{t.payload.tool ?? 'call'}</span>
-                      {t.payload.allowed === false && ' refused'}
-                      <span className="text-body">
-                        , {t.payload.duration_ms ?? 0} ms
-                        {runs.length > 1 && `, run ${t.run_id}`}
-                      </span>
-                    </summary>
-                    <div className="flex flex-col gap-2 border-t border-line p-3">
-                      {/* A hidden connector call has no arguments: its query is part of the answer. */}
-                      {t.payload.arguments !== undefined && (
-                        <>
-                          <p className="text-body">Arguments</p>
-                          <pre className="wrap-anywhere whitespace-pre-wrap">{json(t.payload.arguments)}</pre>
-                        </>
-                      )}
-                      <p className="text-body">{t.payload.refusal ? 'Refused' : 'Answer'}</p>
-                      {t.payload.hidden ? (
-                        <p className="text-body">Answer hidden: it {t.payload.hidden_reason}</p>
-                      ) : (
-                        <pre className="max-h-96 wrap-anywhere whitespace-pre-wrap">{t.payload.refusal ?? json(t.payload.result ?? null)}</pre>
-                      )}
-                    </div>
-                  </details>
-                )}
-              </li>
-            ))}
-          </ol>
-        )}
-      </Card>
       <Card title="Verdict">
         {c.verdict ? (
-          <div className="flex flex-col gap-1 text-sm">
-            <p>
-              <Badge tone={c.verdict === 'attack' ? 'red' : c.verdict === 'benign' ? 'green' : 'amber'}>{verdicts[c.verdict] ?? c.verdict}</Badge>
-            </p>
-            <p className="text-heading">{c.summary}</p>
+          <div className="flex flex-col gap-2 text-sm">
+            {c.kind !== 'review' && (
+              <p>
+                <Badge tone={c.verdict === 'attack' ? 'red' : c.verdict === 'benign' ? 'green' : 'amber'}>{verdicts[c.verdict] ?? c.verdict}</Badge>
+              </p>
+            )}
+            <Paragraphs text={c.summary} lead />
+            {c.needs_you.length > 0 && (
+              <>
+                <p className="font-medium text-heading">Needs you</p>
+                <ul className="ml-5 flex list-disc flex-col gap-1">
+                  {c.needs_you.map((n, i) => {
+                    const r = [...rules, ...(live.data?.rules ?? [])].find((x) => x.id === n.rule);
+                    return (
+                      <li key={i} className="pl-1">
+                        {n.rule &&
+                          (r ? (
+                            <Link to={`/autopilot/cases/${r.case_id}`} className="font-mono underline">
+                              {n.rule}
+                            </Link>
+                          ) : (
+                            <code>{n.rule}</code>
+                          ))}
+                        {n.rule && ': '}
+                        {n.ask}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+            <p className="text-body">{done(proposals)}</p>
+            {c.details && (
+              <details>
+                <summary className="cursor-pointer text-heading">How it decided</summary>
+                <div className="mt-2 flex flex-col gap-2">
+                  <Paragraphs text={c.details} />
+                </div>
+              </details>
+            )}
           </div>
         ) : (
           <p className="text-body">{['queued', 'running'].includes(c.state) ? 'No verdict yet: the case is still open.' : `No verdict: the case ${c.state}.`}</p>
@@ -1111,14 +1124,14 @@ export function AutopilotCase({ id }: { id: number }) {
                   {p.ttl_seconds !== null && <span className="text-body">for {seconds(p.ttl_seconds)} unless renewed</span>}
                 </span>
                 {p.rule.expression && <code className="wrap-anywhere text-body">{p.rule.expression}</code>}
-                <ul className="flex flex-col gap-0.5">
-                  {p.checks.map((x) => (
-                    <li key={x.name} className={x.ok ? 'text-body' : 'text-danger'}>
-                      {x.ok ? 'Passed' : 'Failed'}: {checks[x.name] ?? x.name.replaceAll('_', ' ')}
-                      {x.detail && ` (${x.detail})`}
-                    </li>
-                  ))}
-                </ul>
+                {p.checks.every((x) => x.ok) ? (
+                  <details>
+                    <summary className="cursor-pointer text-body">Passed all {p.checks.length} checks</summary>
+                    <CheckList checks={p.checks} />
+                  </details>
+                ) : (
+                  <CheckList checks={p.checks} />
+                )}
               </li>
             ))}
           </ul>
@@ -1129,6 +1142,77 @@ export function AutopilotCase({ id }: { id: number }) {
           <p className="text-body">This case made no rule.</p>
         ) : (
           rules.map((r) => <RuleActions key={r.id} r={r} history={transitions.filter((t) => t.rule_id === r.id)} />)
+        )}
+      </Card>
+      <Card title="Evidence" intro="What the model cited for each rule it proposed, as it wrote it.">
+        {evidence.length === 0 ? (
+          <p className="text-body">{proposals.length ? 'The proposals cite no evidence.' : 'The model proposed nothing.'}</p>
+        ) : (
+          <details>
+            <summary className="cursor-pointer text-heading">
+              Evidence for {evidence.length} {evidence.length === 1 ? 'proposal' : 'proposals'}
+            </summary>
+            <div className="mt-3">
+              {evidence.map((p) => (
+                <div key={p.id} className="mb-3 flex flex-col gap-1 text-sm last:mb-0">
+                  <p className="text-heading">
+                    <span className="text-body">{p.accepted ? `For ${p.rule_id ?? 'its proposal'}: ` : 'For a refused proposal: '}</span>
+                    {p.rationale}
+                  </p>
+                  <pre className="wrap-anywhere whitespace-pre-wrap">{json(p.evidence)}</pre>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </Card>
+      <Card title="Tool calls" intro="Every call the model made to admin, in order, with what admin answered.">
+        {calls.length === 0 ? (
+          <p className="text-body">No tool calls yet.</p>
+        ) : (
+          <details>
+            <summary className="cursor-pointer text-heading">
+              {calls.length} tool {calls.length === 1 ? 'call' : 'calls'}
+            </summary>
+            <ol className="mt-3 flex flex-col gap-1 text-sm">
+              {calls.map((t) => (
+                <li key={`${t.run_id}-${t.seq}`}>
+                  {t.payload.cut ? (
+                    <p className="rounded-control px-3 py-1.5 text-body shadow-field">
+                      Too large to keep: {t.payload.bytes} bytes, SHA-256 <span className="font-mono wrap-anywhere">{t.payload.sha256}</span>
+                      {runs.length > 1 && `, run ${t.run_id}`}
+                    </p>
+                  ) : (
+                    <details className="rounded-control shadow-field">
+                      <summary className="cursor-pointer px-3 py-1.5">
+                        <span className="font-mono text-heading">{t.payload.tool ?? 'call'}</span>
+                        {t.payload.allowed === false && ' refused'}
+                        <span className="text-body">
+                          , {t.payload.duration_ms ?? 0} ms
+                          {runs.length > 1 && `, run ${t.run_id}`}
+                        </span>
+                      </summary>
+                      <div className="flex flex-col gap-2 border-t border-line p-3">
+                        {/* A hidden connector call has no arguments: its query is part of the answer. */}
+                        {t.payload.arguments !== undefined && (
+                          <>
+                            <p className="text-body">Arguments</p>
+                            <pre className="wrap-anywhere whitespace-pre-wrap">{json(t.payload.arguments)}</pre>
+                          </>
+                        )}
+                        <p className="text-body">{t.payload.refusal ? 'Refused' : 'Answer'}</p>
+                        {t.payload.hidden ? (
+                          <p className="text-body">Answer hidden: it {t.payload.hidden_reason}</p>
+                        ) : (
+                          <pre className="max-h-96 wrap-anywhere whitespace-pre-wrap">{t.payload.refusal ?? json(t.payload.result ?? null)}</pre>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </details>
         )}
       </Card>
       <Card title="Cost" info="Token counts are what the runner reported. At your prices is exact for your price table; the provider's figure is its own estimate.">

@@ -561,13 +561,15 @@ type caseRow struct {
 	RunID      *int64          `json:"run_id"`
 	Verdict    *string         `json:"verdict"`
 	Summary    string          `json:"summary"`
+	NeedsYou   []needsYou      `json:"needs_you"`
+	Details    string          `json:"details"`
 	OpenedBy   string          `json:"opened_by"`
 	CreatedAt  time.Time       `json:"created_at"`
 	ClosedAt   *time.Time      `json:"closed_at"`
 	AblationOf *int64          `json:"ablation_of"`
 }
 
-const caseCols = "id, kind, rule, route_id, anomaly_id, question, brief, state, attempts, lease_until, run_id, verdict, summary, opened_by, created_at, closed_at, ablation_of"
+const caseCols = "id, kind, rule, route_id, anomaly_id, question, brief, state, attempts, lease_until, run_id, verdict, summary, needs_you, details, opened_by, created_at, closed_at, ablation_of"
 
 // casesFor lists the latest cases, on one rule when rule is set. For the
 // run of ablation, an ablation case, it leaves out every ablation and the

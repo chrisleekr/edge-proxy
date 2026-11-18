@@ -31,9 +31,9 @@ Go (version in `go.mod`), Docker, Node 26 for the UI and the autopilot runner, a
 
 | Command | Does |
 |---|---|
-| `make test` | Unit and integration tests with the race detector against real Valkey and Postgres (testcontainers), then the 100% edge coverage gate. Zero-allocation tests for request-path matchers, and per-request allocation ceilings for allowed, RateLimit-header and 429 requests, run here |
+| `make test` | Unit and integration tests against real Valkey and Postgres (testcontainers), with the race detector for edge packages (and admin with `RACE_ADMIN=1`, which the nightly run sets), then the 100% edge coverage gate. Zero-allocation tests for request-path matchers, and per-request allocation ceilings for allowed, RateLimit-header and 429 requests, run here |
 | `make lint` | `go vet`, golangci-lint, shellcheck, and a check that comments and docs don't cite design sections or doc paths |
-| `make fuzz` | Every fuzz target (`FUZZTIME=5m` before merging parser or matcher changes) |
+| `make fuzz` | Every fuzz target (`FUZZTIME=5m` before merging parser or matcher changes). With `BASE=<commit>`, only the targets whose package or its dependencies changed since that commit; CI sets it on PRs and merge requests |
 | `make bench` | Every benchmark, briefly, so they keep compiling and running |
 | `make vuln` | govulncheck |
 | `make ui` | UI lint, typecheck and build, then browser smoke tests against a real admin, SSE and WebSocket through a real edge in Chromium, Firefox and WebKit, and `make screenshots` |
@@ -105,10 +105,10 @@ The browser runs in the pinned `mcr.microsoft.com/playwright` image for `linux/a
 
 | Provider | Runs |
 |---|---|
-| GitHub Actions | `ci.yml` on every PR and push to main; `docs.yml` and `docs-deploy.yml` (GitHub Pages); `nightly.yml` for `load-full`; `release-please.yml` |
-| GitLab CI | The same `scripts/ci` steps in `.gitlab-ci.yml`; `load-full` on schedules. Versions are released on GitHub only; pushes to `main` publish a rolling, amd64-only `latest` to the GitLab registry |
+| GitHub Actions | `ci.yml` on every PR and push to main; `docs.yml` and `docs-deploy.yml` (GitHub Pages); `nightly.yml` for every fuzz target, admin tests with the race detector, and `load-full`; `release-please.yml` |
+| GitLab CI | The same `scripts/ci` steps in `.gitlab-ci.yml`; every fuzz target, admin tests with the race detector, and `load-full` on schedules. Versions are released on GitHub only; pushes to `main` publish a rolling, amd64-only `latest` to the GitLab registry |
 
-On both providers a new commit cancels the older run of the same PR, merge request or branch, `main` included; a started GitLab `publish-latest` still finishes. The image build and the load smoke share one `load` job, so compose reuses the images it just built. GitLab caches Go modules and build output per job, and the `ui` and `autopilot` jobs' npm packages and `ui`'s Playwright browsers; GitHub caches them through `setup-go`, `setup-node` and `actions/cache`.
+On both providers a new commit cancels the older run of the same PR, merge request or branch, `main` included; a started GitLab `publish-latest` still finishes. The image build and the load smoke share one `load` job, so compose reuses the images it just built. GitLab caches Go modules and build output per job, and the `ui` and `autopilot` jobs' npm packages and `ui`'s Playwright browsers; merge request pipelines only read the cache, and branch and scheduled pipelines update it. GitHub caches them through `setup-go`, `setup-node` and `actions/cache`. On PRs, merge requests and pushes, the fuzz job fuzzes only the targets the change can reach: a changed package in a target's dependencies, its seeds, a file a package embeds, or `go.mod` and `go.sum` (which fuzz everything).
 
 ## Release
 

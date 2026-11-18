@@ -1558,3 +1558,211 @@ func TestAutopilotCountStatusesSensor(t *testing.T) {
 		}
 	})
 }
+
+func ruleOutcome(t *testing.T, h *harness, id string) string {
+	t.Helper()
+	var outcome string
+	if err := h.db.QueryRow(t.Context(), "SELECT coalesce(outcome, '') FROM autopilot_rules WHERE id = $1", id).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	return outcome
+}
+
+// unusedSensor has a sensor that matched nothing for max_ttl end unused.
+func unusedSensor(t *testing.T, h *harness, pub, agent *client) string {
+	t.Helper()
+	pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+	id := idleFor(t, h, pub, agent, 0, 0)
+	h.advance(11 * time.Minute)
+	ruleMinutes(h, pub, 61, 1_000, 0, 0, 0, id, "[]")
+	h.tick()
+	return id
+}
+
+// idleFor has a sensor with a 1h ttl and max_ttl live, renewed once at 50
+// minutes because it had not lived max_ttl yet. It then writes an hour of
+// stats with evaluated and capped requests a minute for the rule and runs
+// the tick at 100 minutes, when the renewed ttl is a quarter from its end.
+func idleFor(t *testing.T, h *harness, pub, agent *client, evaluated, capped int64) string {
+	t.Helper()
+	id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+	h.advance(50 * time.Minute)
+	h.tick()
+	if !slices.Contains(h.actions(), "autopilot.renew rule "+id) {
+		t.Fatalf("a sensor live less than max_ttl was not renewed: %v", h.actions())
+	}
+	h.advance(50 * time.Minute)
+	rules := fmt.Sprintf(`[{"id":%q,"evaluated":%d,"capped":%d}]`, id, evaluated, capped)
+	h.putStats(pub.active().Version, 60, 1_000, 0, 0, []int64{1_000}, rules, "[]")
+	h.tick()
+	return id
+}
+
+func renewals(h *harness, id string) int {
+	return len(slices.DeleteFunc(h.actions(), func(a string) bool { return a != "autopilot.renew rule "+id }))
+}
+
+func TestAutopilotIdleSensors(t *testing.T) {
+	t.Run("a sensor that matched nothing for max_ttl is not renewed again and ends unused with its numbers", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := idleFor(t, h, pub, agent, 0, 0)
+		if n := renewals(h, id); n != 1 {
+			t.Fatalf("%d renewals, want 1: %v", n, h.actions())
+		}
+		h.advance(11 * time.Minute)
+		// The window to the expiry at 110 minutes needs every minute from 50 to 109.
+		ruleMinutes(h, pub, 61, 1_000, 0, 0, 0, id, "[]")
+		h.tick()
+		if st, o := ruleState(t, h, id), ruleOutcome(t, h, id); st != "expired" || o != "unused" {
+			t.Fatalf("rule %s outcome %q", st, o)
+		}
+		if got := lastReason(t, h, id, "expired"); got != "it matched no requests before its expiry" {
+			t.Fatalf("reason %q", got)
+		}
+		var minutes, window, matches int64
+		if err := h.db.QueryRow(t.Context(), `SELECT (numbers->>'stats_minutes')::bigint, (numbers->>'window_minutes')::bigint, (numbers->>'matches')::bigint FROM autopilot_transitions WHERE rule_id = $1 AND to_state = 'expired'`, id).Scan(&minutes, &window, &matches); err != nil || minutes != 60 || window != 60 || matches != 0 {
+			t.Fatalf("transition numbers: %d stats minutes of %d, %d matches, err %v", minutes, window, matches, err)
+		}
+		var audited, auditedWindow int64
+		if err := h.db.QueryRow(t.Context(), `SELECT (details->'numbers'->>'stats_minutes')::bigint, (details->'numbers'->>'window_minutes')::bigint FROM audit_events WHERE action = 'autopilot.expire' AND target = $1`, "rule "+id).Scan(&audited, &auditedWindow); err != nil || audited != 60 || auditedWindow != 60 {
+			t.Fatalf("audit numbers: %d stats minutes of %d, err %v", audited, auditedWindow, err)
+		}
+	})
+	t.Run("a sensor whose stats miss a minute of the window, as during an ingest outage, is renewed and not ended unused", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+		h.advance(50 * time.Minute)
+		h.tick()
+		h.advance(50 * time.Minute)
+		ruleMinutes(h, pub, 60, 1_000, 0, 0, 0, id, "[]")
+		if _, err := h.db.Exec(t.Context(), "DELETE FROM edge_stats_minute WHERE minute = $1", h.now().UTC().Truncate(time.Minute).Add(-30*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		h.tick()
+		if n := renewals(h, id); n != 2 {
+			t.Fatalf("%d renewals, want 2: %v", n, h.actions())
+		}
+		if st, o := ruleState(t, h, id), ruleOutcome(t, h, id); st != "observing" || o == "unused" {
+			t.Fatalf("rule %s outcome %q", st, o)
+		}
+	})
+	t.Run("a sensor live less than max_ttl that matched nothing is still renewed", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+		h.advance(50 * time.Minute)
+		ruleMinutes(h, pub, 30, 1_000, 0, 0, 0, id, "[]")
+		h.tick()
+		if renewals(h, id) != 1 {
+			t.Fatalf("audit %v", h.actions())
+		}
+	})
+	t.Run("a sensor live for max_ttl with no stats in its window is renewed", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+		h.advance(50 * time.Minute)
+		h.tick()
+		h.advance(50 * time.Minute)
+		h.tick()
+		if n := renewals(h, id); n != 2 {
+			t.Fatalf("%d renewals, want 2: %v", n, h.actions())
+		}
+	})
+	t.Run("a sensor that matched requests is renewed", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := idleFor(t, h, pub, agent, 5, 0)
+		if n := renewals(h, id); n != 2 {
+			t.Fatalf("%d renewals, want 2: %v", n, h.actions())
+		}
+	})
+	t.Run("a sensor whose matches were all capped is renewed", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_ttl": "1h", "default_ttl": "1h"})
+		id := idleFor(t, h, pub, agent, 0, 5)
+		if n := renewals(h, id); n != 2 {
+			t.Fatalf("%d renewals, want 2: %v", n, h.actions())
+		}
+	})
+}
+
+func TestAutopilotSweepRepeat(t *testing.T) {
+	// retiredIn has a sensor live, then retires it from a case of kind.
+	retiredIn := func(t *testing.T, h *harness, pub, agent *client, kind string) {
+		t.Helper()
+		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
+		var c claimed
+		var cs *mcp.ClientSession
+		if kind == "review" {
+			// liveRule's tick queued it.
+			c = claimKind(t, agent, "review")
+			cs = h.mcpSession(agentToken, c.RunID)
+		} else {
+			c, cs = agentCase(t, h, pub, agent)
+		}
+		if p := propose(t, cs, map[string]any{"action": "retire", "rule_id": id, "rationale": "Never fired in a day"}); !p.Accepted {
+			t.Fatalf("proposal %+v", p)
+		}
+		status(t, agent.result(c.CaseID, resultBody(c.RunID, "benign", usage{Input: 1}, nil, 0)), 204)
+		h.tick()
+		if o := ruleOutcome(t, h, id); o != "retired_by_review" {
+			t.Fatalf("outcome %q", o)
+		}
+	}
+	retiredByReview := func(t *testing.T, h *harness, pub, agent *client) {
+		t.Helper()
+		retiredIn(t, h, pub, agent, "review")
+	}
+	sweepProposes := func(t *testing.T, h *harness, agent *client) proposed {
+		t.Helper()
+		h.advance(time.Hour) // the next hour's sweep
+		agent.seen()         // a runner is connected
+		h.tick()
+		return propose(t, h.mcpSession(agentToken, claimKind(t, agent, "sweep").RunID), proposal("add_sensor", "login-watch", loginRule()))
+	}
+	t.Run("a sweep does not propose a sensor that ended unused", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		unusedSensor(t, h, pub, agent)
+		if p := sweepProposes(t, h, agent); p.Accepted || !slices.Contains(p.Reasons, "sweep_repeat") {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
+	t.Run("a sweep does not propose a sensor a review retired", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		retiredByReview(t, h, pub, agent)
+		if p := sweepProposes(t, h, agent); p.Accepted || !slices.Contains(p.Reasons, "sweep_repeat") {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
+	t.Run("a sweep may propose a sensor an investigation retired", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		retiredIn(t, h, pub, agent, "investigate")
+		if p := sweepProposes(t, h, agent); !p.Accepted {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
+	t.Run("an investigation may propose a sensor a review retired, looser", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		retiredByReview(t, h, pub, agent)
+		_, cs := agentCase(t, h, pub, agent)
+		in := proposal("add_sensor", "login-watch", loginRule())
+		in["rule"].(map[string]any)["limit"] = 100
+		if p := propose(t, cs, in); !p.Accepted {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
+	t.Run("a sweep may propose it once max_lifetime has passed since it ended", func(t *testing.T) {
+		h, pub, agent := autopilotHarness(t)
+		pub.setAutopilot(map[string]any{"max_lifetime": "25h"})
+		unusedSensor(t, h, pub, agent)
+		h.advance(26 * time.Hour)
+		agent.seen()
+		h.tick()
+		if p := propose(t, h.mcpSession(agentToken, claimKind(t, agent, "sweep").RunID), proposal("add_sensor", "login-watch", loginRule())); !p.Accepted {
+			t.Fatalf("proposal %+v", p)
+		}
+	})
+}

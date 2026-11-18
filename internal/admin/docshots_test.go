@@ -176,7 +176,12 @@ func TestDocScreenshots(t *testing.T) {
 				}
 			}
 			body := resultBody(c.RunID, "attack", u, &cost, 0)
-			body["summary"] = "Many failed logins per address from a few networks, well above the usual rate"
+			body["summary"] = "Many failed logins per address from a few networks, well above the usual rate."
+			body["needs_you"] = []map[string]string{
+				{"rule": p.RuleID, "ask": "Decide whether to let the new rule block after its watch period."},
+				{"rule": "", "ask": "Confirm no partner is retrying logins after a deploy."},
+			}
+			body["details"] = "Failed logins rose eightfold in ten minutes, from a few addresses each over the limit."
 			status(t, agent.result(c.CaseID, body), http.StatusNoContent)
 			return p.RuleID, ids
 		}

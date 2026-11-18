@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -29,16 +30,19 @@ const fakeClaudeCredential = "sk-ant-oat01-fake-runner-smoke-credential-01234567
 // runnerPlan is what the scripted adapter (autopilot/test/scripted.ts,
 // read from AUTOPILOT_SCRIPT) does in place of a model. It makes each step
 // as one MCP call to admin as the run, in order, reporting tool_use and
-// tool_result events for each, and answers with the verdict, the summary
-// and the proposal_id of every propose call admin accepted. The runner then
+// tool_result events for each, and answers with the verdict, the summary,
+// needs_you, the details and the proposal_id of every propose call admin
+// accepted. The runner then
 // adds a verdict event and posts an ok result with those proposals, or,
 // for an answer without a verdict, an error result with invalid_output.
 // With hang set it calls nothing and waits until the run is aborted.
 type runnerPlan struct {
-	Steps   []planStep `json:"steps,omitempty"`
-	Verdict string     `json:"verdict,omitempty"`
-	Summary string     `json:"summary,omitempty"`
-	Hang    bool       `json:"hang,omitempty"`
+	Steps    []planStep          `json:"steps,omitempty"`
+	Verdict  string              `json:"verdict,omitempty"`
+	Summary  string              `json:"summary,omitempty"`
+	NeedsYou []map[string]string `json:"needs_you,omitempty"`
+	Details  string              `json:"details,omitempty"`
+	Hang     bool                `json:"hang,omitempty"`
 }
 
 type planStep struct {
@@ -193,7 +197,8 @@ func TestAutopilotRunner(t *testing.T) {
 
 	t.Run("a scripted attack case closes done with the proposal it made", func(t *testing.T) {
 		h, pub, _ := autopilotHarness(t)
-		plan := runnerPlan{Verdict: "attack", Summary: "Many POSTs to /login from one address", Steps: []planStep{
+		needs := []map[string]string{{"rule": "", "ask": "Confirm the partner."}}
+		plan := runnerPlan{Verdict: "attack", Summary: "Many POSTs to /login from one address", NeedsYou: needs, Details: "Failed logins rose eightfold.", Steps: []planStep{
 			{"get_case", map[string]any{}},
 			{"validate_rule", map[string]any{"rule": loginRule()}},
 			{"propose", proposal("add_sensor", "login-watch", loginRule())},
@@ -207,6 +212,12 @@ func TestAutopilotRunner(t *testing.T) {
 		within(t, 30*time.Second, "the case closes", func() bool { s, _ := caseIs(t, h, id); return s != "queued" && s != "running" })
 		if s, v := caseIs(t, h, id); s != "done" || v != "attack" {
 			t.Fatalf("case %s verdict %q", s, v)
+		}
+		var storedNeeds []map[string]string
+		var storedDetails string
+		if err := h.db.QueryRow(t.Context(), "SELECT needs_you, details FROM autopilot_cases WHERE id = $1", id).Scan(&storedNeeds, &storedDetails); err != nil ||
+			!reflect.DeepEqual(storedNeeds, needs) || storedDetails != "Failed logins rose eightfold." {
+			t.Fatalf("stored needs_you %v details %q, err %v", storedNeeds, storedDetails, err)
 		}
 		runs := runsOf(t, h, id)
 		if len(runs) != 1 || runs[0].Status != "ok" {

@@ -160,15 +160,25 @@ func smokeRunner(t *testing.T, h *harness) {
 		}
 		_ = json.Unmarshal(c.Brief, &brief)
 		verdict := "benign"
+		var ruleID string
 		if brief.Rule != nil {
 			verdict = "attack"
-			if err := smokePropose(ctx, h, c.RunID); err != nil {
+			ruleID, err = smokePropose(ctx, h, c.RunID)
+			if err != nil {
 				t.Errorf("case %d: %v", c.CaseID, err)
 			}
 		}
 		cost := 0.42
-		resp, err = post(fmt.Sprintf("/v1/autopilot/cases/%d/result", c.CaseID),
-			resultBody(c.RunID, verdict, usage{Input: 12_000, Output: 900, CacheRead: 30_000, CacheWrite: 4_000}, &cost, 0))
+		body := resultBody(c.RunID, verdict, usage{Input: 12_000, Output: 900, CacheRead: 30_000, CacheWrite: 4_000}, &cost, 0)
+		if ruleID != "" {
+			// One ask naming the rule the case made, one about the whole case, for the Verdict card.
+			body["needs_you"] = []map[string]string{
+				{"rule": ruleID, "ask": "Approve blocking once it has logged for a day"},
+				{"rule": "", "ask": "Tell the login team about the password guessing"},
+			}
+			body["details"] = "The login rule stayed over its limit for one client all hour, so the rule counts failed logins per address."
+		}
+		resp, err = post(fmt.Sprintf("/v1/autopilot/cases/%d/result", c.CaseID), body)
 		if err == nil {
 			_ = resp.Body.Close()
 		}
@@ -185,40 +195,47 @@ func smokeRunner(t *testing.T, h *harness) {
 // smokePropose reads the case, proposes an enforce rule on POSTs to /login
 // per client IP and records a note citing the login rule's stats, through
 // admin's MCP server as the run.
-func smokePropose(ctx context.Context, h *harness, run int64) error {
+func smokePropose(ctx context.Context, h *harness, run int64) (string, error) {
 	hc := *h.srv.Client()
 	hc.Transport = headerTransport{base: h.srv.Client().Transport, headers: map[string]string{"Authorization": "Bearer " + agentToken, "X-Autopilot-Run": fmt.Sprint(run)}}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "smoke-runner", Version: "v0"}, nil).
 		Connect(ctx, &mcp.StreamableClientTransport{Endpoint: h.srv.URL + "/v1/mcp", HTTPClient: &hc, DisableStandaloneSSE: true}, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = cs.Close() }()
 	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_case", Arguments: map[string]any{}}); err != nil {
-		return err
+		return "", err
 	}
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "propose", Arguments: proposal("enforce", "login-stuffing", loginRule())})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if res.IsError {
-		return fmt.Errorf("propose refused: %v", res.Content)
+		return "", fmt.Errorf("propose refused: %v", res.Content)
+	}
+	var made struct {
+		RuleID string `json:"rule_id"`
+	}
+	pb, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(pb, &made); err != nil || made.RuleID == "" {
+		return "", fmt.Errorf("propose answered %s", pb)
 	}
 	// A note on what the stats showed, for the Memory pages.
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_rule_stats", Arguments: map[string]any{"rule": "login", "minutes": 60}})
 	if err != nil {
-		return err
+		return "", err
 	}
 	var read struct {
 		EvidenceID int64 `json:"evidence_id"`
 	}
 	if res.IsError {
 		b, _ := json.Marshal(res.Content)
-		return fmt.Errorf("get_rule_stats refused: %s", b)
+		return "", fmt.Errorf("get_rule_stats refused: %s", b)
 	}
 	b, _ := json.Marshal(res.StructuredContent)
 	if err := json.Unmarshal(b, &read); err != nil || read.EvidenceID == 0 {
-		return fmt.Errorf("get_rule_stats answered %s", b)
+		return "", fmt.Errorf("get_rule_stats answered %s", b)
 	}
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "record_learning", Arguments: map[string]any{
 		"kind": "attack_signature", "basis": "observed", "scope": map[string]any{"kind": "rule", "rule": "login"},
@@ -229,11 +246,11 @@ func smokePropose(ctx context.Context, h *harness, run int64) error {
 		"rationale": "The login rule's counts show it over the limit every minute",
 	}})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if res.IsError {
 		b, _ := json.Marshal(res.Content)
-		return fmt.Errorf("record_learning refused: %s", b)
+		return "", fmt.Errorf("record_learning refused: %s", b)
 	}
-	return nil
+	return made.RuleID, nil
 }

@@ -628,7 +628,7 @@ func (s *Server) tool(ctx context.Context, name string, call *mcpCall, args json
 		if err != nil {
 			return nil, err
 		}
-		c, err := s.policy(ctx, s.db, set, in, notes)
+		c, err := s.policy(ctx, s.db, set, in, call.kind, notes)
 		if err != nil {
 			return nil, err
 		}
@@ -818,17 +818,28 @@ type modelRule struct {
 	PathPrefix map[string]any `json:"path_prefix"`
 }
 
-// modelCase is a case as the model reads it: an earlier run's summary may
-// repeat what a client wrote.
+// modelCase is a case as the model reads it: an earlier run's summary,
+// details and asks may repeat what a client wrote.
 type modelCase struct {
 	caseRow
-	Summary map[string]any `json:"summary"`
+	Summary  map[string]any `json:"summary"`
+	Details  map[string]any `json:"details"`
+	NeedsYou []modelNeed    `json:"needs_you"`
+}
+
+type modelNeed struct {
+	Rule map[string]any `json:"rule"`
+	Ask  map[string]any `json:"ask"`
 }
 
 func modelCases(cs []caseRow) []modelCase {
 	out := []modelCase{}
 	for _, c := range cs {
-		out = append(out, modelCase{caseRow: c, Summary: untrusted(c.Summary)})
+		needs := []modelNeed{}
+		for _, n := range c.NeedsYou {
+			needs = append(needs, modelNeed{Rule: untrusted(n.Rule), Ask: untrusted(n.Ask)})
+		}
+		out = append(out, modelCase{caseRow: c, Summary: untrusted(c.Summary), Details: untrusted(c.Details), NeedsYou: needs})
 	}
 	return out
 }
@@ -955,7 +966,7 @@ func (s *Server) propose(ctx context.Context, call *mcpCall, in proposeIn) (*pro
 		if err != nil {
 			return err
 		}
-		c, err := s.policy(ctx, tx, set, in, notes)
+		c, err := s.policy(ctx, tx, set, in, call.kind, notes)
 		if err != nil {
 			return err
 		}
