@@ -530,12 +530,13 @@ func ban(ip string, start time.Time, d time.Duration) edge.BanReport {
 }
 
 type banBody struct {
-	IP          string `json:"ip"`
-	Rule        string `json:"rule"`
-	Host        string `json:"host"`
-	Path        string `json:"path"`
-	Edge        string `json:"edge"`
-	LiftPending bool   `json:"lift_pending"`
+	IP          string    `json:"ip"`
+	Rule        string    `json:"rule"`
+	Host        string    `json:"host"`
+	Path        string    `json:"path"`
+	Edge        string    `json:"edge"`
+	EndsAt      time.Time `json:"ends_at"`
+	LiftPending bool      `json:"lift_pending"`
 }
 
 func bans(t *testing.T, c *client) []banBody {
@@ -681,6 +682,31 @@ func TestLateReportOfALiftedBanIsListedAsLifted(t *testing.T) {
 	got := pending()
 	if len(got) != 3 || !got["edge-a"] || got["edge-b"] || got["edge-c"] {
 		t.Fatalf("lift pending by edge: %v", got)
+	}
+}
+
+// An edge's reports can reach admin out of order. A report of an earlier ban
+// never replaces the row of one that started later.
+func TestLateReportOfAnEarlierBanDoesNotReplaceTheNewerBan(t *testing.T) {
+	h, pub, e, _ := listHarness(t)
+	now := h.now()
+	status(t, report(e, ban("203.0.113.5", now.Add(10*time.Second), 24*time.Hour)), http.StatusOK)
+	status(t, report(e, ban("203.0.113.5", now, time.Hour)), http.StatusOK)
+	got := bans(t, pub)
+	if want := now.Add(10*time.Second + 24*time.Hour); len(got) != 1 || !got[0].EndsAt.Equal(want.Truncate(time.Millisecond)) {
+		t.Fatalf("bans %+v, want one ending %v", got, want)
+	}
+}
+
+// An edge whose clock runs ahead can report a ban that starts after a lift
+// made now. The edge keeps that ban (it only lifts bans that started before
+// the lift), so the list must not show it as lifted.
+func TestLiftDoesNotMarkABanThatStartedAfterIt(t *testing.T) {
+	h, pub, e, _ := listHarness(t)
+	status(t, report(e, ban("203.0.113.5", h.now().Add(30*time.Second), time.Hour)), http.StatusOK)
+	status(t, pub.do("POST", "/api/bans/lift", map[string]string{"ip": "203.0.113.5"}), http.StatusNoContent)
+	if got := bans(t, pub); len(got) != 1 || got[0].LiftPending {
+		t.Fatalf("bans %+v", got)
 	}
 }
 

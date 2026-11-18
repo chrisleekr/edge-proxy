@@ -373,32 +373,59 @@ func TestBans(t *testing.T) {
 		}
 	})
 
-	t.Run("a late request from an older version does not overwrite a newer version's ban", func(t *testing.T) {
+	t.Run("a late report of a lifted ban does not mark the same rule's next ban", func(t *testing.T) {
+		b := NewBans(100)
+		first, _, _ := b.Add(v4, Ban{Rule: "trap", Start: 0, End: 100_000}, live) // queued, not yet marked
+		b.Lift(v4, 50)
+		b.Add(v4, Ban{Rule: "trap", Start: 100, End: 100_100}, live) // its report was dropped
+		b.MarkReported(v4, first)                                    // the first ban's mark lands late
+		if _, report, _ := b.Add(v4, Ban{Rule: "trap", Start: 200, End: 100_200}, live); !report {
+			t.Fatal("renewal of a ban never reported was not offered")
+		}
+	})
+
+	t.Run("ban start order decides which ban is kept", func(t *testing.T) {
 		tests := []struct {
 			name       string
 			old, x     Ban
 			live       map[string]bool
 			wantRule   string
+			wantEnd    int64
 			wantReport bool
 		}{
-			{"newer version's ban, rule not live in the older version", Ban{Rule: "new", Version: 2, Start: 0, End: 9000}, Ban{Rule: "old", Version: 1, Start: 5, End: 20000}, map[string]bool{"old": true}, "new", false},
-			{"newer version's ban, older one is longer and live", Ban{Rule: "new", Version: 2, Start: 0, End: 9000}, Ban{Rule: "new", Version: 1, Start: 5, End: 20000}, live, "new", false},
-			{"older version's dead ban is replaced by a newer version's trap", Ban{Rule: "old", Version: 1, Start: 0, End: 9000}, Ban{Rule: "new", Version: 2, Start: 5, End: 2000}, map[string]bool{"new": true}, "new", true},
-			{"ended ban of a newer version is replaced", Ban{Rule: "new", Version: 2, Start: 0, End: 100}, Ban{Rule: "old", Version: 1, Start: 500, End: 600}, map[string]bool{"old": true}, "old", true},
-			{"same version keeps the longest live ban", Ban{Rule: "day", Version: 1, Start: 0, End: 9000}, Ban{Rule: "minute", Version: 1, Start: 5, End: 2000}, live, "day", false},
+			{"a canary ban is replaced when the client trips the stable version's trap after the canary ends", Ban{Rule: "canary-trap", Start: 0, End: 9000}, Ban{Rule: "stable-trap", Start: 5, End: 20000}, map[string]bool{"stable-trap": true}, "stable-trap", 20000, true},
+			{"a request that started before the stored ban does not replace it", Ban{Rule: "short", Start: 10, End: 2000}, Ban{Rule: "long", Start: 5, End: 20000}, map[string]bool{"short": true, "long": true}, "short", 2000, false},
+			{"a request that started before an ended stored ban does not replace it", Ban{Rule: "short", Start: 10, End: 20}, Ban{Rule: "long", Start: 5, End: 20000}, map[string]bool{"short": true, "long": true}, "short", 20, false},
+			{"same start keeps the longest live ban", Ban{Rule: "day", Start: 5, End: 9000}, Ban{Rule: "minute", Start: 5, End: 2000}, map[string]bool{"day": true, "minute": true}, "day", 9000, false},
 		}
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
 				b := NewBans(100)
-				b.Add(v4, tc.old, live)
+				b.Add(v4, tc.old, map[string]bool{tc.old.Rule: true})
 				cur, report, ok := b.Add(v4, tc.x, tc.live)
-				if !ok || report != tc.wantReport || cur.Rule != tc.wantRule {
+				if !ok || report != tc.wantReport || cur.Rule != tc.wantRule || cur.End != tc.wantEnd {
 					t.Fatalf("cur=%+v report=%v ok=%v", cur, report, ok)
 				}
-				if got, _ := b.Get(v4, 0); got.Rule != tc.wantRule {
-					t.Fatalf("stored %+v, want rule %s", got, tc.wantRule)
+				if got, _ := b.Get(v4, 0); got.Rule != tc.wantRule || got.End != tc.wantEnd {
+					t.Fatalf("stored %+v, want %s ending %d", got, tc.wantRule, tc.wantEnd)
 				}
 			})
+		}
+	})
+
+	t.Run("a dropped report is offered again by a trip in the same millisecond", func(t *testing.T) {
+		b := NewBans(100)
+		x := Ban{Rule: "trap", Start: 0, End: 3_600_000}
+		if _, report, _ := b.Add(v4, x, live); !report {
+			t.Fatal("first ban not reported")
+		}
+		cur, report, _ := b.Add(v4, x, live) // queue was full: not marked
+		if !report {
+			t.Fatal("same-millisecond trip after a dropped report was not offered")
+		}
+		b.MarkReported(v4, cur)
+		if _, report, _ := b.Add(v4, x, live); report {
+			t.Fatal("same-millisecond trip after a queued report was offered again")
 		}
 	})
 

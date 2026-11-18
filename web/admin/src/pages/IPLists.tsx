@@ -209,7 +209,7 @@ function Bans({ canManage }: { canManage: boolean }) {
         {!q.data && !q.error && <Pending error={undefined} />}
         {q.data && rows.length === 0 && <p className="text-body">No address is banned.</p>}
         {rows.length > 0 && (
-          <Table head={['IP', 'Rule', 'Tripped on', 'Since', 'Until', 'Edge', '']}>
+          <Table head={['IP', 'Rule', 'Tripped on', 'Last tripped', 'Until', 'Edge', '']}>
             {rows.map((b) => (
               <tr key={`${b.edge}/${b.ip}`} className="align-top">
                 <td className="font-mono">{b.ip}</td>

@@ -225,17 +225,19 @@ func (p *Penalties) Sweep(now int64) { p.t.sweep(now) }
 // Len counts cached penalties, for metrics.
 func (p *Penalties) Len() int { return p.t.len() }
 
-// Ban is one banned client: the config rule ID that set it, the config
-// version that recorded it, when it started and ends in Unix milliseconds, and
-// the host and path of the request that tripped the rule, for the access log.
+// Ban is one banned client: the config rule ID that set it, when it started
+// (the tripping request's arrival) and ends in Unix milliseconds, and the host
+// and path of the request that tripped the rule, for the access log.
 // Reported is the End last queued for admin (see MarkReported), so renewals
-// are reported once per banReportEvery, not per request.
+// are reported once per banReportEvery, not per request. Gen is the Start of
+// the first ban of this run of same-rule renewals, so a report of an earlier
+// ban, lifted or replaced since, is never taken for this one's.
 type Ban struct {
 	Rule       string
-	Version    int64
 	Start, End int64
 	Host, Path string
 	Reported   int64
+	Gen        int64
 }
 
 // banReportEvery is how far a renewal must move End past the last reported
@@ -274,35 +276,37 @@ func (b *Bans) Get(ip netip.Addr, now int64) (Ban, bool) {
 	return x, x.End > now
 }
 
-// Add records x and returns the ban now in force. A ban that has not ended and
-// was recorded by a newer config version than x always stays: a request pinned
-// to an older version that runs late must not overwrite it. Otherwise a ban
-// counts only while it has not ended and its rule is in live (the client's
-// pinned version); a dead one is replaced even by a shorter x, as it is not
-// enforced. A live ban that ends no earlier than x stays, so a short trap never
-// cuts a long ban; otherwise x replaces it. report says whether the caller
-// should queue cur for admin: a new or different-rule ban always, a renewal of
-// the same rule once End has moved banReportEvery past the last reported End.
-// Add does not advance Reported: the caller calls MarkReported once the queue
-// accepts, so a dropped report is offered again on the next trip. ok is false
-// when a full table refuses a new client: it is then not banned (fail open)
-// and the caller counts the drop.
+// Add records x and returns the ban now in force. A stored ban that started
+// after x's request arrived always stays, ended or not: a slow request must not
+// replace or shorten a ban recorded after it began, and a stored Start never
+// moves backwards. Otherwise a ban counts only while it has not ended and its
+// rule is in live (the client's pinned version); a dead one is replaced even by
+// a shorter x, as it is not enforced. A live ban that ends no earlier than x
+// stays, so a short trap never cuts a long ban; otherwise x replaces it. report
+// says whether the caller should queue cur for admin: a new or different-rule
+// ban always, a renewal of the same rule once End has moved banReportEvery past
+// the last reported End, and a kept ban whose End was never queued. Add does not
+// advance Reported: the caller calls MarkReported once the queue accepts, so a
+// dropped report is offered again on the next trip. ok is false when a full
+// table refuses a new client: it is then not banned (fail open) and the caller
+// counts the drop.
 // Host and path are copied, so the entry never keeps the request's buffers.
 func (b *Bans) Add(ip netip.Addr, x Ban, live map[string]bool) (cur Ban, report, ok bool) {
 	cur, ok = b.t.upsert(BanKey(ip), func(old Ban, found bool) (Ban, bool) {
 		report = true
+		x.Gen = x.Start
+		if found && old.Start > x.Start {
+			report = old.End-old.Reported >= banReportEvery
+			return old, false
+		}
 		if found && old.End > x.Start {
-			if old.Version > x.Version {
-				report = false
-				return old, false
-			}
 			if live[old.Rule] {
 				if old.End >= x.End {
-					report = false
+					report = old.End-old.Reported >= banReportEvery
 					return old, false
 				}
 				if old.Rule == x.Rule {
-					x.Reported = old.Reported
+					x.Reported, x.Gen = old.Reported, old.Gen
 					report = x.End-old.Reported >= banReportEvery
 				}
 			}
@@ -314,14 +318,15 @@ func (b *Bans) Add(ip netip.Addr, x Ban, live map[string]bool) (cur Ban, report,
 }
 
 // MarkReported records that a report of r, the ban on ip, was queued. It
-// marks only a ban of r's rule: a late report of a ban another rule has since
-// replaced must not stand in for that ban's own report. It never moves
-// Reported backwards and does nothing if the ban is gone or ends before r.
+// marks only a renewal of r itself (same rule and Gen): a late report of a ban
+// that was lifted or replaced since must not stand in for the new ban's own
+// report. It never moves Reported backwards and does nothing if the ban is
+// gone or ends before r.
 // Trips between Add and MarkReported may queue a duplicate report; admin
 // upserts, so that is harmless.
 func (b *Bans) MarkReported(ip netip.Addr, r Ban) {
 	b.t.upsert(BanKey(ip), func(old Ban, found bool) (Ban, bool) {
-		if !found || old.Rule != r.Rule || old.End < r.End || old.Reported >= r.End {
+		if !found || old.Rule != r.Rule || old.Gen != r.Gen || old.End < r.End || old.Reported >= r.End {
 			return old, false
 		}
 		old.Reported = r.End

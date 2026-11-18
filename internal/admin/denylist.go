@@ -501,7 +501,7 @@ func (s *Server) liftBan(w http.ResponseWriter, r *http.Request, p *principal) e
 		if _, err := tx.Exec(ctx, "INSERT INTO ban_lifts (ip, lifted_at, actor) VALUES ($1, $2, $3)", key, now, p.actor); err != nil {
 			return admindb.Event{}, err
 		}
-		_, err := tx.Exec(ctx, "UPDATE bans SET lifted_at = $2 WHERE ip = $1 AND ends_at > $2", key, now)
+		_, err := tx.Exec(ctx, "UPDATE bans SET lifted_at = $2 WHERE ip = $1 AND started_at < $2 AND ends_at > $2", key, now)
 		return admindb.Event{Action: "ban.lifted", Target: key}, err
 	})
 	if err != nil {
@@ -513,8 +513,9 @@ func (s *Server) liftBan(w http.ResponseWriter, r *http.Request, p *principal) e
 
 // recordBans upserts an edge's reported bans: a renewal updates the row. A
 // ban is marked lifted by the latest lift of its address after the ban
-// started, whether the lift came before or after this report. Applied in
-// order, so the last report of an address wins.
+// started, whether the lift came before or after this report. A report never
+// replaces a row whose ban started later, so a late report of an earlier ban
+// is ignored; reports with the same start apply in arrival order.
 func (s *Server) recordBans(ctx context.Context, replica string, bans []edge.BanReport) error {
 	if len(bans) == 0 {
 		return nil
@@ -524,7 +525,8 @@ func (s *Server) recordBans(ctx context.Context, replica string, bans []edge.Ban
 		b.Queue(`INSERT INTO bans (replica, ip, rule, host, path, started_at, ends_at, lifted_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT max(lifted_at) FROM ban_lifts WHERE ip = $2 AND lifted_at > $6))
 			ON CONFLICT (replica, ip) DO UPDATE SET rule = $3, host = $4, path = $5, started_at = $6, ends_at = $7,
-				lifted_at = (SELECT max(lifted_at) FROM ban_lifts WHERE ip = $2 AND lifted_at > $6)`,
+				lifted_at = (SELECT max(lifted_at) FROM ban_lifts WHERE ip = $2 AND lifted_at > $6)
+			WHERE bans.started_at <= EXCLUDED.started_at`,
 			replica, x.IP, x.Rule, x.Host, x.Path, time.UnixMilli(x.Start), time.UnixMilli(x.End))
 	}
 	res := s.edgeDB.SendBatch(ctx, &b)
