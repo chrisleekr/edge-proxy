@@ -93,6 +93,7 @@ interface Flow {
       upstream_timeout: string;
       ratelimit_headers: boolean;
       block: string;
+      ban?: string;
     };
   };
   rules: {
@@ -110,6 +111,7 @@ const decisionWords: Record<string, string> = {
   allow: 'Forwarded to the upstream',
   rate_limited: 'Blocked by a rate limit rule',
   blocked: 'Blocked by an access rule',
+  banned: 'Refused: the client IP is banned on this edge by an access rule that sets a ban',
   would_block: 'Forwarded; a log only access rule would block it',
   would_limit: 'Forwarded; a log only rate limit rule would limit it',
   backstop: 'Blocked by the per-edge backstop',
@@ -1066,7 +1068,10 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
       title: 'Block',
       body:
         s.block === 'block' ? (
-          <>Access rule {blocker} answers this request with 403.</>
+          <>
+            Access rule {blocker} answers this request with 403
+            {s.ban ? ` and bans the client IP on that edge for ${s.ban.replace(/(\D)0s$/, '$1').replace(/(\D)0m$/, '$1')}, on every host` : ''}.
+          </>
         ) : s.block === 'log' ? (
           <>Only logged as one access rule {blocker} would block; it goes on to the next steps.</>
         ) : flow.result.allowlist ? (
@@ -1074,7 +1079,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
         ) : (
           'Not blocked: no access rule that matches the sample sets block.'
         ),
-      seen: [share(d.blocked) && `${share(d.blocked)} were blocked`, share(d.would_block) && `${share(d.would_block)} would be blocked by a log only rule`].filter(Boolean).join('; ') || undefined,
+      seen: [share(d.blocked) && `${share(d.blocked)} were blocked`, share(d.banned) && `${share(d.banned)} were refused because the client IP was banned`, share(d.would_block) && `${share(d.would_block)} would be blocked by a log only rule`].filter(Boolean).join('; ') || undefined,
     },
     {
       title: 'Backstop',

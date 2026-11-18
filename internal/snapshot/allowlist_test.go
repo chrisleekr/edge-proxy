@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -240,5 +241,88 @@ func TestBrowserFloorCompilesAndAcceptsTheSignal(t *testing.T) {
 	}
 	if got.ChromiumFloor != 130 || got.FirefoxFloor != 128 {
 		t.Fatalf("floors %d and %d", got.ChromiumFloor, got.FirefoxFloor)
+	}
+}
+
+// A ban came with schema 9. A policy of any schema may set it and then needs
+// edges that read schema 9.
+func TestBanNeedsSchema9Edges(t *testing.T) {
+	older := validConfig()
+	older.Schema = 8
+	cases := []struct {
+		name   string
+		config *Config
+		ban    *Duration
+		want   int
+	}{
+		{"schema 8 policy without a ban", older, nil, 8},
+		{"schema 8 policy with a ban", older, new(dur("10m")), 9},
+		{"schema 1 policy with a ban", olderConfig(1), new(dur("10m")), 9},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := *tc.config
+			c.ConfigRules = append(slices.Clone(c.ConfigRules), ConfigRule{ID: "trap", Expression: mustParse(`starts_with(http.request.uri.path, "/wp-")`), Settings: Settings{Block: new("block"), Ban: tc.ban}})
+			got, _, errs := Compile(&c, testDeployment)
+			if errs != nil {
+				t.Fatal(expr.Issues(errs))
+			}
+			if got.NeedsSchema != tc.want {
+				t.Fatalf("needs schema %d, want %d", got.NeedsSchema, tc.want)
+			}
+		})
+	}
+}
+
+// client.denylisted came with schema 10 and client.ip_lists with schema 11. A
+// policy of any schema may read either and then needs edges that read it.
+func TestIPListsFieldNeedsSchema11Edges(t *testing.T) {
+	older := validConfig()
+	older.Schema = 9
+	cases := []struct {
+		name   string
+		config *Config
+		expr   string
+		want   int
+	}{
+		{"schema 9 policy without the field", older, `starts_with(http.request.uri.path, "/wp-")`, 9},
+		{"schema 9 policy reading the field", older, `client.ip_lists in {"aws"} and not ssl`, 11},
+		{"schema 1 policy reading the field", olderConfig(1), `client.ip_lists in {"aws" "azure"}`, 11},
+		{"schema 9 policy reading client.denylisted", older, `client.denylisted and not ssl`, 10},
+		{"schema 1 policy reading client.denylisted", olderConfig(1), `client.denylisted`, 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := *tc.config
+			c.ConfigRules = append(slices.Clone(c.ConfigRules), ConfigRule{ID: "listed", Expression: mustParse(tc.expr), Settings: Settings{Block: new("block")}})
+			got, _, errs := Compile(&c, testDeployment)
+			if errs != nil {
+				t.Fatal(expr.Issues(errs))
+			}
+			if got.NeedsSchema != tc.want {
+				t.Fatalf("needs schema %d, want %d", got.NeedsSchema, tc.want)
+			}
+		})
+	}
+}
+
+// Admin warns about names rules compare client.ip_lists with, so every phase
+// counts, the same name is listed once, and other fields add nothing.
+func TestIPListNames(t *testing.T) {
+	c := validConfig()
+	c.ConfigRules = append(slices.Clone(c.ConfigRules),
+		ConfigRule{ID: "a", Expression: mustParse(`client.ip_lists in {"aws" "azure"}`), Settings: Settings{Block: new("block")}},
+		ConfigRule{ID: "b", Expression: mustParse(`not client.ip_lists in {"statuscake"} and client.ip_lists eq "aws"`), Settings: Settings{Block: new("log")}},
+		ConfigRule{ID: "c", Expression: mustParse(`client.signals eq "ua_tool"`), Settings: Settings{Block: new("log")}})
+	c.RateLimitRules = append(slices.Clone(c.RateLimitRules),
+		RateLimitRule{ID: "rl-listed", Expression: mustParse(`client.ip_lists in {"hetzner"}`), Algorithm: "fixed_window", Limit: 10, Period: dur("1m"), Key: []string{"ip"}, OnMissingKey: "fallback_ip", Action: "block", FailMode: "open"})
+	c.RequestHeaderRules = append(slices.Clone(c.RequestHeaderRules),
+		HeaderRule{ID: "hdr-listed", Expression: mustParse(`client.ip_lists eq "firehol"`), Ops: []HeaderOp{{Op: "remove", Name: "X-Debug-Token"}}})
+	got := IPListNames(c)
+	if want := []string{"aws", "azure", "firehol", "hetzner", "statuscake"}; !slices.Equal(got, want) {
+		t.Fatalf("IPListNames = %v, want %v", got, want)
+	}
+	if got := IPListNames(validConfig()); len(got) != 0 {
+		t.Fatalf("config without the field = %v", got)
 	}
 }

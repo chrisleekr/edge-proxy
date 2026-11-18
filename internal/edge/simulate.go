@@ -30,6 +30,8 @@ type SimRequest struct {
 	HTTPVersion string
 	// VerifiedBot puts the IP in the verified crawler ranges.
 	VerifiedBot bool
+	// IPLists puts the IP in these IP lists, by name.
+	IPLists []string
 	// JWTClaims stand in for a verified token's claims.
 	JWTClaims map[string][]string
 }
@@ -73,6 +75,9 @@ type SimSettings struct {
 	UpstreamTimeout  snapshot.Duration `json:"upstream_timeout"`
 	RateLimitHeaders bool              `json:"ratelimit_headers"`
 	Block            string            `json:"block"`
+	// Ban is how long a block here bans the client IP on the edge that
+	// serves it; simulation records no ban.
+	Ban snapshot.Duration `json:"ban,omitempty"`
 }
 
 // Simulate runs the edge's own path and method checks, config phase, CORS
@@ -122,6 +127,22 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 		bots := expr.NewIPSet([]netip.Prefix{netip.PrefixFrom(cl.ip, cl.ip.BitLen())})
 		f.bots = &bots
 	}
+	if len(req.IPLists) > 0 {
+		if len(req.IPLists) > expr.MaxIPLists {
+			return SimResult{}, fmt.Errorf("ip_lists: %d lists, limit %d", len(req.IPLists), expr.MaxIPLists)
+		}
+		self := []netip.Prefix{netip.PrefixFrom(cl.ip, cl.ip.BitLen())}
+		ps := make([][]netip.Prefix, len(req.IPLists))
+		for i, n := range req.IPLists {
+			if !expr.ValidListName(n) {
+				return SimResult{}, fmt.Errorf("ip_lists: %q is not an IP list name", n)
+			}
+			ps[i] = self
+		}
+		// Every list holds the same one address: one combination of at most
+		// MaxIPLists names, far under the builder's cap, so it can't refuse.
+		f.lists, _ = expr.NewIPLists(req.IPLists, ps)
+	}
 	set, matched := resolve(c, defaults(c), f, cl.ip, nil)
 	if set.locale {
 		f.loc = newLocaleResolver(c)
@@ -138,6 +159,9 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	}
 	for k, name := range set.responses {
 		res.Settings.Responses[kindNames[k]] = name
+	}
+	if b := c.Config.ConfigRules; set.block == "block" && b[set.blockRule].Settings.Ban != nil {
+		res.Settings.Ban = *b[set.blockRule].Settings.Ban
 	}
 	// Steps 4 to 9 in serve's order, stopping where live traffic stops.
 	if set.block == "block" {

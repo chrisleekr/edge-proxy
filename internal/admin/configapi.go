@@ -63,6 +63,8 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 		Phases    []expr.Phase `json:"phases"`
 		Available bool         `json:"available"`
 		Exact     bool         `json:"exact"`
+		// The rule builder hides a deprecated field; rules using it still run.
+		Deprecated bool `json:"deprecated,omitempty"`
 	}
 	// The fields that need deployment config, and whether each has it.
 	deployed := map[string]bool{expr.VerifiedBotField: s.cfg.Deployment.VerifiedBots}
@@ -73,7 +75,7 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 	for _, f := range expr.Fields {
 		needs := f.Source == expr.SourceViewer || f.Name == expr.VerifiedBotField
 		fd := field{Name: f.Name, Label: f.Label, Type: f.Type, Keyed: f.Keyed, Phases: []expr.Phase{},
-			Available: !needs || deployed[f.Name], Exact: f.Exact}
+			Available: !needs || deployed[f.Name], Exact: f.Exact, Deprecated: f.Deprecated}
 		for _, p := range phases {
 			if f.InPhase(p) {
 				fd.Phases = append(fd.Phases, p)
@@ -313,7 +315,11 @@ func (s *Server) validateDraft(ctx context.Context, q querier, c *snapshot.Confi
 			warns = append(warns, expr.Issue{Path: fmt.Sprintf("config.rate_limit_rules[%d].expires_at", i), Msg: "is already past; the rule will not run"})
 		}
 	}
-	return compiled, warns, err
+	if err != nil {
+		return compiled, warns, err
+	}
+	dw, err := s.ipListWarnings(ctx, q, c)
+	return compiled, append(warns, dw...), err
 }
 
 // validate compiles c against d as the next version and checks the tests.

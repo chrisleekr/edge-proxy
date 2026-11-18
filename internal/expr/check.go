@@ -196,8 +196,17 @@ func exactOp(op OpDef) bool {
 // literal is literalProblem plus what depends on the deployment: a signal
 // whose viewer field has no source can never fire.
 func (c *checker) literal(f FieldDef, op OpDef, s string, inList bool) string {
-	if msg := literalProblem(f, op, s, inList); msg != "" || f.Name != SignalsField {
+	if msg := literalProblem(f, op, s, inList); msg != "" {
 		return msg
+	}
+	if f.Name == IPListsField {
+		if !ValidListName(s) {
+			return fmt.Sprintf("%q is not an IP list name: use lowercase letters, digits and hyphens", s)
+		}
+		return ""
+	}
+	if f.Name != SignalsField {
+		return ""
 	}
 	i := slices.IndexFunc(Signals, func(d SignalDef) bool { return d.Name == s })
 	if i < 0 {

@@ -157,6 +157,11 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 	f := newFields(r, &c, "/v1/admin")
 	bots := expr.NewIPSet([]netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")})
 	f.bots = &bots
+	ipLists, err := expr.NewIPLists([]string{"aws"}, [][]netip.Prefix{{netip.MustParsePrefix("198.51.100.0/24")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.lists = ipLists
 	f.locale = "ko"
 	f.claims = map[string][]string{"sub": {"u1"}}
 
@@ -187,6 +192,7 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 		"http.request.cookies":    {"sid", []string{"s1", "s2"}},
 		"http.request.jwt.claims": {"sub", []string{"u1"}},
 		expr.SignalsField:         {"", []string{"ua_tool"}},
+		expr.IPListsField:         {"", []string{"aws"}},
 	}
 	for _, fd := range expr.Fields {
 		switch fd.Type {
@@ -229,7 +235,7 @@ func TestFieldsCoverTheSchema(t *testing.T) {
 	}
 	plain := client{}
 	g := newFields(httptest.NewRequest(http.MethodGet, "http://[2001:db8::1]/", nil), &plain, "/")
-	if g.host != "2001:db8::1" || g.String("http.request.full_uri") != "http://[2001:db8::1]/" || g.Bool("ssl") || g.Bool("client_cert.verified") || g.Bool("client.verified_bot") {
+	if g.host != "2001:db8::1" || g.String("http.request.full_uri") != "http://[2001:db8::1]/" || g.Bool("ssl") || g.Bool("client_cert.verified") || g.Bool("client.verified_bot") || g.List("client.ip_lists", "") != nil {
 		t.Errorf("plain request fields wrong: host %q", g.host)
 	}
 }

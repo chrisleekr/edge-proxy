@@ -270,6 +270,8 @@ func TestClientSignalsRejectLiteralsThatCanNeverMatch(t *testing.T) {
 		{"full JA4 fingerprint", rule("tls.client.ja4", "eq", chromeJA4), all, nil},
 		{"JA4 prefix", rule("tls.client.ja4", "starts_with", "t13d"), all, nil},
 		{"full JA3 fingerprint", listRule("tls.client.ja3", "in", ja3), all, nil},
+		{"IP list names in lower case", listRule("client.ip_lists", "in", "aws", "firehol-abusers"), none, nil},
+		{"IP list name with an uppercase letter", listRule("client.ip_lists", "in", "AWS"), none, []string{`"AWS" is not an IP list name`}},
 		{"unknown signal", listRule("client.signals", "in", "ua_tool", "ua_robot"), none, []string{`unknown signal "ua_robot"`}},
 		{"HTTP/1 signal without the HTTP version", rule("client.signals", "eq", "browser_http1"), only("ssl", "tls.client.ja4"), []string{`"browser_http1" can never match`, "http.request.version"}},
 		// Browsers negotiate HTTP/2 only over TLS, so HTTP/1 says nothing without it.

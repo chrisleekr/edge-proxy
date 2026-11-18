@@ -45,6 +45,8 @@ true
 | `tls.client.ja3` | string | The client's [JA3](https://github.com/salesforce/ja3) TLS fingerprint, 32 lowercase hex characters, with the same rules as JA4, including absent on a request that wasn't HTTPS. Needs a trusted viewer header |
 | `client.signals` | list | Names of the [client signals](#client-signals) the request shows. Only `eq`, `ne`, `in` and `not_in` apply, with signal names as values |
 | `client.verified_bot` | bool | True when `ip.src` is in a crawler range admin fetched from `VERIFIED_BOT_SOURCES`. Needs `VERIFIED_BOT_SOURCES` on admin, or validation refuses the rule; false until admin's first fetch succeeds |
+| `client.ip_lists` | list | Names of the [IP lists](../use/bots.md#ip-lists) that hold `ip.src`, from the lists admin serves to edges. Only `eq`, `ne`, `in` and `not_in` apply, with list names as values: 1 to 63 lowercase letters, digits and hyphens, not starting with a hyphen. A name is checked for its form only, since which lists exist is admin state, not config, so the editor warns about a name that matches no one. Empty until the edge's first poll after it starts, as `client.verified_bot` is false until admin's first fetch |
+| `client.denylisted` | bool | True when any [IP list](../use/bots.md#ip-lists) that is on holds `ip.src`, provider, crawler and monitor lists included. Kept for policies written before `client.ip_lists`; saving warns on a rule that reads it. Use `client.ip_lists` |
 | `http.request.jwt.claims["name"]` | list | Verified claims only. Not in the `config` phase |
 | `edge.locale` | string | The detected locale. Not in the `config` phase; values must be in the supported list |
 

@@ -342,7 +342,7 @@ export function Modal({ title, onClose, children }: { title: string; onClose?: (
       aria-label={title}
       // Escape closes only dialogs that can be dismissed.
       onCancel={(e) => (e.preventDefault(), onClose?.())}
-      className="m-auto w-[calc(100%-2rem)] max-w-md rounded-dialog bg-panel p-6 text-body shadow-float backdrop:bg-page/80"
+      className="m-auto w-[calc(100%-2rem)] max-w-md rounded-dialog whitespace-normal bg-panel p-6 text-body shadow-float backdrop:bg-page/80"
     >
       <h2 className="mb-3">{title}</h2>
       {children}

@@ -4,10 +4,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/chrisleekr/edge-proxy/internal/expr"
+	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -77,48 +80,59 @@ func TestRequestAllocations(t *testing.T) {
 		max    float64
 		// expires, when set, is when rate-limit rule 0 expires, from now.
 		expires time.Duration
+		// banned seeds a ban on the client, in a version with a ban rule.
+		banned bool
+		// deny is the IP list set the edge holds.
+		deny string
 	}{
-		{"allowed and proxied", func(*snapshot.Config) {}, "/v1/items?id=1", 200, 36, 0},
+		{"allowed and proxied", func(*snapshot.Config) {}, "/v1/items?id=1", 200, 36, 0, false, ""},
 		{"allowed with RateLimit headers", func(c *snapshot.Config) {
 			r := rlRule("per-ip", "true", "token_bucket", 1_000_000_000, "ip")
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "headers", Expression: mustParse("true"), Settings: snapshot.Settings{RateLimitHeaders: new(true)}})
-		}, "/v1/items?id=1", 200, 43, 0},
+		}, "/v1/items?id=1", 200, 43, 0, false, ""},
 		{"rate limited with RateLimit headers", func(c *snapshot.Config) {
 			r := rlRule("per-ip", "true", "token_bucket", 1, "ip")
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "headers", Expression: mustParse("true"), Settings: snapshot.Settings{RateLimitHeaders: new(true)}})
-		}, "/v1/items", 429, 19, 0},
+		}, "/v1/items", 429, 19, 0, false, ""},
 		{"blocked by a config rule", func(c *snapshot.Config) {
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent eq "bench"`), Settings: snapshot.Settings{Block: new("block")}})
-		}, "/v1/items", 403, 13, 0},
+		}, "/v1/items", 403, 13, 0, false, ""},
 		{"count rule counts a 404", func(c *snapshot.Config) {
 			r := rlRule("sweep", "true", "sliding_window", 1_000_000_000, "ip")
 			r.CountStatuses = []string{"404"}
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
-		}, "/v1/missing", 404, 37, 0},
+		}, "/v1/missing", 404, 37, 0, false, ""},
 		// The expiry check adds no allocation.
 		{"rule expiring later", func(c *snapshot.Config) {
 			r := rlRule("ap-scraper", "true", "token_bucket", 1_000_000_000, "ip")
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
-		}, "/v1/items?id=1", 200, 37, time.Hour},
+		}, "/v1/items?id=1", 200, 37, time.Hour, false, ""},
 		{"expired rule skipped", func(c *snapshot.Config) {
 			r := rlRule("ap-scraper", "true", "token_bucket", 1, "ip")
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
-		}, "/v1/items?id=1", 200, 36, -time.Minute},
+		}, "/v1/items?id=1", 200, 36, -time.Minute, false, ""},
 		// The allowlist match adds no allocation, for a client on it or not.
 		{"client on the allowlist", func(c *snapshot.Config) {
 			c.Global.ClientAllowlist = []string{"198.51.100.0/24", "2001:db8:f00::/48"}
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent eq "bench"`), Settings: snapshot.Settings{Block: new("block")}})
 			c.RateLimitRules = []snapshot.RateLimitRule{rlRule("per-ip", "true", "token_bucket", 1, "ip")}
-		}, "/v1/items?id=1", 200, 36, 0},
+		}, "/v1/items?id=1", 200, 36, 0, false, ""},
 		{"client not on the allowlist", func(c *snapshot.Config) {
 			c.Global.ClientAllowlist = []string{"203.0.113.0/24", "2001:db8:f00::/48"}
-		}, "/v1/items?id=1", 200, 36, 0},
+		}, "/v1/items?id=1", 200, 36, 0, false, ""},
+		// The ban lookup adds no allocation to a blocked request, or to a
+		// request in a version with ban rules whose client is not banned.
+		{"banned client", func(c *snapshot.Config) { addTrap(c) }, "/v1/items", 403, 13, 0, true, ""},
+		{"client not banned with ban rules present", func(c *snapshot.Config) { addTrap(c) }, "/v1/items?id=1", 200, 36, 0, false, ""},
+		// The list lookup adds no allocation, for a client on a list or not.
+		{"client on an IP list", addDenyRule, "/v1/items", 403, 13, 0, false, "198.51.100.0/24"},
+		{"client not on an IP list", addDenyRule, "/v1/items?id=1", 200, 36, 0, false, "203.0.113.0/24"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,6 +143,16 @@ func TestRequestAllocations(t *testing.T) {
 				expireRule(t, c, 0, time.Now().Add(tc.expires))
 			}
 			s, req := inMemoryEdge(t, c, tc.target)
+			if tc.banned {
+				s.edge.bans.Add(netip.MustParseAddr("198.51.100.7"), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli(), Host: "api.example.com", Path: "/wp-login.php"}, map[string]bool{"trap": true})
+			}
+			if tc.deny != "" {
+				lists, err := expr.NewIPLists([]string{"aws"}, [][]netip.Prefix{{netip.MustParsePrefix(tc.deny)}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.edge.lists.Store(lists)
+			}
 			if tc.status == 404 {
 				s.edge.rp.Transport = cannedTransport{404}
 			}
@@ -151,6 +175,16 @@ func TestRequestAllocations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func addDenyRule(c *snapshot.Config) {
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "listed", Expression: mustParse(`client.ip_lists in {"aws"}`), Settings: snapshot.Settings{Block: new("block")}})
+}
+
+// addTrap adds a rule that bans, matching no benchmark request, so ban rules
+// are present without the request tripping one.
+func addTrap(c *snapshot.Config) {
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "trap", Expression: mustParse(`http.user_agent eq "trap"`), Settings: snapshot.Settings{Block: new("block"), Ban: new(dur(time.Hour))}})
 }
 
 // Locale resolution: a cache hit is one map read; a miss parses and

@@ -155,10 +155,16 @@ type Edge struct {
 	log       *slog.Logger
 	valkey    *ratelimit.Valkey // nil without VALKEY_URL
 	penalties *ratelimit.Penalties
-	tokens    *tokenCache
-	pool      *bufferPool
-	rp        *httputil.ReverseProxy
-	tracer    trace.Tracer // nil when tracing is off
+	bans      *ratelimit.Bans
+	// lists is the IP list set from admin; nil until fetched or while no
+	// list is on.
+	lists atomic.Pointer[expr.IPLists]
+	// banReports holds bans for the next stats report; nil without admin.
+	banReports chan BanReport
+	tokens     *tokenCache
+	pool       *bufferPool
+	rp         *httputil.ReverseProxy
+	tracer     trace.Tracer // nil when tracing is off
 	// active counts handlers that have not finished, so shutdown can wait
 	// for stream spans to end before the last flush.
 	active atomic.Int64
@@ -193,6 +199,10 @@ type reqState struct {
 	// its limit, and wlRule names the first such rule.
 	wouldLimit bool
 	wlRule     string
+	// ban is the ban a banned request met, or the one a trap request set;
+	// banDropped means the table was full and the trap's ban was not kept.
+	ban        ratelimit.Ban
+	banDropped bool
 	// rlIdx holds the rate-limit rules step 8 checked, as indexes into the
 	// version's rules, so the access line can name them without an allocation
 	// here. The array is as large as step 8's checks can be.
@@ -290,6 +300,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	// Step 4: config phase.
 	st.fields = newFields(r, &st.client, p)
 	st.fields.bots = &ld.snap.Bots
+	st.fields.lists = e.lists.Load()
 	st.fields.floor = browserFloor(st.ver.c)
 	st.set, st.matched = resolve(st.ver.c, st.ver.defaults, &st.fields, cl.ip, st.matchBuf[:0])
 	st.resolved = true
@@ -303,10 +314,34 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	// A blocked request costs no backstop token, token check or quota.
 	switch st.set.block {
 	case "block":
+		// The winning block rule's ban applies, so a later rule that blocks
+		// without ban overrides an earlier trap, as every setting does.
+		if cr := st.ver.c.Config.ConfigRules[st.set.blockRule]; cr.Settings.Ban != nil {
+			b := ratelimit.Ban{Rule: cr.ID, Start: st.start.UnixMilli(), End: st.start.Add(time.Duration(*cr.Settings.Ban)).UnixMilli(), Host: r.Host, Path: st.fields.path}
+			if cur, report, ok := e.bans.Add(cl.ip, b, st.ver.banRules); ok {
+				st.ban = cur
+				if report && e.reportBan(cl.ip, cur) {
+					e.bans.MarkReported(cl.ip, cur)
+				}
+			} else {
+				e.m.banDropped.Add(1)
+				st.banDropped = true
+			}
+		}
 		e.reject(st, kForbidden, reasonBlocked)
 		return
 	case "log":
 		st.wouldBlock = true
+	}
+	// Allowlist and kill switch override bans as they override block. A
+	// version without ban rules skips the shard lookup.
+	if len(st.ver.banRules) > 0 && st.set.allowlist == "" && !st.ver.c.Config.KillSwitch.Block {
+		if b, ok := e.bans.Get(cl.ip, st.start.UnixMilli()); ok && st.ver.banRules[b.Rule] {
+			st.ban = b
+			e.m.banHits.Add(1)
+			e.reject(st, kForbidden, reasonBanned)
+			return
+		}
 	}
 	// Step 5: per-replica backstop, before any costly work.
 	if !e.backstop(st) {

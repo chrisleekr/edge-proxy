@@ -104,7 +104,12 @@ test('docs screenshots', async ({ page }) => {
   // position would depend on which request answers first.
   await expect(page.getByRole('combobox', { name: 'Method' })).toBeVisible();
   await page.getByRole('button', { name: 'Run tests on the saved draft' }).click();
-  // The results are below the tests' editor.
-  await page.getByRole('list', { name: 'Test results' }).scrollIntoViewIfNeeded();
+  await expect(page.getByRole('list', { name: 'Test results' })).toBeVisible();
+  // The window scrolls (the layout has no inner scroll container). Scrolling
+  // into view is a no-op when the list is already partly visible, so late
+  // requests would leave the position depending on load timing: settle first,
+  // then scroll to the bottom.
+  await page.waitForLoadState('networkidle');
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await shot(page, 'tests', 'Tests and simulate');
 });

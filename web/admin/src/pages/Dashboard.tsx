@@ -753,7 +753,7 @@ function Fleet({ fleet, liveVersion, canaryVersion }: { fleet: NonNullable<Data[
 }
 
 // Recent changes leaves out what the audit log shows only for the record.
-const quiet = new Set(['auth.login.success', 'auth.login.failure', 'auth.logout', 'audit.verify', 'config.export', 'audit.export', 'anomaly.fire', 'anomaly.resolve', 'attention.cleared']);
+const quiet = new Set(['auth.login.success', 'auth.login.failure', 'auth.logout', 'audit.verify', 'config.export', 'audit.export', 'anomaly.fire', 'anomaly.resolve', 'attention.cleared', 'denylist.changed']);
 
 function Changes({ audit, verify }: { audit: NonNullable<Data['audit']>; verify: Data['verify'] }) {
   const events = (audit.data ?? []).filter((e) => e.action in said && !quiet.has(e.action)).slice(0, 8);

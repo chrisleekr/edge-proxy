@@ -24,7 +24,7 @@ The admin UI calls the `config` phase **Access rules**, and it stores them as `c
 
 | Phase | Use it to | Action |
 |---|---|---|
-| `config` | Choose per-route settings | `settings`: any of `auth` (`none`, `optional`, `required`, plus accepted issuers), `cors_policy`, `locale`, `upstream_timeout`, `body_limit`, `responses`, `ratelimit_headers`, `block`. Later matching rules override earlier ones, setting by setting |
+| `config` | Choose per-route settings | `settings`: any of `auth` (`none`, `optional`, `required`, plus accepted issuers), `cors_policy`, `locale`, `upstream_timeout`, `body_limit`, `responses`, `ratelimit_headers`, `block`, `ban`. Later matching rules override earlier ones, setting by setting |
 | `rate_limit` | Limit request rates | Algorithm, limit, period and key. See [Rate limiting](rate-limiting.md) |
 | `request_headers` | Shape what the upstream receives | Ops: `set`, `append`, `remove`, `copy`, `rename`, `forward` (all, allowlist or denylist) |
 
@@ -44,13 +44,31 @@ The default `forbidden` template is an HTML page, since a block usually refuses 
 { "settings": { "block": "block", "responses": { "forbidden": "forbidden-json" } } }
 ```
 
+### Banning a client
+
+A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of seconds from `1s` to `24h`. `ban` without `"block": "block"` in the same rule is refused at save. When that rule is the winning block rule for a request, the edge answers 403 as usual and remembers the client IP for that long. Later requests from that IP get 403 with the `forbidden` template and the decision `banned`, on every host and path, before the backstop, token check or any rate limit. An IPv6 client is remembered by its /64.
+
+```json
+{ "settings": { "block": "block", "ban": "24h" } }
+```
+
+- **A ban lives on one edge.** Each edge keeps its own table in memory, so a client trips the rule once per edge, and a restart or rollout clears every ban. Enforcement reads only that memory; admin keeps the reported bans in Postgres for the [IP lists](bots.md#ip-lists) page.
+- **A ban follows its rule.** It applies only while the client's version still has a rule with that ID that sets `ban`. Removing the rule or its `ban`, a revert, or a [canary](publishing.md#canary) the client is not in sets the ban aside at once; if a rule with that ID that sets `ban` returns before the ban ends, it applies again. **Lift ban** on the [IP lists](bots.md#ip-lists) page ends it.
+- **Trusted clients and the kill switch.** A client on the [allowlist](#trusted-clients) is never banned or refused as banned, and `kill_switch.block` stops refusals as banned.
+- **A late request never replaces a newer ban.** A request that arrived before the edge recorded the current ban does not replace it, so a slow request cannot shorten or swap a ban.
+- **`log` never bans.** Start with `"block": "log"` to see who the rule matches, then switch to `block` and add `ban`.
+- **Later rules win.** If a later matching rule sets `block` without `ban`, it overrides the trap for that request and no ban is recorded. A banned client whose request also matches a blocking rule is refused as `blocked`, and the ban is renewed when that rule sets `ban`. A renewal is reported to admin at most once a minute.
+- **About 100,000 bans per edge.** The table is 64 shards of 1,563 bans each, and a new ban is refused when its own shard is full even if others have room, so drops can start well below 100,000. When a shard is full a new ban is not stored and the client is not banned (fail open); each drop counts in `edge_ban_dropped_total`.
+
+[Bot detection](bots.md#trap-paths) has an example.
+
 ### Trusted clients
 
 **Settings → Trusted client allowlist** (`global.client_allowlist`) lists client IPs and ranges that are exempt from enforcement, so you don't repeat an exception in every rule. The edge matches the client IP it already derived from your trusted proxies, so a header can't add a client to the list, and the list doesn't change which proxies are trusted. It is part of the policy: it takes effect when you save and publish, and a canary applies the list of the version each request is pinned to. An empty list changes nothing.
 
 A matched request skips:
 
-- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block
+- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block, and any ban
 - every rate-limit rule, including [autopilot rules](publishing.md#autopilot-rules), count rules, penalties already running and `on_missing_key: reject`. No Valkey call is made and no counter or quota changes
 
 On a route that requires a JWT, a trusted client is treated as `optional`: it needs no token, but a token it sends is still verified. A bad one is refused with 401, and a valid one gives claims and `X-Edge-Auth-*` headers as usual. Claims and those headers come only from a verified token. The kill switch still turns JWT checks off entirely. `ratelimit_headers` is reported false for a trusted client, since no rate-limit rule runs.
@@ -220,7 +238,7 @@ A test states the trusted values directly, because trust depends on the deployme
 | `preflight` | Whether the edge answers the request as a CORS preflight matches |
 | `config_rules` | The IDs of the matching access rules equal this list, in order |
 | `rate_limit_rules` | The IDs of people's rate-limit rules the request is checked against equal this list, in order. [Autopilot rules](publishing.md#autopilot-rules) are left out |
-| `settings` | Each listed setting matches: `auth_mode`, `accepted`, `cors_policy`, `locale`, `responses`, `body_limit`, `upstream_timeout`, `ratelimit_headers`, `block` |
+| `settings` | Each listed setting matches: `auth_mode`, `accepted`, `cors_policy`, `locale`, `responses`, `body_limit`, `upstream_timeout`, `ratelimit_headers`, `block`, `ban` (the winning rule's duration, absent when none, such as `1h0m0s`) |
 | `upstream_headers` | Each listed header's first value matches; `""` means the header is absent |
 
 **A failing test blocks publish.** The backstop and rate-limit counters depend on the running edges and aren't simulated.

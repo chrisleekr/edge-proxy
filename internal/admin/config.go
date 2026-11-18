@@ -134,9 +134,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 	}
 	seen := map[string]bool{}
 	for _, s := range c.VerifiedBotSources {
-		// No query: the URL is logged and audited, and a query could hold a secret.
-		u, err := url.Parse(s)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || len(s) > snapshot.MaxBotSourceLen || seen[s] {
+		if !validSourceURL(s) || seen[s] {
 			p.Fail("VERIFIED_BOT_SOURCES", fmt.Sprintf("each must be a unique https URL of at most %d characters with no query, credentials or fragment", snapshot.MaxBotSourceLen))
 			break
 		}
@@ -326,4 +324,12 @@ func readSecretFile(p *envparse.Parser, getenv func(string) string, name string)
 		return token
 	}
 	return ""
+}
+
+// validSourceURL says whether s may be fetched as a list source: https, no
+// query, as the URL is logged and audited and a query could hold a secret,
+// no credentials or fragment.
+func validSourceURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && len(s) <= snapshot.MaxBotSourceLen
 }

@@ -604,16 +604,22 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 	}
 	schema := decode[struct {
 		Fields []struct {
-			Name      string
-			Available bool
-			Exact     bool
-			Phases    []string
+			Name       string
+			Available  bool
+			Exact      bool
+			Phases     []string
+			Deprecated bool
 		}
 		Operators []op
 	}](t, ed.do("GET", "/api/expr/schema", nil))
-	avail, exact := map[string]bool{}, map[string]bool{}
+	avail, exact, deprecated := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, f := range schema.Fields {
-		avail[f.Name], exact[f.Name] = f.Available, f.Exact
+		avail[f.Name], exact[f.Name], deprecated[f.Name] = f.Available, f.Exact, f.Deprecated
+	}
+	// The builder hides client.denylisted in favour of client.ip_lists; rules
+	// that already use it still run.
+	if !deprecated["client.denylisted"] || deprecated["client.ip_lists"] || deprecated["http.host"] {
+		t.Fatalf("schema deprecated flags %v", deprecated)
 	}
 	// The cloudfront preset has country but not continent, and without
 	// VERIFIED_BOT_SOURCES the verified crawler flag is unavailable.
@@ -1021,6 +1027,23 @@ func TestConfigTestsRunForATrustedClient(t *testing.T) {
 		if !r.Pass {
 			t.Errorf("%s failed: %v", r.Name, r.Failures)
 		}
+	}
+}
+
+// A config test can assert how long a trap rule bans the client.
+func TestConfigTestsAssertTheBan(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	c := authConfig("https://idp.example.com/jwks")
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "trap", Expression: mustParse(`starts_with(http.request.uri.path, "/wp-")`), Settings: snapshot.Settings{Block: new("block"), Ban: new(snapshot.Duration(time.Hour))}})
+	rejected := "blocked"
+	res := decode[struct {
+		TestResults []TestResult `json:"test_results"`
+	}](t, ed.save(`"0"`, c, ConfigTest{Name: "trap bans for an hour", Request: TestRequest{Host: "api.example.com", Path: "/wp-login.php", IP: "203.0.113.96"},
+		Expect: TestExpect{Rejected: &rejected, Settings: map[string]any{"ban": "1h0m0s"}}}))
+	if len(res.TestResults) != 1 || !res.TestResults[0].Pass {
+		t.Fatalf("results %+v", res.TestResults)
 	}
 }
 

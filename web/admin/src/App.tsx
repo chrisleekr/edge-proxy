@@ -7,6 +7,7 @@ import { Audit } from './pages/Audit';
 import { Autopilot, AutopilotCase } from './pages/Autopilot';
 import { Dashboard } from './pages/Dashboard';
 import { Fleet, Stats } from './pages/Fleet';
+import { IPLists } from './pages/IPLists';
 import { Memory, NoteDetail } from './pages/Memory';
 import { Notifications } from './pages/Notifications';
 import { RouteDetail, Routes } from './pages/Routes';
@@ -300,6 +301,7 @@ function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
     versions: () => (parts[1] === 'compare' ? <Compare /> : parts[1] ? <VersionDetail version={Number(parts[1])} can={can} /> : <Versions can={can} />),
     routes: () => (parts[1] ? <RouteDetail key={path} id={Number(parts[1])} can={can} /> : <Routes can={can} />),
     fleet: () => <Fleet />,
+    'ip-lists': () => <IPLists canManage={can('denylists.manage')} />,
     stats: () => <Stats />,
     traffic: () => <TrafficMap />,
     notifications: () => <Notifications canRead={can('config.read')} canManage={can('settings.manage')} />,

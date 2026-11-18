@@ -80,6 +80,12 @@ export const said: Record<string, string> = {
   'attention.ack': 'acknowledged',
   'attention.undo': 'undid the acknowledgement of',
   'attention.cleared': 'noted this has cleared:',
+  'denylist.source_added': 'added the IP list',
+  'denylist.source_enabled': 'turned on the IP list',
+  'denylist.source_disabled': 'turned off the IP list',
+  'denylist.source_removed': 'removed the IP list',
+  'denylist.changed': 'saw a changed IP list at',
+  'ban.lifted': 'lifted the ban on',
 };
 
 // The categories the log narrows to, each a list of actions.
@@ -92,6 +98,7 @@ const categories: [string, string[]][] = [
   ['Sign-ins', ['auth.login.success', 'auth.login.failure', 'auth.logout']],
   ['Routes', ['route.delete', 'route.delete_all', 'route_pattern.create', 'route_pattern.delete']],
   ['Keys and crawlers', ['jwks.keys_changed', 'verified_bots.changed', 'verified_bots.removed']],
+  ['IP lists and bans', ['denylist.source_added', 'denylist.source_enabled', 'denylist.source_disabled', 'denylist.source_removed', 'denylist.changed', 'ban.lifted']],
   ['Audit log', ['audit.verify', 'audit.export']],
 ];
 

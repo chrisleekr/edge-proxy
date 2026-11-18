@@ -241,3 +241,28 @@ func TestDocsListEveryAdminMetric(t *testing.T) {
 	}
 	diff(t, "metric", uniq(code), uniq(documented))
 }
+
+// The Default IP lists table has every list the migration seeds, with its
+// address and whether it allows wide ranges, and nothing else.
+func TestDocsListEveryDefaultIPList(t *testing.T) {
+	b, err := os.ReadFile("../admindb/migrations/0022_ip_list_names.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code []string
+	for _, m := range regexp.MustCompile(`\('([a-z0-9-]+)', '([^']+)', (true|false)\)[,;]`).FindAllStringSubmatch(string(b), -1) {
+		code = append(code, m[1]+" "+m[2]+" wide="+m[3])
+	}
+	if len(code) != 73 {
+		t.Fatalf("the migration seeds %d lists, want 73", len(code))
+	}
+	var docs []string
+	for _, row := range docRows(t, "use/bots.md", "Default IP lists") {
+		if len(row) != 4 || strings.TrimSpace(row[0]) == "Name" || strings.TrimSpace(row[0]) == "---" {
+			continue
+		}
+		name, url := strings.Trim(strings.TrimSpace(row[0]), "`"), strings.Trim(strings.TrimSpace(row[2]), "`")
+		docs = append(docs, name+" "+url+" wide="+map[string]string{"yes": "true", "no": "false"}[strings.TrimSpace(row[3])])
+	}
+	diff(t, "default IP list", uniq(code), uniq(docs))
+}

@@ -16,7 +16,7 @@ import (
 var (
 	publishSources   = [...]string{"manual", "revert", "guard_rollback", "import", "autopilot"}
 	guardActionNames = [...]string{"rollback", "canary_abort", "alert"}
-	jobNames         = [...]string{"jwks", "verified_bots", "audit", "audit_full", "guard", "notifications", "retention", "autopilot"}
+	jobNames         = [...]string{"jwks", "verified_bots", "audit", "audit_full", "guard", "notifications", "retention", "autopilot", "denylists"}
 )
 
 // jobKind indexes jobNames.
@@ -31,6 +31,7 @@ const (
 	jobNotify
 	jobRetention
 	jobAutopilot
+	jobDenylists
 )
 
 // adminMetrics are this replica's counters, exposed on the internal

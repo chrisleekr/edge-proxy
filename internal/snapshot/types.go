@@ -179,6 +179,9 @@ type Settings struct {
 	RateLimitHeaders *bool             `json:"ratelimit_headers,omitempty"`
 	// Block is block or log: answer 403 forbidden, or only log would_block.
 	Block *string `json:"block,omitempty"`
+	// Ban refuses every later request from the client IP on this edge for
+	// this long. Only with block "block".
+	Ban *Duration `json:"ban,omitempty"`
 }
 
 // AuthSetting is a config rule's JWT requirement and the issuers it accepts.

@@ -1,6 +1,7 @@
 import * as DndKit from '@dnd-kit/core';
 import { QueryBuilderDnD } from '@react-querybuilder/dnd';
 import { createDndKitAdapter } from '@react-querybuilder/dnd/dnd-kit';
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useId, useMemo, useState } from 'react';
 import {
   type FieldSelectorProps,
@@ -13,7 +14,8 @@ import {
   useValueSelector,
 } from 'react-querybuilder';
 import 'react-querybuilder/dist/query-builder.css';
-import { api, type Json, type Phase, type Rendered, type Schema } from './api';
+import { denylistsQuery } from './pages/IPLists';
+import { api, type Json, type Phase, type Rendered, type Schema, useCan } from './api';
 
 const dnd = createDndKitAdapter(DndKit);
 
@@ -53,6 +55,7 @@ const valueExample: Record<string, string> = {
   'tls.client.ja4': 't13d1516h2_8daaf6152771_02713d6af862',
   'tls.client.ja3': '773906b0efdefa24a7f2b8eb6985bf37',
   'client.signals': 'ua_tool',
+  'client.ip_lists': 'aws',
 };
 
 // Select is the library's select with its title as its name too: a title
@@ -106,11 +109,19 @@ function setKey(q: RuleGroupType, path: number[], key: string): RuleGroupType {
 // ValueEditor takes no value, a list (one item per line) or one value.
 function ValueEditor(props: ValueEditorProps) {
   const { schema } = props.context as Ctx;
+  const canReadLists = useCan()('stats.read');
+  // Only the IP list field reads the lists; a role that cannot read them gets no hint.
+  const lists = useQuery({ ...denylistsQuery, enabled: props.field === 'client.ip_lists' && canReadLists });
   const op = schema.operators.find((o) => o.name === props.operator);
   if (!op || op.no_value) return null;
-  const signals = props.field === 'client.signals' && (
-    <span className="order-last basis-full text-sm text-body">Signal names: {schema.rules.signals.map((s) => s.name).join(', ')}.</span>
-  );
+  let text: string | undefined;
+  if (props.field === 'client.signals') {
+    text = `Signal names: ${schema.rules.signals.map((s) => s.name).join(', ')}.`;
+  } else if (props.field === 'client.ip_lists' && canReadLists && lists.data) {
+    const on = lists.data.filter((l) => l.enabled).map((l) => (l.entries > 0 ? l.name : `${l.name} (not downloaded yet)`));
+    text = `${on.length > 0 ? `Lists that are on: ${on.join(', ')}.` : 'No list is on.'} A list that is off matches no one until you turn it on in IP lists.`;
+  }
+  const hint = text && <span className="order-last basis-full text-sm text-body">{text}</span>;
   if (op.list) {
     const items = Array.isArray(props.value) ? (props.value as string[]) : [];
     return (
@@ -123,7 +134,7 @@ function ValueEditor(props: ValueEditorProps) {
         value={items.join('\n')}
         onChange={(e) => props.handleOnChange(e.target.value === '' ? [] : e.target.value.split('\n'))}
       />
-      {signals}
+      {hint}
       </>
     );
   }
@@ -131,10 +142,10 @@ function ValueEditor(props: ValueEditorProps) {
   const example = wildcard || valueExample[props.field];
   const input = <input aria-label="Value" placeholder={example && `such as ${example}`} value={typeof props.value === 'string' ? props.value : ''} onChange={(e) => props.handleOnChange(e.target.value)} />;
   const how = wildcardHow[props.operator];
-  if (signals) return (
+  if (hint) return (
     <>
       {input}
-      {signals}
+      {hint}
     </>
   );
   if (!how) return input;
@@ -154,9 +165,15 @@ const wildcardHow: Record<string, string> = {
 };
 
 export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema; phase: Phase; query: RuleGroupType; onChange: (q: RuleGroupType) => void }) {
+  const used = useMemo(() => {
+    const names = new Set<string>();
+    const walk = (g: RuleGroupType) => g.rules.forEach((r) => ('rules' in r ? walk(r) : names.add((r as { field: string }).field)));
+    walk(query);
+    return names;
+  }, [query]);
   const fields = useMemo(
-    () => schema.fields.filter((f) => f.available && f.phases.includes(phase)).map((f) => ({ name: f.name, label: f.label })),
-    [schema, phase],
+    () => schema.fields.filter((f) => f.available && f.phases.includes(phase) && (!f.deprecated || used.has(f.name))).map((f) => ({ name: f.name, label: f.label })),
+    [schema, phase, used],
   );
   const byName = useMemo(() => new Map(schema.fields.map((f) => [f.name, f])), [schema]);
   // An exact field offers only the operators that compare whole values; the server rejects the rest.

@@ -276,6 +276,7 @@ sequenceDiagram
 | 5:05 | Allowed | Penalty over; counting starts fresh |
 
 - **Repeat offenders cost almost nothing.** Each edge keeps a local copy of active penalties (up to 100,000 keys) and answers from it without calling Valkey. An edge that hasn't seen the client yet asks Valkey once; Valkey answers "blocked" without counting, and that edge caches it too.
+- **A penalty is per rule and key.** To refuse a client on every path after one request to a trap path, use an access rule that [bans the client IP](policy.md#banning-a-client) instead.
 - **Penalties apply only to `action: block` rules.** A `log` rule records that a penalty would have started and never blocks.
 
 ## Rules that expire

@@ -18,6 +18,8 @@ import (
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 )
 
 // accessRecord is copied out of the request, so the writer goroutine never
@@ -31,6 +33,7 @@ type accessRecord struct {
 	hasASN, upstream                                                                       bool
 	signals                                                                                uint16
 	configRules                                                                            []string
+	ipLists                                                                                []string
 	duration                                                                               time.Duration
 	traceID                                                                                trace.TraceID
 	spanID                                                                                 trace.SpanID
@@ -48,6 +51,10 @@ type accessRecord struct {
 	// reqBytes is the declared body length and respBytes what the edge wrote;
 	// negative means unknown.
 	reqBytes, respBytes int64
+	// ban is the ban a banned request met, or the one a trap request set;
+	// banDropped means the table was full and the trap's ban was not kept.
+	ban        ratelimit.Ban
+	banDropped bool
 	// ver names the rate-limit rules by their index.
 	ver   *version
 	rlIdx [maxRateLimitCalls + maxCountRules]int
@@ -133,6 +140,7 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 	// tuned from the logs. Before step 4 the request has no fields.
 	if st.fields.r != nil {
 		rec.signals = st.fields.signalBits()
+		rec.ipLists = st.fields.ipListNames()
 	}
 	if st.span != nil {
 		// Logged sampled or not: the upstream logs the same trace ID.
@@ -159,6 +167,7 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 	}
 	rec.referer, _ = first(r.Header["Referer"])
 	rec.ver, rec.rlIdx, rec.nRL = st.ver, st.rlIdx, st.nRL
+	rec.ban, rec.banDropped = st.ban, st.banDropped
 	if st.ver != nil {
 		rec.version = st.ver.c.Config.Version
 		for _, i := range st.matched {
@@ -304,6 +313,17 @@ func (a *accessLog) emit(rec accessRecord) {
 	if rec.rateLimitRule != "" {
 		attrs = append(attrs, slog.String("edge.rate_limit_rule", rec.rateLimitRule))
 	}
+	// The writer formats the times, off the request path.
+	if rec.decision == "banned" {
+		attrs = append(attrs, slog.String("edge.ban.rule", rec.ban.Rule), slog.String("edge.ban.since", time.UnixMilli(rec.ban.Start).UTC().Format(time.RFC3339)),
+			slog.String("edge.ban.host", hostOnly(rec.ban.Host)), slog.String("edge.ban.path", rec.ban.Path))
+	}
+	if rec.ban.End != 0 {
+		attrs = append(attrs, slog.String("edge.ban.until", time.UnixMilli(rec.ban.End).UTC().Format(time.RFC3339)))
+	}
+	if rec.banDropped {
+		attrs = append(attrs, slog.Bool("edge.ban.dropped", true))
+	}
 	// A sampled line stands for 1/rate requests; readers scale by it.
 	if a.sample < 1 && rec.decision == "allow" && rec.status < 500 {
 		attrs = append(attrs, slog.Float64("edge.sample_rate", a.sample))
@@ -325,6 +345,9 @@ func (a *accessLog) emit(rec accessRecord) {
 	}
 	if rec.signals != 0 {
 		attrs = append(attrs, slog.Any("client.signals", signalLists[rec.signals]))
+	}
+	if len(rec.ipLists) > 0 {
+		attrs = append(attrs, slog.Any("client.ip_lists", rec.ipLists))
 	}
 	if rec.ja3 != "" {
 		attrs = append(attrs, slog.String("tls.client.ja3", rec.ja3))

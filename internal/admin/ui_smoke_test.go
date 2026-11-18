@@ -111,9 +111,25 @@ func TestUISmoke(t *testing.T) {
 	})
 	wg.Go(func() { smokeRunner(t, h) })
 
+	// An IP list for the IP lists page, fetched by a leader tick every
+	// second, and a ban an edge reported.
+	list := newFakeRanges(t, "203.0.113.50\n198.51.100.0/24\n")
+	h.trustLists(list)
+	if _, err := h.owner.Exec(t.Context(), "INSERT INTO bans (replica, ip, rule, host, path, started_at, ends_at) VALUES ('edge-smoke', '203.0.113.9', 'trap', 'www.example.com', '/wp-login.php', now(), now() + interval '1 hour')"); err != nil {
+		t.Fatal(err)
+	}
+	wg.Go(func() {
+		for t.Context().Err() == nil {
+			if err := h.s.refreshDenylists(t.Context()); err != nil && t.Context().Err() == nil {
+				t.Errorf("denylist tick: %v", err)
+			}
+			wait(t.Context(), time.Second)
+		}
+	})
+
 	cmd := exec.Command("npx", "playwright", "test")
 	cmd.Dir = "../../web/admin"
-	cmd.Env = append(os.Environ(), "BASE_URL="+h.srv.URL, "SMOKE_USER=smoke", "SMOKE_ONCALL_USER=oncall", "SMOKE_PASSWORD="+goodPassword)
+	cmd.Env = append(os.Environ(), "BASE_URL="+h.srv.URL, "SMOKE_LIST_URL="+list.srv.URL+"/list.txt", "SMOKE_USER=smoke", "SMOKE_ONCALL_USER=oncall", "SMOKE_PASSWORD="+goodPassword)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("playwright: %v", err)
