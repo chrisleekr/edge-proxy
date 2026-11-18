@@ -313,16 +313,18 @@ func (b *Bans) Add(ip netip.Addr, x Ban, live map[string]bool) (cur Ban, report,
 	return cur, report && ok, ok
 }
 
-// MarkReported records that a report of the ban on ip ending at end was
-// queued. It never moves Reported backwards and does nothing if the ban is
-// gone or ends before end. Trips between Add and MarkReported may queue a
-// duplicate report; admin upserts, so that is harmless.
-func (b *Bans) MarkReported(ip netip.Addr, end int64) {
+// MarkReported records that a report of r, the ban on ip, was queued. It
+// marks only a ban of r's rule: a late report of a ban another rule has since
+// replaced must not stand in for that ban's own report. It never moves
+// Reported backwards and does nothing if the ban is gone or ends before r.
+// Trips between Add and MarkReported may queue a duplicate report; admin
+// upserts, so that is harmless.
+func (b *Bans) MarkReported(ip netip.Addr, r Ban) {
 	b.t.upsert(BanKey(ip), func(old Ban, found bool) (Ban, bool) {
-		if !found || old.End < end || old.Reported >= end {
+		if !found || old.Rule != r.Rule || old.End < r.End || old.Reported >= r.End {
 			return old, false
 		}
-		old.Reported = end
+		old.Reported = r.End
 		return old, true
 	})
 }

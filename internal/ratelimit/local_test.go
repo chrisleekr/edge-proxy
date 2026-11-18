@@ -331,7 +331,7 @@ func TestBans(t *testing.T) {
 				t.Fatalf("%s: stored %+v, want rule %s ending %d", st.name, got, st.rule, end)
 			}
 			if report {
-				b.MarkReported(v4, cur.End)
+				b.MarkReported(v4, cur)
 			}
 		}
 	})
@@ -344,7 +344,7 @@ func TestBans(t *testing.T) {
 		if _, report, _ := b.Add(v4, Ban{Rule: "trap", Start: 1000, End: 3_601_000}, live); !report {
 			t.Fatal("renewal after a report that was not queued was not offered again")
 		}
-		b.MarkReported(v4, 3_601_000)
+		b.MarkReported(v4, Ban{Rule: "trap", End: 3_601_000})
 		if _, report, _ := b.Add(v4, Ban{Rule: "trap", Start: 2000, End: 3_602_000}, live); report {
 			t.Fatal("renewal after a queued report was offered again")
 		}
@@ -353,12 +353,23 @@ func TestBans(t *testing.T) {
 	t.Run("marking a report never moves it backwards or onto a different ban", func(t *testing.T) {
 		b := NewBans(100)
 		b.Add(v4, Ban{Rule: "trap", Start: 0, End: 5000}, live)
-		b.MarkReported(v4, 5000)
-		b.MarkReported(v4, 3000) // a slower, older report
-		b.MarkReported(v4, 9000) // the ban ends before this
-		b.MarkReported(netip.MustParseAddr("10.9.9.9"), 5000)
+		b.MarkReported(v4, Ban{Rule: "trap", End: 5000})
+		b.MarkReported(v4, Ban{Rule: "trap", End: 3000}) // a slower, older report
+		b.MarkReported(v4, Ban{Rule: "trap", End: 9000}) // the ban ends before this
+		b.MarkReported(netip.MustParseAddr("10.9.9.9"), Ban{Rule: "trap", End: 5000})
 		if got, _ := b.Get(v4, 0); got.Reported != 5000 {
 			t.Fatalf("reported %d, want 5000", got.Reported)
+		}
+	})
+
+	t.Run("a late report of a replaced ban does not mark the ban that replaced it", func(t *testing.T) {
+		b := NewBans(100)
+		both := map[string]bool{"short": true, "long": true}
+		b.Add(v4, Ban{Rule: "short", Start: 0, End: 100_000}, both) // its report is still on its way to the queue
+		b.Add(v4, Ban{Rule: "long", Start: 10, End: 110_000}, both) // its report was dropped
+		b.MarkReported(v4, Ban{Rule: "short", End: 100_000})        // the short ban's report lands late
+		if _, report, _ := b.Add(v4, Ban{Rule: "long", Start: 20, End: 120_000}, both); !report {
+			t.Fatal("renewal of a ban never reported was not offered")
 		}
 	})
 

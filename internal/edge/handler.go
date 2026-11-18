@@ -321,7 +321,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 			if cur, report, ok := e.bans.Add(cl.ip, b, st.ver.banRules); ok {
 				st.ban = cur
 				if report && e.reportBan(cl.ip, cur) {
-					e.bans.MarkReported(cl.ip, cur.End)
+					e.bans.MarkReported(cl.ip, cur)
 				}
 			} else {
 				e.m.banDropped.Add(1)
