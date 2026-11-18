@@ -65,15 +65,18 @@ type BanReport struct {
 
 // reportBan queues b for the next stats report. A full queue drops it and
 // counts: reports never block or grow. b is the ban in force, not the trip
-// that asked for it. Host and path are already bounded.
-func (e *Edge) reportBan(ip netip.Addr, b ratelimit.Ban) {
+// that asked for it. Host and path are already bounded. It returns whether the
+// queue took the report, so the caller marks it reported only then.
+func (e *Edge) reportBan(ip netip.Addr, b ratelimit.Ban) bool {
 	if e.banReports == nil {
-		return
+		return false
 	}
 	select {
 	case e.banReports <- BanReport{IP: ratelimit.BanKey(ip).String(), Rule: b.Rule, Host: b.Host, Path: b.Path, Start: b.Start, End: b.End}:
+		return true
 	default:
 		e.m.banReportsDropped.Add(1)
+		return false
 	}
 }
 

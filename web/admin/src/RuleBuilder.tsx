@@ -118,7 +118,7 @@ function ValueEditor(props: ValueEditorProps) {
   if (props.field === 'client.signals') {
     text = `Signal names: ${schema.rules.signals.map((s) => s.name).join(', ')}.`;
   } else if (props.field === 'client.ip_lists' && canReadLists && lists.data) {
-    const on = lists.data.filter((l) => l.enabled && l.entries > 0).map((l) => l.name);
+    const on = lists.data.filter((l) => l.enabled).map((l) => (l.entries > 0 ? l.name : `${l.name} (not downloaded yet)`));
     text = `${on.length > 0 ? `Lists that are on: ${on.join(', ')}.` : 'No list is on.'} A list that is off matches no one until you turn it on in IP lists.`;
   }
   const hint = text && <span className="order-last basis-full text-sm text-body">{text}</span>;
@@ -165,9 +165,15 @@ const wildcardHow: Record<string, string> = {
 };
 
 export function RuleBuilder({ schema, phase, query, onChange }: { schema: Schema; phase: Phase; query: RuleGroupType; onChange: (q: RuleGroupType) => void }) {
+  const used = useMemo(() => {
+    const names = new Set<string>();
+    const walk = (g: RuleGroupType) => g.rules.forEach((r) => ('rules' in r ? walk(r) : names.add((r as { field: string }).field)));
+    walk(query);
+    return names;
+  }, [query]);
   const fields = useMemo(
-    () => schema.fields.filter((f) => f.available && f.phases.includes(phase)).map((f) => ({ name: f.name, label: f.label })),
-    [schema, phase],
+    () => schema.fields.filter((f) => f.available && f.phases.includes(phase) && (!f.deprecated || used.has(f.name))).map((f) => ({ name: f.name, label: f.label })),
+    [schema, phase, used],
   );
   const byName = useMemo(() => new Map(schema.fields.map((f) => [f.name, f])), [schema]);
   // An exact field offers only the operators that compare whole values; the server rejects the rest.

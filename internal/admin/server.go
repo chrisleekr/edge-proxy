@@ -71,6 +71,8 @@ type Server struct {
 	mux    *http.ServeMux
 	// tracing is nil when tracing is off.
 	tracing *tracing.Provider
+	// denylistResponse is the one encoded edge denylist response held.
+	denylistResponse denylistCache
 
 	// Login throttles.
 	pairLimit, userLimit, ipLimit, overflow *ratelimit.Local[string]

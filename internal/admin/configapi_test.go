@@ -604,16 +604,22 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 	}
 	schema := decode[struct {
 		Fields []struct {
-			Name      string
-			Available bool
-			Exact     bool
-			Phases    []string
+			Name       string
+			Available  bool
+			Exact      bool
+			Phases     []string
+			Deprecated bool
 		}
 		Operators []op
 	}](t, ed.do("GET", "/api/expr/schema", nil))
-	avail, exact := map[string]bool{}, map[string]bool{}
+	avail, exact, deprecated := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, f := range schema.Fields {
-		avail[f.Name], exact[f.Name] = f.Available, f.Exact
+		avail[f.Name], exact[f.Name], deprecated[f.Name] = f.Available, f.Exact, f.Deprecated
+	}
+	// The builder hides client.denylisted in favour of client.ip_lists; rules
+	// that already use it still run.
+	if !deprecated["client.denylisted"] || deprecated["client.ip_lists"] || deprecated["http.host"] {
+		t.Fatalf("schema deprecated flags %v", deprecated)
 	}
 	// The cloudfront preset has country but not continent, and without
 	// VERIFIED_BOT_SOURCES the verified crawler flag is unavailable.

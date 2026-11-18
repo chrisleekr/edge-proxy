@@ -152,7 +152,7 @@ function Lists({ canManage }: { canManage: boolean }) {
               disabled={add.isPending}
               required
             />
-            <Check label="Allows ranges up to /8 (cloud providers)" checked={wide} onChange={(e) => setWide(e.target.checked)} />
+            <Check label="Allows ranges up to /8 (cloud providers)" checked={wide} onChange={(e) => setWide(e.target.checked)} disabled={add.isPending} />
             <Button type="submit" variant="primary" disabled={!name.trim() || !url.trim() || add.isPending}>
               Add list
             </Button>
@@ -201,7 +201,7 @@ function Bans({ canManage }: { canManage: boolean }) {
     <Card
       id="bans"
       title="Banned IPs"
-      intro="Addresses a trap rule banned, newest first, as the edges last reported them. A ban shown here has not ended or been lifted, but an edge restart or removing its rule can end it without admin knowing."
+      intro="Addresses a trap rule banned, newest first, as the edges last reported them. A reported ban that has not ended or been lifted is listed; an edge restart ends one, and removing its rule suspends it, without admin knowing. A ban lifted in the last 5 minutes is also listed, marked as still reaching the edges."
       info="An IPv6 address is banned as its whole /64, shown by that range's first address. Each edge reports a ban within about a minute of recording it. At most 500 are shown."
     >
       <div className="flex flex-col gap-3">

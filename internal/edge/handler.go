@@ -317,11 +317,11 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 		// The winning block rule's ban applies, so a later rule that blocks
 		// without ban overrides an earlier trap, as every setting does.
 		if cr := st.ver.c.Config.ConfigRules[st.set.blockRule]; cr.Settings.Ban != nil {
-			b := ratelimit.Ban{Rule: cr.ID, Start: st.start.UnixMilli(), End: st.start.Add(time.Duration(*cr.Settings.Ban)).UnixMilli(), Host: r.Host, Path: st.fields.path}
+			b := ratelimit.Ban{Rule: cr.ID, Version: st.ver.c.Config.Version, Start: st.start.UnixMilli(), End: st.start.Add(time.Duration(*cr.Settings.Ban)).UnixMilli(), Host: r.Host, Path: st.fields.path}
 			if cur, report, ok := e.bans.Add(cl.ip, b, st.ver.banRules); ok {
 				st.ban = cur
-				if report {
-					e.reportBan(cl.ip, cur)
+				if report && e.reportBan(cl.ip, cur) {
+					e.bans.MarkReported(cl.ip, cur.End)
 				}
 			} else {
 				e.m.banDropped.Add(1)

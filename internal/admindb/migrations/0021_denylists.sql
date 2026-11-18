@@ -53,6 +53,8 @@ CREATE TABLE ban_lifts (
     lifted_at timestamptz NOT NULL,
     actor     text NOT NULL
 );
+-- Serves the per-ban lift lookup when an edge reports a ban.
+CREATE INDEX ban_lifts_ip_lifted_at ON ban_lifts (ip, lifted_at);
 
 -- A list change alters enforcement on every edge without a publish, so it
 -- sits with publish rights.

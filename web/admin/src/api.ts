@@ -14,6 +14,8 @@ export interface FieldDef {
   available: boolean;
   // Exact fields hold names compared whole: only eq, ne, in and not_in apply.
   exact: boolean;
+  // Deprecated fields stay readable in existing rules but are not offered for new ones.
+  deprecated?: boolean;
 }
 
 export interface OpDef {

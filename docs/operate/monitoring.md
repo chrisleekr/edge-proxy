@@ -19,7 +19,7 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | `edge_auth_total{result}` | `verified`, `cached`, `missing`, `invalid`, `pass_no_keys` |
 | `edge_jwks_refresh_total{result}` | JWKS refreshes, `ok` or `error` |
 | `edge_ban_hits_total` | Requests refused as `banned` |
-| `edge_ban_dropped_total` | Bans not stored because the ban table (about 100,000 IPs per edge) was full; those clients are not banned |
+| `edge_ban_dropped_total` | Bans not stored because the ban shard for the address was full (64 shards of 1,563 bans each, so drops can start well below 100,000 per edge); those clients are not banned |
 | `edge_ban_reports_dropped_total` | Bans not sent to admin because the 200-ban report queue was full |
 | `edge_denylist_entries` | Prefixes in this edge's IP list set, counted across lists; 0 while no list is on |
 | `edge_denylist_fetch_failures_total` | IP list fetches that failed or were refused (admin unreachable, an error status, an unreadable body, a bad or repeated list name, more than 128 lists, a bad or 4-in-6 prefix, a bad lift IP, more than 500,000 prefixes, or lists that split into more than 1,048,576 names across combinations); the edge keeps its last set |

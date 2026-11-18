@@ -327,6 +327,76 @@ func TestBans(t *testing.T) {
 			if !ok || report != st.wantReport || cur.End != end {
 				t.Fatalf("%s: cur=%+v report=%v ok=%v", st.name, cur, report, ok)
 			}
+			if got, _ := b.Get(v4, st.start); got.Rule != st.rule || got.End != end {
+				t.Fatalf("%s: stored %+v, want rule %s ending %d", st.name, got, st.rule, end)
+			}
+			if report {
+				b.MarkReported(v4, cur.End)
+			}
+		}
+	})
+
+	t.Run("a report that was never marked is offered again on the next trip", func(t *testing.T) {
+		b := NewBans(100)
+		if _, report, _ := b.Add(v4, Ban{Rule: "trap", Start: 0, End: 3_600_000}, live); !report {
+			t.Fatal("first ban not reported")
+		}
+		if _, report, _ := b.Add(v4, Ban{Rule: "trap", Start: 1000, End: 3_601_000}, live); !report {
+			t.Fatal("renewal after a report that was not queued was not offered again")
+		}
+		b.MarkReported(v4, 3_601_000)
+		if _, report, _ := b.Add(v4, Ban{Rule: "trap", Start: 2000, End: 3_602_000}, live); report {
+			t.Fatal("renewal after a queued report was offered again")
+		}
+	})
+
+	t.Run("marking a report never moves it backwards or onto a different ban", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "trap", Start: 0, End: 5000}, live)
+		b.MarkReported(v4, 5000)
+		b.MarkReported(v4, 3000) // a slower, older report
+		b.MarkReported(v4, 9000) // the ban ends before this
+		b.MarkReported(netip.MustParseAddr("10.9.9.9"), 5000)
+		if got, _ := b.Get(v4, 0); got.Reported != 5000 {
+			t.Fatalf("reported %d, want 5000", got.Reported)
+		}
+	})
+
+	t.Run("a late request from an older version does not overwrite a newer version's ban", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			old, x     Ban
+			live       map[string]bool
+			wantRule   string
+			wantReport bool
+		}{
+			{"newer version's ban, rule not live in the older version", Ban{Rule: "new", Version: 2, Start: 0, End: 9000}, Ban{Rule: "old", Version: 1, Start: 5, End: 20000}, map[string]bool{"old": true}, "new", false},
+			{"newer version's ban, older one is longer and live", Ban{Rule: "new", Version: 2, Start: 0, End: 9000}, Ban{Rule: "new", Version: 1, Start: 5, End: 20000}, live, "new", false},
+			{"older version's dead ban is replaced by a newer version's trap", Ban{Rule: "old", Version: 1, Start: 0, End: 9000}, Ban{Rule: "new", Version: 2, Start: 5, End: 2000}, map[string]bool{"new": true}, "new", true},
+			{"ended ban of a newer version is replaced", Ban{Rule: "new", Version: 2, Start: 0, End: 100}, Ban{Rule: "old", Version: 1, Start: 500, End: 600}, map[string]bool{"old": true}, "old", true},
+			{"same version keeps the longest live ban", Ban{Rule: "day", Version: 1, Start: 0, End: 9000}, Ban{Rule: "minute", Version: 1, Start: 5, End: 2000}, live, "day", false},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				b := NewBans(100)
+				b.Add(v4, tc.old, live)
+				cur, report, ok := b.Add(v4, tc.x, tc.live)
+				if !ok || report != tc.wantReport || cur.Rule != tc.wantRule {
+					t.Fatalf("cur=%+v report=%v ok=%v", cur, report, ok)
+				}
+				if got, _ := b.Get(v4, 0); got.Rule != tc.wantRule {
+					t.Fatalf("stored %+v, want rule %s", got, tc.wantRule)
+				}
+			})
+		}
+	})
+
+	t.Run("keeping a longer ban allocates nothing", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000}, live)
+		x := Ban{Rule: "minute", Start: 5, End: 2000, Host: "a.example.com", Path: "/wp-login.php"}
+		if n := testing.AllocsPerRun(100, func() { b.Add(v4, x, live) }); n != 0 {
+			t.Fatalf("%v allocations", n)
 		}
 	})
 

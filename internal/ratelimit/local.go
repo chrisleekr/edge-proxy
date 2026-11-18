@@ -225,12 +225,14 @@ func (p *Penalties) Sweep(now int64) { p.t.sweep(now) }
 // Len counts cached penalties, for metrics.
 func (p *Penalties) Len() int { return p.t.len() }
 
-// Ban is one banned client: the config rule ID that set it, when it started
-// and ends in Unix milliseconds, and the host and path of the request that
-// tripped the rule, for the access log. Reported is the End last queued for
-// admin, so renewals are reported once per banReportEvery, not per request.
+// Ban is one banned client: the config rule ID that set it, the config
+// version that recorded it, when it started and ends in Unix milliseconds, and
+// the host and path of the request that tripped the rule, for the access log.
+// Reported is the End last queued for admin (see MarkReported), so renewals
+// are reported once per banReportEvery, not per request.
 type Ban struct {
 	Rule       string
+	Version    int64
 	Start, End int64
 	Host, Path string
 	Reported   int64
@@ -272,34 +274,57 @@ func (b *Bans) Get(ip netip.Addr, now int64) (Ban, bool) {
 	return x, x.End > now
 }
 
-// Add records x and returns the ban now in force. A ban counts only while it
-// has not ended and its rule is in live (the client's pinned version); a dead
-// one is replaced even by a shorter x, as it is not enforced. A live ban that
-// ends no earlier than x stays, so a short trap never cuts a long ban;
-// otherwise x replaces it. report says whether the caller should queue cur for
-// admin: a new or different-rule ban always, a renewal of the same rule once
-// End has moved banReportEvery past the last reported End. ok is false when a
-// full table refuses a new client: it is then not banned (fail open) and the
-// caller counts the drop.
+// Add records x and returns the ban now in force. A ban that has not ended and
+// was recorded by a newer config version than x always stays: a request pinned
+// to an older version that runs late must not overwrite it. Otherwise a ban
+// counts only while it has not ended and its rule is in live (the client's
+// pinned version); a dead one is replaced even by a shorter x, as it is not
+// enforced. A live ban that ends no earlier than x stays, so a short trap never
+// cuts a long ban; otherwise x replaces it. report says whether the caller
+// should queue cur for admin: a new or different-rule ban always, a renewal of
+// the same rule once End has moved banReportEvery past the last reported End.
+// Add does not advance Reported: the caller calls MarkReported once the queue
+// accepts, so a dropped report is offered again on the next trip. ok is false
+// when a full table refuses a new client: it is then not banned (fail open)
+// and the caller counts the drop.
 // Host and path are copied, so the entry never keeps the request's buffers.
 func (b *Bans) Add(ip netip.Addr, x Ban, live map[string]bool) (cur Ban, report, ok bool) {
-	x.Host, x.Path = strings.Clone(x.Host[:min(len(x.Host), maxBanHost)]), strings.Clone(x.Path[:min(len(x.Path), maxBanPath)])
 	cur, ok = b.t.upsert(BanKey(ip), func(old Ban, found bool) (Ban, bool) {
 		report = true
-		if found && old.End > x.Start && live[old.Rule] {
-			if old.End >= x.End {
+		if found && old.End > x.Start {
+			if old.Version > x.Version {
 				report = false
 				return old, false
 			}
-			report = old.Rule != x.Rule || x.End-old.Reported >= banReportEvery
+			if live[old.Rule] {
+				if old.End >= x.End {
+					report = false
+					return old, false
+				}
+				if old.Rule == x.Rule {
+					x.Reported = old.Reported
+					report = x.End-old.Reported >= banReportEvery
+				}
+			}
 		}
-		x.Reported = old.Reported
-		if report {
-			x.Reported = x.End
-		}
+		x.Host, x.Path = strings.Clone(x.Host[:min(len(x.Host), maxBanHost)]), strings.Clone(x.Path[:min(len(x.Path), maxBanPath)])
 		return x, true
 	})
 	return cur, report && ok, ok
+}
+
+// MarkReported records that a report of the ban on ip ending at end was
+// queued. It never moves Reported backwards and does nothing if the ban is
+// gone or ends before end. Trips between Add and MarkReported may queue a
+// duplicate report; admin upserts, so that is harmless.
+func (b *Bans) MarkReported(ip netip.Addr, end int64) {
+	b.t.upsert(BanKey(ip), func(old Ban, found bool) (Ban, bool) {
+		if !found || old.End < end || old.Reported >= end {
+			return old, false
+		}
+		old.Reported = end
+		return old, true
+	})
 }
 
 // Lift ends the ban on ip if it started before at (Unix ms), so a client

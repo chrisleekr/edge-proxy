@@ -291,3 +291,34 @@ func TestRenewalsAreReportedOncePerMinute(t *testing.T) {
 		t.Fatalf("dropped %v", n)
 	}
 }
+
+// A report dropped because the queue was full is queued again when the client
+// trips the trap next, instead of waiting a minute or never.
+func TestBanReportDroppedByAFullQueueIsQueuedOnTheNextTrip(t *testing.T) {
+	admin := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer admin.Close()
+	h := newHarness(t, map[string]string{"ADMIN_URL": admin.URL, "EDGE_SERVICE_TOKEN": "t0k", "STATS_INTERVAL": "30s"})
+	now := time.Now()
+	clock := h.fakeClock(now)
+	h.load(envelope(trapConfig(1)))
+	for range MaxBanReports {
+		h.srv.edge.banReports <- BanReport{}
+	}
+	trip(t, h, "a.example.com")
+	if n := h.metrics()["edge_ban_reports_dropped_total"]; n != 1 {
+		t.Fatalf("dropped %v reports with a full queue, want 1", n)
+	}
+	<-h.srv.edge.banReports // the stats loop drained one
+	clock.Store(now.Add(time.Second).UnixMilli())
+	trip(t, h, "a.example.com")
+	if n := len(h.srv.edge.banReports); n != MaxBanReports {
+		t.Fatalf("queued %d reports after the next trip, want %d", n, MaxBanReports)
+	}
+	var last BanReport
+	for range MaxBanReports {
+		last = <-h.srv.edge.banReports
+	}
+	if last.Rule != "trap" {
+		t.Fatalf("the report queued on the next trip is %+v", last)
+	}
+}

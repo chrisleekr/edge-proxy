@@ -487,6 +487,40 @@ func TestDenylistETagFollowsListsAndLifts(t *testing.T) {
 	status(t, pub.do("GET", "/v1/denylist", nil), http.StatusForbidden)
 }
 
+// Edges that miss the same ETag get the same body, and a lift makes a new tag
+// and a body that carries it.
+func TestDenylistEdgesMissingTheSameTagGetTheSameBody(t *testing.T) {
+	h, pub, e, f := listHarness(t)
+	addList(t, pub, f)
+	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
+	e2 := h.client()
+	e2.token = e.token
+	fetch := func(c *client) (tag, body string) {
+		t.Helper()
+		resp := c.do("GET", "/v1/denylist", nil, "If-None-Match", `"stale"`)
+		b, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d, %v", resp.StatusCode, err)
+		}
+		return resp.Header.Get("ETag"), string(b)
+	}
+	tagA, bodyA := fetch(e)
+	tagB, bodyB := fetch(e2)
+	if tagA == "" || tagA != tagB || bodyA != bodyB || !strings.Contains(bodyA, "5.6.7.0") {
+		t.Fatalf("first edge %s %q, second edge %s %q", tagA, bodyA, tagB, bodyB)
+	}
+	status(t, report(e, ban("203.0.113.5", h.now().Add(-time.Minute), time.Hour)), http.StatusOK)
+	status(t, pub.do("POST", "/api/bans/lift", map[string]string{"ip": "203.0.113.5"}), http.StatusNoContent)
+	tagC, bodyC := fetch(e2)
+	if tagC == tagA || bodyC == bodyA || !strings.Contains(bodyC, "203.0.113.5") {
+		t.Fatalf("after a lift: tag %s (was %s), body %q", tagC, tagA, bodyC)
+	}
+	if tagD, bodyD := fetch(e); tagD != tagC || bodyD != bodyC {
+		t.Fatalf("first edge after the lift: %s %q", tagD, bodyD)
+	}
+}
+
 func report(e *client, bans ...edge.BanReport) *http.Response {
 	return e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-a", Bans: bans})
 }
@@ -579,7 +613,7 @@ func TestLiftingABanIsAuditedAndServedToEdges(t *testing.T) {
 		t.Fatalf("audit %v", got)
 	}
 	got := edgeDenylist(t, e)
-	if len(got.Lifts) != 1 || got.Lifts[0].IP != "2001:db8:1:2::" || got.Lifts[0].At != now.UnixMilli() {
+	if len(got.Lifts) != 1 || got.Lifts[0].IP != "2001:db8:1:2::" || got.Lifts[0].At != (now.UnixMicro()+999)/1000 {
 		t.Fatalf("lifts %+v", got.Lifts)
 	}
 	if b := bans(t, pub); len(b) != 1 || !b[0].LiftPending {
@@ -628,15 +662,53 @@ func TestLateReportOfALiftedBanIsListedAsLifted(t *testing.T) {
 	h.advance(time.Second)
 	late := edge.StatsReport{Instance: "edge-b", Bans: []edge.BanReport{ban("203.0.113.5", now.Add(-30*time.Second), time.Hour)}}
 	status(t, e.do("POST", "/v1/edge/report", late), http.StatusOK)
-	// A renewal that starts after the lift on the same edge clears it.
+	pending := func() map[string]bool {
+		got := map[string]bool{}
+		for _, b := range bans(t, pub) {
+			got[b.Edge] = b.LiftPending
+		}
+		return got
+	}
+	if got := pending(); len(got) != 2 || !got["edge-b"] {
+		t.Fatalf("lift pending after the late report: %v", got)
+	}
+	// A renewal that starts after the lift on the same edge clears it, and a
+	// first report from another edge is not pending.
 	h.advance(time.Second)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-b", Bans: []edge.BanReport{ban("203.0.113.5", h.now(), time.Hour)}}), http.StatusOK)
 	fresh := edge.StatsReport{Instance: "edge-c", Bans: []edge.BanReport{ban("203.0.113.5", h.now(), time.Hour)}}
 	status(t, e.do("POST", "/v1/edge/report", fresh), http.StatusOK)
+	got := pending()
+	if len(got) != 3 || !got["edge-a"] || got["edge-b"] || got["edge-c"] {
+		t.Fatalf("lift pending by edge: %v", got)
+	}
+}
+
+// The edge lifts a ban that started before the served lift time (whole ms)
+// and admin lists a ban as lifted when the lift came after the ban started
+// (microseconds). A ban that started in the ms just before a lift is lifted
+// on both, and one that started in the ms after it on neither.
+func TestLiftTimeAgreesWithAdminAtMillisecondPrecision(t *testing.T) {
+	h, pub, e, _ := listHarness(t)
+	t0 := h.now().Truncate(time.Millisecond)
+	h.advance(t0.Add(500 * time.Microsecond).Sub(h.now()))
+	status(t, report(e, ban("203.0.113.5", t0, time.Hour)), http.StatusOK)
+	status(t, pub.do("POST", "/api/bans/lift", map[string]string{"ip": "203.0.113.5"}), http.StatusNoContent)
+	later := edge.StatsReport{Instance: "edge-b", Bans: []edge.BanReport{ban("203.0.113.5", t0.Add(time.Millisecond), time.Hour)}}
+	status(t, e.do("POST", "/v1/edge/report", later), http.StatusOK)
+	lifts := edgeDenylist(t, e).Lifts
+	if len(lifts) != 1 {
+		t.Fatalf("lifts %+v", lifts)
+	}
+	// The edge lifts a ban when Start < At.
+	if at := lifts[0].At; at <= t0.UnixMilli() || at > t0.UnixMilli()+1 {
+		t.Fatalf("lift at %d: want a ban from %d lifted and one from %d not", at, t0.UnixMilli(), t0.UnixMilli()+1)
+	}
 	got := map[string]bool{}
 	for _, b := range bans(t, pub) {
 		got[b.Edge] = b.LiftPending
 	}
-	if len(got) != 3 || !got["edge-a"] || !got["edge-b"] || got["edge-c"] {
+	if len(got) != 2 || !got["edge-a"] || got["edge-b"] {
 		t.Fatalf("lift pending by edge: %v", got)
 	}
 }

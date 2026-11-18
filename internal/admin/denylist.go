@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -578,6 +581,16 @@ func denylistTag(ctx context.Context, q querier) (string, error) {
 	return `"` + hex.EncodeToString(sum[:16]) + `"`, nil
 }
 
+// denylistCache holds the encoded response for one ETag. Every edge that
+// misses the tag would otherwise read every list and encode up to tens of MB
+// itself, so admin memory would grow with the fleet. One entry bounds it, and
+// mu makes concurrent misses for the same tag build once.
+type denylistCache struct {
+	mu   sync.Mutex
+	tag  string
+	body []byte
+}
+
 // denylist serves GET /v1/denylist: the enabled lists by name, and the lifts
 // of the last day. Separate from the snapshot, so list churn never makes
 // edges recompile their config.
@@ -591,29 +604,48 @@ func (s *Server) denylist(w http.ResponseWriter, r *http.Request, _ *principal) 
 		w.WriteHeader(http.StatusNotModified)
 		return nil
 	}
-	var out edge.DenylistResponse
+	c := &s.denylistResponse
+	c.mu.Lock()
+	// The tag is read again inside the transaction, so the body always
+	// matches the tag it is served with, even if the state changed since the
+	// first read. A body already built for that tag is kept.
 	err = pgx.BeginTxFunc(ctx, s.edgeDB, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		var err error
-		if tag, err = denylistTag(ctx, tx); err != nil {
+		if tag, err = denylistTag(ctx, tx); err != nil || tag == c.tag {
 			return err
 		}
+		var out edge.DenylistResponse
 		if out.Lists, out.Dropped, err = servedLists(ctx, tx); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, "SELECT ip, floor(extract(epoch FROM lifted_at) * 1000)::bigint FROM ban_lifts WHERE lifted_at > $1 ORDER BY id DESC LIMIT $2", s.now().Add(-banLiftKeep), banLifts)
+		rows, err := tx.Query(ctx, "SELECT ip, ceil(extract(epoch FROM lifted_at) * 1000)::bigint FROM ban_lifts WHERE lifted_at > $1 ORDER BY id DESC LIMIT $2", s.now().Add(-banLiftKeep), banLifts)
 		if err != nil {
 			return err
 		}
-		out.Lifts, err = pgx.CollectRows(rows, pgx.RowToStructByPos[edge.BanLift])
-		return err
+		if out.Lifts, err = pgx.CollectRows(rows, pgx.RowToStructByPos[edge.BanLift]); err != nil {
+			return err
+		}
+		// Empty slices, so the body says [] and not null.
+		out.Lists, out.Dropped, out.Lifts = orEmpty(out.Lists), orEmpty(out.Dropped), orEmpty(out.Lifts)
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(out); err != nil {
+			return err
+		}
+		c.tag, c.body = tag, buf.Bytes()
+		return nil
 	})
+	body := c.body
+	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	// Empty slices, so the body says [] and not null.
-	out.Lists, out.Dropped, out.Lifts = orEmpty(out.Lists), orEmpty(out.Dropped), orEmpty(out.Lifts)
-	w.Header().Set("ETag", tag)
-	return writeJSON(w, http.StatusOK, out)
+	h := w.Header()
+	h.Set("ETag", tag)
+	h.Set("Content-Type", "application/json")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, err = w.Write(body)
+	return err
 }
 
 // servedLists returns the enabled, fetched lists in the order they were

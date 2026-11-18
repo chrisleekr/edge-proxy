@@ -68,6 +68,9 @@ type FieldDef struct {
 	// Exact means values are names compared whole: only eq, ne, in and
 	// not_in apply.
 	Exact bool
+	// Deprecated fields still validate and run; the rule builder stops
+	// offering them because a better field replaces them.
+	Deprecated bool
 }
 
 // Case is the letter case of a field's values.
@@ -107,7 +110,7 @@ var Fields = []FieldDef{
 	{Name: SignalsField, Label: "Client Signals", Type: TypeStringList, Source: SourceEdge, Exact: true},
 	{Name: VerifiedBotField, Label: "Verified Crawler", Type: TypeBool, Source: SourceEdge},
 	{Name: IPListsField, Label: "IP lists", Type: TypeStringList, Source: SourceEdge, Exact: true},
-	{Name: DenylistedField, Label: "On any IP list", Type: TypeBool, Source: SourceEdge},
+	{Name: DenylistedField, Label: "On any IP list", Type: TypeBool, Source: SourceEdge, Deprecated: true},
 	{Name: "edge.locale", Label: "Locale", Type: TypeString, Source: SourceLocale},
 	{Name: "http.request.jwt.claims", Label: "JWT claim", Type: TypeStringList, Keyed: true, Source: SourceJWT},
 }
