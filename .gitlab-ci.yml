@@ -34,7 +34,7 @@ variables:
   CACHE_COMPRESSION_LEVEL: fastest
 
 default:
-  image: golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d
+  image: golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf
   # Lets auto-cancel stop a superseded pipeline.
   interruptible: true
   # One cache per job: race, fuzz and cover builds differ, so a shared key
@@ -119,7 +119,7 @@ commits:
 
 docs:
   stage: check
-  image: ghcr.io/astral-sh/uv:0.13.8-python3.12-alpine@sha256:77f6e42a88636e1a4eb30d0a250aaba62226e93566df21855bc3a2709865b3be
+  image: ghcr.io/astral-sh/uv:0.13.9-python3.12-alpine@sha256:027aeaa2c0ed9e50cd8218251074998aeeebfd07c7a5f15c0185a43688809d2c
   cache: []
   script:
     - ./scripts/ci/docs.sh
