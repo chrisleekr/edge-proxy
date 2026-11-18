@@ -95,7 +95,7 @@ jobs:
       # Keep in step with node_version in scripts/ci/node.sh.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 26.13.0
+          node-version: 26.13.1
           cache: npm
           cache-dependency-path: web/admin/package-lock.json
       # Playwright ships a separate WebKit build per Ubuntu release, and
@@ -121,7 +121,7 @@ jobs:
       # Keep in step with node_version in scripts/ci/node.sh.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 26.13.0
+          node-version: 26.13.1
           cache: npm
           cache-dependency-path: autopilot/package-lock.json
       # testcontainers uses the runner's Docker daemon.
