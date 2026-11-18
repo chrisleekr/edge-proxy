@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -80,14 +81,16 @@ func TestSharedKeyGuardBaselineSpansAKeyChange(t *testing.T) {
 	status(t, pub.save(`"0"`, c, adminTest), 200)
 	status(t, pub.publishDraft("v1"), 201)
 	h.advance(4 * time.Minute)
-	// Version 1 limited 40% in one bucket; version 2, per-IP, limited none.
+	// Version 1 limited 40% in one bucket; version 2, per-IP, limited 16 a
+	// minute, all from one address.
 	h.putStats(1, 3, 1_000, 0, 0, []int64{1_000}, `[{"id":"login","evaluated":1000,"limited":400}]`,
 		`[{"rule":"login","key":"k","display":"198.51.100.7","limited":200}]`)
 	c.RateLimitRules[0].Key = []string{"ip"}
 	status(t, pub.save(pub.revision(), c, adminTest), 200)
 	status(t, pub.publishDraft("v2"), 201)
 	h.advance(4 * time.Minute)
-	h.putStats(2, 3, 1_000, 0, 0, []int64{1_000}, `[{"id":"login","evaluated":1000,"limited":0}]`, "[]")
+	h.putStats(2, 3, 1_000, 0, 0, []int64{1_000}, `[{"id":"login","evaluated":1000,"limited":16}]`,
+		`[{"rule":"login","key":"k2","display":"203.0.113.9","limited":16}]`)
 	c.Global.Defaults.BodyLimit = 2048 // a publish that leaves login unchanged
 	status(t, pub.save(pub.revision(), c, adminTest), 200)
 	status(t, pub.publishDraft("v3"), 201)
@@ -97,7 +100,14 @@ func TestSharedKeyGuardBaselineSpansAKeyChange(t *testing.T) {
 	if err := h.s.runGuard(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if out := outcomeOf(t, pub, 3); out.Decision != decisionOK || out.Signals["unchanged_rule_limited_ratio"].Tripped {
+	out := outcomeOf(t, pub, 3)
+	if out.Decision != decisionOK || out.Signals["unchanged_rule_limited_ratio"].Tripped {
 		t.Fatalf("outcome %+v", out)
+	}
+	// 1,200 shared limits stay whole and the 48 per-IP ones all go to the
+	// heavy address, of 6,000 requests. The sampling allowance must not eat
+	// into the shared count.
+	if b := out.Signals["unchanged_rule_limited_ratio"].Baseline; math.Abs(b-0.2) > 1e-9 {
+		t.Fatalf("baseline %v, want 0.2", b)
 	}
 }

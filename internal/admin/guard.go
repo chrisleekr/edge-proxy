@@ -201,7 +201,7 @@ func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args .
 		return nil, err
 	}
 	c := &cohort{rules: map[string]*edge.RuleCounts{}, configRules: map[string]bool{}}
-	heavy := map[string]uint64{}
+	heavy, perClient := map[string]uint64{}, map[string]uint64{}
 	sharedBy := map[int64]map[string]bool{}
 	for _, r := range rows {
 		shared, ok := sharedBy[r.Version]
@@ -236,6 +236,7 @@ func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args .
 			}
 			if !shared[rc.ID] {
 				heavy[rc.ID] += heavyIn(rc.Limited, top[rc.ID])
+				perClient[rc.ID] += rc.Limited
 			}
 			addRule(sum, rc)
 		}
@@ -254,8 +255,10 @@ func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args .
 			addRule(sum, edge.RuleCounts{Evaluated: r.Requests, Limited: ro.Blocked, WouldLimit: ro.WouldBlock})
 		}
 	}
+	// Heavy subjects and their allowance come only out of the per-client
+	// rows' count: a shared row's count stays whole.
 	for id, h := range heavy {
-		c.rules[id].Limited = withoutHeavy(c.rules[id].Limited, h)
+		c.rules[id].Limited -= perClient[id] - withoutHeavy(perClient[id], h)
 	}
 	return c, nil
 }
