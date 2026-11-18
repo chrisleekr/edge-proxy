@@ -427,7 +427,6 @@ func strict(args json.RawMessage, v any) error {
 	return nil
 }
 
-// untrusted marks a value whose strings clients wrote.
 // namedSignals replaces each row's client_signals array, which is in the
 // edge's bit order, with counts by signal name, so the model can read them.
 func namedSignals(raw json.RawMessage) any {
@@ -448,6 +447,7 @@ func namedSignals(raw json.RawMessage) any {
 	return rows
 }
 
+// untrusted marks a value whose strings clients wrote.
 func untrusted(v any) map[string]any { return map[string]any{"untrusted": v} }
 
 func minutesArg(m int) (int, error) {
