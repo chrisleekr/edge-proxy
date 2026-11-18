@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	// maxReport bounds one stats report body.
-	maxReport = 1 << 20
+	// maxReport bounds one stats report body: a full ban batch is up to about
+	// 480 KB, beside the versions' counts.
+	maxReport = 2 << 20
 	// fleetWindow: an edge that reported within it counts toward fleet_size.
 	fleetWindow = time.Minute
 	// maxTopPerMinute bounds the most-limited subjects kept per version and
@@ -202,8 +203,8 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, _ *principal) (e
 	if len(rep.Upstream) > 2048 || strings.ContainsRune(rep.Upstream, 0) {
 		return fail(http.StatusUnprocessableEntity, "upstream must be at most 2048 characters, without NUL")
 	}
-	if !bansOK(rep.Bans) {
-		return fail(http.StatusUnprocessableEntity, fmt.Sprintf("bans must be at most %d, each with a ban key address, bounded text without NUL and a span of at most a week", edge.MaxBanReports))
+	if !bansOK(rep.Bans, s.now()) {
+		return fail(http.StatusUnprocessableEntity, fmt.Sprintf("bans must be at most %d, each with a ban key address, bounded text without NUL, a span of at most a week and an end at most a week and an hour from now", edge.MaxBanReports))
 	}
 	_, err = s.edgeDB.Exec(r.Context(), `INSERT INTO fleet (instance, last_seen, config_source, bootstrap_age_seconds, versions, max_schema, deployment, upstream) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (instance) DO UPDATE SET last_seen = $2, config_source = $3, bootstrap_age_seconds = $4, versions = $5, max_schema = $6, deployment = $7, upstream = $8`,
@@ -211,11 +212,13 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, _ *principal) (e
 	if err != nil {
 		return err
 	}
+	// Before the bans, which can fail: the edge never resends, so its counts
+	// are kept either way.
+	s.agg.add(s.now(), rep.Versions)
+	ingested = true
 	if err := s.recordBans(r.Context(), rep.Instance, rep.Bans); err != nil {
 		return err
 	}
-	s.agg.add(s.now(), rep.Versions)
-	ingested = true
 	var a edge.ReportAnswer
 	if err := s.edgeDB.QueryRow(r.Context(), "SELECT count(*) FROM fleet WHERE last_seen > $1", s.now().Add(-fleetWindow)).Scan(&a.FleetSize); err != nil {
 		return err

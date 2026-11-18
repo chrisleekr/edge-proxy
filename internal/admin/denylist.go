@@ -34,9 +34,11 @@ const (
 	denylistFetchTimeout = time.Minute
 	// maxDenylistSources bounds the lists: an edge set holds at most this many.
 	maxDenylistSources = expr.MaxIPLists
-	// banLifts bounds the lifts one edge response carries; lifts older than
-	// banLiftKeep are never sent, as no ban outlasts it.
-	banLifts    = 500
+	// banLifts bounds the lifts one edge response carries (the edge sets no
+	// limit; a lift is about 45 bytes), so a bulk lift inside one poll
+	// interval is not cut. Lifts older than banLiftKeep are never sent, as no
+	// ban outlasts it.
+	banLifts    = 10_000
 	banLiftKeep = 24 * time.Hour
 	// banLiftShown is how long a lifted ban stays on the Banned IPs list:
 	// edges apply a lift on their next poll, about a minute.
@@ -48,6 +50,9 @@ const (
 	maxBanRule, maxBanHost, maxBanPath = 200, 255, 128
 	// maxBanSpan bounds a reported ban's length, well over the longest ban.
 	maxBanSpan = 7 * 24 * time.Hour
+	// banClockSkew is how far past now plus maxBanSpan a ban may end, for an
+	// edge whose clock runs ahead.
+	banClockSkew = time.Hour
 )
 
 func (s *Server) denylistRoutes() {
@@ -396,18 +401,10 @@ func (s *Server) lookupDenylists(w http.ResponseWriter, r *http.Request, _ *prin
 	}
 	ip = ip.Unmap()
 	ctx := r.Context()
-	rows, err := s.db.Query(ctx, "SELECT d.id, d.name, d.url FROM denylist_sources d JOIN denylist_sets s ON s.source_id = d.id WHERE d.enabled ORDER BY d.name")
-	if err != nil {
-		return err
-	}
 	type src struct {
 		ID   int64
 		Name string
 		URL  string
-	}
-	srcs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[src])
-	if err != nil {
-		return err
 	}
 	type hit struct {
 		ID     int64  `json:"id"`
@@ -416,20 +413,34 @@ func (s *Server) lookupDenylists(w http.ResponseWriter, r *http.Request, _ *prin
 		Prefix string `json:"prefix"`
 	}
 	hits := []hit{}
-	for _, d := range srcs {
-		var text string
-		if err := s.db.QueryRow(ctx, "SELECT prefixes FROM denylist_sets WHERE source_id = $1", d.ID).Scan(&text); errors.Is(err, pgx.ErrNoRows) {
-			continue // removed since the first query
-		} else if err != nil {
+	// One snapshot, so a list turned off or removed between the reads cannot
+	// be half seen. Lists are still read one at a time to bound memory.
+	err = pgx.BeginTxFunc(ctx, s.db, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, "SELECT d.id, d.name, d.url FROM denylist_sources d JOIN denylist_sets s ON s.source_id = d.id WHERE d.enabled ORDER BY d.name")
+		if err != nil {
 			return err
 		}
-		for line := range strings.Lines(text) {
-			// Stored prefixes were written by parseList, so they parse.
-			if p, err := netip.ParsePrefix(strings.TrimSpace(line)); err == nil && p.Contains(ip) {
-				hits = append(hits, hit{d.ID, d.Name, d.URL, p.String()})
-				break
+		srcs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[src])
+		if err != nil {
+			return err
+		}
+		for _, d := range srcs {
+			var text string
+			if err := tx.QueryRow(ctx, "SELECT prefixes FROM denylist_sets WHERE source_id = $1", d.ID).Scan(&text); err != nil {
+				return err
+			}
+			for line := range strings.Lines(text) {
+				// Stored prefixes were written by parseList, so they parse.
+				if p, err := netip.ParsePrefix(strings.TrimSpace(line)); err == nil && p.Contains(ip) {
+					hits = append(hits, hit{d.ID, d.Name, d.URL, p.String()})
+					break
+				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	return writeJSON(w, http.StatusOK, hits)
 }
@@ -478,6 +489,11 @@ func (s *Server) liftBan(w http.ResponseWriter, r *http.Request, p *principal) e
 	key := ratelimit.BanKey(ip.Unmap()).String()
 	ctx := r.Context()
 	err = s.change(ctx, p.actor, func(tx pgx.Tx) (admindb.Event, error) {
+		// Serializes lifts, so ids commit in order: the ETag is max(id), and a
+		// lower id committing after a higher one would leave edges on a 304.
+		if _, err := tx.Exec(ctx, "LOCK TABLE ban_lifts IN EXCLUSIVE MODE"); err != nil {
+			return admindb.Event{}, err
+		}
 		now := s.now()
 		if _, err := tx.Exec(ctx, "INSERT INTO ban_lifts (ip, lifted_at, actor) VALUES ($1, $2, $3)", key, now, p.actor); err != nil {
 			return admindb.Event{}, err
@@ -493,7 +509,8 @@ func (s *Server) liftBan(w http.ResponseWriter, r *http.Request, p *principal) e
 }
 
 // recordBans upserts an edge's reported bans: a renewal updates the row. A
-// report that starts a ban after a lift clears the lift mark. Applied in
+// ban is marked lifted by the latest lift of its address after the ban
+// started, whether the lift came before or after this report. Applied in
 // order, so the last report of an address wins.
 func (s *Server) recordBans(ctx context.Context, replica string, bans []edge.BanReport) error {
 	if len(bans) == 0 {
@@ -501,9 +518,10 @@ func (s *Server) recordBans(ctx context.Context, replica string, bans []edge.Ban
 	}
 	var b pgx.Batch
 	for _, x := range bans {
-		b.Queue(`INSERT INTO bans (replica, ip, rule, host, path, started_at, ends_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		b.Queue(`INSERT INTO bans (replica, ip, rule, host, path, started_at, ends_at, lifted_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT max(lifted_at) FROM ban_lifts WHERE ip = $2 AND lifted_at > $6))
 			ON CONFLICT (replica, ip) DO UPDATE SET rule = $3, host = $4, path = $5, started_at = $6, ends_at = $7,
-				lifted_at = CASE WHEN bans.lifted_at < $6 THEN NULL ELSE bans.lifted_at END`,
+				lifted_at = (SELECT max(lifted_at) FROM ban_lifts WHERE ip = $2 AND lifted_at > $6)`,
 			replica, x.IP, x.Rule, x.Host, x.Path, time.UnixMilli(x.Start), time.UnixMilli(x.End))
 	}
 	res := s.edgeDB.SendBatch(ctx, &b)
@@ -518,8 +536,11 @@ func (s *Server) recordBans(ctx context.Context, replica string, bans []edge.Ban
 
 // bansOK reports whether every reported ban is one an edge can send: at most
 // MaxBanReports, each with a ban key address, bounded text without NUL and a
-// span within maxBanSpan.
-func bansOK(bans []edge.BanReport) bool {
+// span within maxBanSpan, ending no later than now plus maxBanSpan and
+// banClockSkew: a far future time breaks the JSON of GET /api/bans and
+// outlives retention.
+func bansOK(bans []edge.BanReport, now time.Time) bool {
+	latest := now.Add(maxBanSpan + banClockSkew).UnixMilli()
 	if len(bans) > edge.MaxBanReports {
 		return false
 	}
@@ -527,7 +548,7 @@ func bansOK(bans []edge.BanReport) bool {
 		ip, err := netip.ParseAddr(b.IP)
 		if err != nil || ratelimit.BanKey(ip) != ip || ip.Is4In6() ||
 			!textFits(b.Rule, maxBanRule) || !textFits(b.Host, maxBanHost) || !textFits(b.Path, maxBanPath) ||
-			b.Start <= 0 || b.End < b.Start || b.End-b.Start > maxBanSpan.Milliseconds() {
+			b.Start <= 0 || b.End < b.Start || b.End-b.Start > maxBanSpan.Milliseconds() || b.End > latest {
 			return false
 		}
 	}

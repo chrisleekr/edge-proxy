@@ -1589,6 +1589,8 @@ test('an IP list is added and fetched, and a banned IP is lifted after a confirm
   await page.getByLabel('List address').fill(process.env.SMOKE_LIST_URL!);
   await page.getByRole('button', { name: 'Add list' }).click();
   const row = page.getByRole('row').filter({ hasText: process.env.SMOKE_LIST_URL! });
+  // The POST must finish before a reload below can abort it.
+  await expect(row).toBeVisible();
   // The smoke run fetches every second; the page rereads once a minute, so reload.
   await expect(async () => {
     await page.reload();
@@ -1601,7 +1603,7 @@ test('an IP list is added and fetched, and a banned IP is lifted after a confirm
   const ban = page.getByRole('row').filter({ hasText: '203.0.113.9' });
   await expect(ban).toContainText('/wp-login.php');
   await ban.getByRole('button', { name: 'Lift ban' }).click();
-  await expect(page.getByRole('dialog')).toContainText('is served again on every edge within about a minute, and is banned again if it trips the trap');
+  await expect(page.getByRole('dialog')).toContainText('ends on every edge within about a minute. Other rules still apply, and 203.0.113.9 is banned again if it trips the trap');
   // The table cell's nowrap must not reach the dialog, or its text is cut off.
   expect(await page.getByRole('dialog').evaluate((d) => d.scrollWidth <= d.clientWidth)).toBe(true);
   await confirm('Lift ban');

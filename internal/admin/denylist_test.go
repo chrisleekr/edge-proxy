@@ -15,6 +15,7 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/jwks"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
+	"github.com/chrisleekr/edge-proxy/internal/testenv"
 )
 
 // trustLists fetches IP lists through the SSRF-guarded client, trusting the
@@ -134,7 +135,9 @@ func TestDenylistSourceIsAuditedFetchedAndServed(t *testing.T) {
 	if err := h.db.QueryRow(t.Context(), "SELECT details FROM audit_events WHERE action = 'denylist.source_added'").Scan(&details); err != nil || details["name"] != listName || details["wide"] != false {
 		t.Fatalf("audit details %v, %v", details, err)
 	}
-	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
+	// The status row is written after the set, so wait for it: stopping the
+	// leader between the two leaves no status.
+	leadBriefly(t, h, func() bool { return src(t, pub, listName).LastSuccessAt != nil })
 	if got := prefixes(t, e); !slices.Equal(got, samplePrefixes) {
 		t.Fatalf("prefixes %v", got)
 	}
@@ -284,7 +287,9 @@ func TestDenylistWideListKeepsWideRanges(t *testing.T) {
 	h.trustLists(f)
 	addNamed(t, pub, f, "plain", "/plain.txt", false)
 	addNamed(t, pub, f, "broad", "/broad.txt", true)
-	leadBriefly(t, h, func() bool { return len(edgeDenylist(t, e).Lists) == 2 })
+	leadBriefly(t, h, func() bool {
+		return src(t, pub, "plain").LastSuccessAt != nil && src(t, pub, "broad").LastSuccessAt != nil
+	})
 	got := map[string][]string{}
 	for _, l := range edgeDenylist(t, e).Lists {
 		got[l.Name] = l.Prefixes
@@ -349,6 +354,9 @@ func TestDenylistChangeIsAuditedAndUnchangedIsNot(t *testing.T) {
 
 	status(t, pub.do("POST", listPath(t, pub, listName, "/refresh"), nil), http.StatusNoContent)
 	leadBriefly(t, h, func() bool { return src(t, pub, listName).LastAttemptAt != nil })
+	if s := src(t, pub, listName); s.Failures != 0 || s.LastError != "" {
+		t.Fatalf("unchanged refresh failed: %+v", s)
+	}
 	if got := h.auditActors("denylist.changed"); len(got) != 1 {
 		t.Fatalf("changes audited by %v", got)
 	}
@@ -545,6 +553,7 @@ func TestBanReportsAreValidated(t *testing.T) {
 		{"NUL in the host", []edge.BanReport{{IP: "203.0.113.5", Rule: "r", Host: "h\x00", Path: "/", Start: now.UnixMilli(), End: now.UnixMilli() + 1}}},
 		{"ending before it starts", []edge.BanReport{ban("203.0.113.5", now, -time.Hour)}},
 		{"lasting over a week", []edge.BanReport{ban("203.0.113.5", now, 8*24*time.Hour)}},
+		{"starting in year 10000", []edge.BanReport{ban("203.0.113.5", time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC), time.Hour)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status(t, report(e, tc.bans...), http.StatusUnprocessableEntity)
@@ -587,6 +596,48 @@ func TestLiftingABanIsAuditedAndServedToEdges(t *testing.T) {
 	h.advance(banLiftShown + time.Minute)
 	if b := bans(t, pub); len(b) != 0 {
 		t.Fatalf("lifted ban still listed: %+v", b)
+	}
+}
+
+// A report whose bans cannot be stored fails, but its traffic counts are
+// kept: the edge never resends them.
+func TestBanWriteFailureKeepsTheReportsStats(t *testing.T) {
+	h, pub, e, _ := listHarness(t)
+	if _, err := h.owner.Exec(t.Context(), "REVOKE INSERT, UPDATE ON bans FROM "+testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+	rep := edge.StatsReport{Instance: "edge-a", Versions: []edge.StatsCounts{{Version: 1, Requests: 7, LatencyMS: []uint64{7}}}, Bans: []edge.BanReport{ban("203.0.113.5", h.now(), time.Hour)}}
+	status(t, e.do("POST", "/v1/edge/report", rep), http.StatusInternalServerError)
+	h.advance(time.Minute)
+	if err := h.s.flush(t.Context(), h.now()); err != nil {
+		t.Fatal(err)
+	}
+	if rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil)); len(rows) != 1 || rows[0].Requests != 7 {
+		t.Fatalf("stats %+v", rows)
+	}
+}
+
+// A report from another edge, for a ban that started before a lift, arrives
+// after the lift: the ban is listed as lifted, not as running. A ban that
+// started after the lift stays running.
+func TestLateReportOfALiftedBanIsListedAsLifted(t *testing.T) {
+	h, pub, e, _ := listHarness(t)
+	now := h.now()
+	status(t, report(e, ban("203.0.113.5", now.Add(-time.Minute), time.Hour)), http.StatusOK)
+	status(t, pub.do("POST", "/api/bans/lift", map[string]string{"ip": "203.0.113.5"}), http.StatusNoContent)
+	h.advance(time.Second)
+	late := edge.StatsReport{Instance: "edge-b", Bans: []edge.BanReport{ban("203.0.113.5", now.Add(-30*time.Second), time.Hour)}}
+	status(t, e.do("POST", "/v1/edge/report", late), http.StatusOK)
+	// A renewal that starts after the lift on the same edge clears it.
+	h.advance(time.Second)
+	fresh := edge.StatsReport{Instance: "edge-c", Bans: []edge.BanReport{ban("203.0.113.5", h.now(), time.Hour)}}
+	status(t, e.do("POST", "/v1/edge/report", fresh), http.StatusOK)
+	got := map[string]bool{}
+	for _, b := range bans(t, pub) {
+		got[b.Edge] = b.LiftPending
+	}
+	if len(got) != 3 || !got["edge-a"] || !got["edge-b"] || got["edge-c"] {
+		t.Fatalf("lift pending by edge: %v", got)
 	}
 }
 

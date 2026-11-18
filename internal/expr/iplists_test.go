@@ -134,13 +134,16 @@ func TestIPListsRefuseTooManyNameCombinations(t *testing.T) {
 }
 
 // A set returned by Lookup is shared, so appending to it must not change what
-// another address sees.
+// another caller sees. Three names make an unclipped set have spare capacity.
 func TestIPListsSetsAreCapped(t *testing.T) {
-	set := mustIPLists(t, []string{"a", "b"}, [][]netip.Prefix{prefixes(t, "10.0.0.0/8"), prefixes(t, "11.0.0.0/8")})
-	got := set.Lookup(netip.MustParseAddr("10.1.1.1"))
-	_ = append(got, "x")
-	if again := set.Lookup(netip.MustParseAddr("10.2.2.2")); !reflect.DeepEqual(again, []string{"a"}) {
-		t.Fatalf("shared set changed: %v", again)
+	p := prefixes(t, "10.0.0.0/8")
+	set := mustIPLists(t, []string{"a", "b", "c"}, [][]netip.Prefix{p, p, p})
+	addr := netip.MustParseAddr("10.1.1.1")
+	first := set.Lookup(addr)
+	_ = append(first, "x")
+	_ = append(set.Lookup(addr), "y")
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(first, want) || cap(first) != len(first) {
+		t.Fatalf("shared set changed or has spare capacity: %v cap %d", first, cap(first))
 	}
 }
 

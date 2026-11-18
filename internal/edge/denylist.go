@@ -63,16 +63,13 @@ type BanReport struct {
 	End   int64  `json:"end"`
 }
 
-// reportBan queues the ban now held on ip for the next stats report. A full
-// queue drops it and counts: reports never block or grow. The held ban is
-// sent, not the trip that asked for it, so a short ban that lost to a longer
-// one does not overwrite it in admin. Host and path come back already bounded.
-func (e *Edge) reportBan(ip netip.Addr) {
+// reportBan queues b for the next stats report. A full queue drops it and
+// counts: reports never block or grow. b is the ban in force, not the trip
+// that asked for it. Host and path are already bounded.
+func (e *Edge) reportBan(ip netip.Addr, b ratelimit.Ban) {
 	if e.banReports == nil {
 		return
 	}
-	// The ban was just added and ends in the future, so it is present.
-	b, _ := e.bans.Get(ip, 0)
 	select {
 	case e.banReports <- BanReport{IP: ratelimit.BanKey(ip).String(), Rule: b.Rule, Host: b.Host, Path: b.Path, Start: b.Start, End: b.End}:
 	default:

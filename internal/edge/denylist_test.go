@@ -492,7 +492,7 @@ func TestBanReportsBeyondTheCapAreDropped(t *testing.T) {
 	h := newHarness(t, map[string]string{"ADMIN_URL": admin.URL, "EDGE_SERVICE_TOKEN": "t0k"})
 	h.load(envelope(trapConfig(1)))
 	for i := range MaxBanReports + 5 {
-		trip(t, h, fmt.Sprintf("h%d.example.com", i))
+		trip(t, h, "a.example.com", "CloudFront-Viewer-Address", fmt.Sprintf("10.9.%d.%d:1", i/250, i%250))
 	}
 	if n := h.metrics()["edge_ban_reports_dropped_total"]; n != 5 {
 		t.Fatalf("dropped %v", n)

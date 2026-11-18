@@ -80,22 +80,25 @@ func (t *table[K, V]) put(k K, v V) bool {
 	return true
 }
 
-// putUnless sets k unless keep(old) holds for its current entry, or k is new
-// and its shard is full. It reports whether k now holds an entry. The check
-// and the write share one lock, so concurrent writers can't undo each other.
-func (t *table[K, V]) putUnless(k K, v V, keep func(old V) bool) bool {
+// upsert lets f decide the entry for k from its current one (found says
+// whether there is one). f returns the new entry and whether to store it; when
+// it declines, cur is the old entry. A new k in a full shard is refused
+// without calling f (ok false). Lookup, decision and write share one lock, so
+// concurrent writers can't undo each other.
+func (t *table[K, V]) upsert(k K, f func(old V, found bool) (V, bool)) (cur V, ok bool) {
 	s := t.shard(k)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old, ok := s.m[k]
-	if ok && keep(old) {
-		return true
+	old, found := s.m[k]
+	if !found && len(s.m) >= t.perShard {
+		return old, false
 	}
-	if !ok && len(s.m) >= t.perShard {
-		return false
+	nv, store := f(old, found)
+	if !store {
+		return old, true
 	}
-	s.m[k] = v
-	return true
+	s.m[k] = nv
+	return nv, true
 }
 
 // deleteIf removes k when del holds for its entry, under the shard lock.
@@ -224,12 +227,19 @@ func (p *Penalties) Len() int { return p.t.len() }
 
 // Ban is one banned client: the config rule ID that set it, when it started
 // and ends in Unix milliseconds, and the host and path of the request that
-// tripped the rule, for the access log.
+// tripped the rule, for the access log. Reported is the End last queued for
+// admin, so renewals are reported once per banReportEvery, not per request.
 type Ban struct {
 	Rule       string
 	Start, End int64
 	Host, Path string
+	Reported   int64
 }
+
+// banReportEvery is how far a renewal must move End past the last reported
+// End to be reported again, so a client that keeps tripping a trap can't
+// fill the report queue.
+const banReportEvery = int64(time.Minute / time.Millisecond)
 
 func (b Ban) expiry() int64 { return b.End }
 
@@ -262,14 +272,34 @@ func (b *Bans) Get(ip netip.Addr, now int64) (Ban, bool) {
 	return x, x.End > now
 }
 
-// Add records a ban and reports whether the client is now banned. A ban that
-// ends later than x stays as it is, so a short trap never cuts a long ban;
-// otherwise x replaces it. A full table refuses a new client: it is then not
-// banned (fail open) and the caller counts the drop.
+// Add records x and returns the ban now in force. A ban counts only while it
+// has not ended and its rule is in live (the client's pinned version); a dead
+// one is replaced even by a shorter x, as it is not enforced. A live ban that
+// ends no earlier than x stays, so a short trap never cuts a long ban;
+// otherwise x replaces it. report says whether the caller should queue cur for
+// admin: a new or different-rule ban always, a renewal of the same rule once
+// End has moved banReportEvery past the last reported End. ok is false when a
+// full table refuses a new client: it is then not banned (fail open) and the
+// caller counts the drop.
 // Host and path are copied, so the entry never keeps the request's buffers.
-func (b *Bans) Add(ip netip.Addr, x Ban) bool {
+func (b *Bans) Add(ip netip.Addr, x Ban, live map[string]bool) (cur Ban, report, ok bool) {
 	x.Host, x.Path = strings.Clone(x.Host[:min(len(x.Host), maxBanHost)]), strings.Clone(x.Path[:min(len(x.Path), maxBanPath)])
-	return b.t.putUnless(BanKey(ip), x, func(old Ban) bool { return old.End > x.End })
+	cur, ok = b.t.upsert(BanKey(ip), func(old Ban, found bool) (Ban, bool) {
+		report = true
+		if found && old.End > x.Start && live[old.Rule] {
+			if old.End >= x.End {
+				report = false
+				return old, false
+			}
+			report = old.Rule != x.Rule || x.End-old.Reported >= banReportEvery
+		}
+		x.Reported = old.Reported
+		if report {
+			x.Reported = x.End
+		}
+		return x, true
+	})
+	return cur, report && ok, ok
 }
 
 // Lift ends the ban on ip if it started before at (Unix ms), so a client

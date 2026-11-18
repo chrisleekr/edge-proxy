@@ -216,10 +216,11 @@ func TestSlot(t *testing.T) {
 
 func TestBans(t *testing.T) {
 	v4 := netip.MustParseAddr("198.51.100.7")
+	live := map[string]bool{"trap": true, "day": true, "minute": true, "week": true}
 
 	t.Run("a ban ends at its end time", func(t *testing.T) {
 		b := NewBans(100)
-		if !b.Add(v4, Ban{Rule: "trap", End: 1000}) {
+		if _, _, ok := b.Add(v4, Ban{Rule: "trap", End: 1000}, live); !ok {
 			t.Fatal("ban refused")
 		}
 		if got, ok := b.Get(v4, 999); !ok || got.Rule != "trap" {
@@ -232,7 +233,7 @@ func TestBans(t *testing.T) {
 
 	t.Run("addresses in one IPv6 /64 share a ban and another /64 does not", func(t *testing.T) {
 		b := NewBans(100)
-		b.Add(netip.MustParseAddr("2001:db8:1:2::1"), Ban{Rule: "trap", End: 1000})
+		b.Add(netip.MustParseAddr("2001:db8:1:2::1"), Ban{Rule: "trap", End: 1000}, live)
 		if _, ok := b.Get(netip.MustParseAddr("2001:db8:1:2:ffff::9"), 0); !ok {
 			t.Fatal("same /64 is not banned")
 		}
@@ -245,7 +246,7 @@ func TestBans(t *testing.T) {
 		b := NewBans(numShards) // one ban per shard
 		refused := 0
 		for i := range 10 * numShards {
-			if !b.Add(netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)}), Ban{Rule: "trap", End: 1000}) {
+			if _, _, ok := b.Add(netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)}), Ban{Rule: "trap", End: 1000}, live); !ok {
 				refused++
 			}
 		}
@@ -256,8 +257,8 @@ func TestBans(t *testing.T) {
 
 	t.Run("a repeat ban extends the end even in a full table", func(t *testing.T) {
 		b := NewBans(numShards)
-		b.Add(v4, Ban{Rule: "trap", End: 1000})
-		if !b.Add(v4, Ban{Rule: "trap", End: 5000}) {
+		b.Add(v4, Ban{Rule: "trap", End: 1000}, live)
+		if _, _, ok := b.Add(v4, Ban{Rule: "trap", End: 5000}, live); !ok {
 			t.Fatal("renewal refused")
 		}
 		if _, ok := b.Get(v4, 2000); !ok {
@@ -267,22 +268,80 @@ func TestBans(t *testing.T) {
 
 	t.Run("a shorter ban keeps the longer one and a longer ban replaces a shorter one", func(t *testing.T) {
 		b := NewBans(100)
-		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000, Path: "/a"})
-		if !b.Add(v4, Ban{Rule: "minute", Start: 5, End: 2000, Path: "/b"}) {
+		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000, Path: "/a"}, live)
+		if _, _, ok := b.Add(v4, Ban{Rule: "minute", Start: 5, End: 2000, Path: "/b"}, live); !ok {
 			t.Fatal("shorter ban reported as refused")
 		}
 		if got, _ := b.Get(v4, 0); got.Rule != "day" || got.Start != 1 || got.End != 9000 || got.Path != "/a" {
 			t.Fatalf("after the shorter ban: %+v", got)
 		}
-		b.Add(v4, Ban{Rule: "week", Start: 6, End: 20000})
+		b.Add(v4, Ban{Rule: "week", Start: 6, End: 20000}, live)
 		if got, _ := b.Get(v4, 0); got.Rule != "week" || got.End != 20000 {
 			t.Fatalf("after the longer ban: %+v", got)
 		}
 	})
 
+	t.Run("a ban whose rule is no longer live is replaced by a shorter live ban", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000}, live)
+		cur, report, ok := b.Add(v4, Ban{Rule: "minute", Start: 5, End: 2000}, map[string]bool{"minute": true})
+		if !ok || !report || cur.Rule != "minute" {
+			t.Fatalf("cur=%+v report=%v ok=%v", cur, report, ok)
+		}
+		if got, _ := b.Get(v4, 0); got.Rule != "minute" || got.End != 2000 {
+			t.Fatalf("after the live ban: %+v", got)
+		}
+	})
+
+	t.Run("an ended ban is replaced by a shorter one", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000}, live)
+		b.Add(v4, Ban{Rule: "minute", Start: 9500, End: 9600}, live)
+		if got, _ := b.Get(v4, 9500); got.Rule != "minute" {
+			t.Fatalf("after the ended ban: %+v", got)
+		}
+	})
+
+	t.Run("a renewal is reported once End has moved a report interval", func(t *testing.T) {
+		b := NewBans(100)
+		hour := int64(time.Hour / time.Millisecond)
+		steps := []struct {
+			name       string
+			rule       string
+			start      int64
+			wantReport bool
+		}{
+			{"first ban", "trap", 0, true},
+			{"renewal a second later", "trap", 1000, false},
+			{"renewal just under the interval", "trap", banReportEvery - 1, false},
+			{"renewal at the interval", "trap", banReportEvery, true},
+			{"renewal a second after that", "trap", banReportEvery + 1000, false},
+			{"another live rule with a longer ban", "day", banReportEvery + 2000, true},
+		}
+		for _, st := range steps {
+			end := st.start + hour
+			if st.rule == "day" {
+				end += hour
+			}
+			cur, report, ok := b.Add(v4, Ban{Rule: st.rule, Start: st.start, End: end}, live)
+			if !ok || report != st.wantReport || cur.End != end {
+				t.Fatalf("%s: cur=%+v report=%v ok=%v", st.name, cur, report, ok)
+			}
+		}
+	})
+
+	t.Run("a kept longer ban is not reported", func(t *testing.T) {
+		b := NewBans(100)
+		b.Add(v4, Ban{Rule: "day", Start: 1, End: 9000}, live)
+		cur, report, ok := b.Add(v4, Ban{Rule: "minute", Start: 5, End: 2000}, live)
+		if !ok || report || cur.Rule != "day" {
+			t.Fatalf("cur=%+v report=%v ok=%v", cur, report, ok)
+		}
+	})
+
 	t.Run("a lift ends a ban that started before it and not one that started after", func(t *testing.T) {
 		b := NewBans(100)
-		b.Add(v4, Ban{Rule: "trap", Start: 100, End: 9000})
+		b.Add(v4, Ban{Rule: "trap", Start: 100, End: 9000}, live)
 		b.Lift(v4, 100)
 		if _, ok := b.Get(v4, 0); !ok {
 			t.Fatal("a ban that started at the lift was lifted")
@@ -296,7 +355,7 @@ func TestBans(t *testing.T) {
 
 	t.Run("sweeping drops ended bans", func(t *testing.T) {
 		b := NewBans(100)
-		b.Add(v4, Ban{Rule: "trap", End: 1000})
+		b.Add(v4, Ban{Rule: "trap", End: 1000}, live)
 		b.Sweep(1000)
 		if b.Len() != 0 {
 			t.Fatalf("len after sweep = %d", b.Len())
@@ -305,7 +364,7 @@ func TestBans(t *testing.T) {
 
 	t.Run("the stored host and path are bounded", func(t *testing.T) {
 		b := NewBans(100)
-		b.Add(v4, Ban{Rule: "trap", End: 1000, Host: strings.Repeat("h", 1000), Path: strings.Repeat("p", 1000)})
+		b.Add(v4, Ban{Rule: "trap", End: 1000, Host: strings.Repeat("h", 1000), Path: strings.Repeat("p", 1000)}, live)
 		got, _ := b.Get(v4, 0)
 		if len(got.Host) != maxBanHost || len(got.Path) != maxBanPath {
 			t.Fatalf("host %d bytes, path %d bytes", len(got.Host), len(got.Path))
@@ -314,7 +373,7 @@ func TestBans(t *testing.T) {
 
 	t.Run("looking up a ban allocates nothing", func(t *testing.T) {
 		b := NewBans(100)
-		b.Add(v4, Ban{Rule: "trap", End: 1000, Host: "a.example.com", Path: "/wp-login.php"})
+		b.Add(v4, Ban{Rule: "trap", End: 1000, Host: "a.example.com", Path: "/wp-login.php"}, live)
 		if n := testing.AllocsPerRun(100, func() { b.Get(v4, 0) }); n != 0 {
 			t.Fatalf("%v allocations", n)
 		}

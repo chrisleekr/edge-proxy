@@ -36,8 +36,8 @@ type version struct {
 	// issuers by token iss.
 	issuers map[string]*issuer
 	// banRules are the IDs of config rules that set ban. A ban whose rule is
-	// not here is ignored, so removing the rule lifts its bans. Nil when no
-	// rule sets ban.
+	// not here is set aside, not deleted: it applies again if a rule with that
+	// ID returns before it ends. Nil when no rule sets ban.
 	banRules map[string]bool
 }
 

@@ -1,6 +1,8 @@
 package edge
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"testing"
 	"time"
@@ -162,7 +164,7 @@ func TestCanaryBanDoesNotReachTheStableCohort(t *testing.T) {
 	trip(t, h, "a.example.com", "CloudFront-Viewer-Address", in+":1")
 	edgeError(t, h.do("GET", "/", nil, "CloudFront-Viewer-Address", in+":1"), 403, "forbidden")
 	// The out-of-cohort client held a ban from an earlier cohort assignment.
-	h.srv.edge.bans.Add(netip.MustParseAddr(out), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli()})
+	h.srv.edge.bans.Add(netip.MustParseAddr(out), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli()}, map[string]bool{"trap": true})
 	if body := readBody(t, h.do("GET", "/", nil, "CloudFront-Viewer-Address", out+":1")); body != "upstream ok" {
 		t.Fatalf("stable cohort refused by the candidate's ban: %s", body)
 	}
@@ -204,7 +206,7 @@ func TestFullBanTableServesTheClient(t *testing.T) {
 	h.srv.edge.bans = ratelimit.NewBans(1)
 	h.srv.m.bans = h.srv.edge.bans
 	for i := range 1000 {
-		h.srv.edge.bans.Add(netip.AddrFrom4([4]byte{10, 1, byte(i / 250), byte(i % 250)}), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli()})
+		h.srv.edge.bans.Add(netip.AddrFrom4([4]byte{10, 1, byte(i / 250), byte(i % 250)}), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli()}, map[string]bool{"trap": true})
 	}
 	h.load(envelope(trapConfig(1)))
 	trip(t, h, "a.example.com")
@@ -237,5 +239,55 @@ func TestShorterBanDoesNotCutALongerOne(t *testing.T) {
 	edgeError(t, h.do("GET", "/", nil), 403, "forbidden")
 	if line := accessLine(t, h, 2); line["edge.decision"] != "banned" || line["edge.ban.rule"] != "day" || line["edge.ban.path"] != "/wp-login.php" {
 		t.Fatalf("banned line: %v", line)
+	}
+}
+
+// A client banned for a day by a trap that a later version removed is not
+// protected by that dead ban: tripping a shorter trap that is still live
+// bans it under the live rule.
+func TestDeadLongBanDoesNotShadowALiveShorterBan(t *testing.T) {
+	h := newHarness(t, nil)
+	day := testConfig(1)
+	day.ConfigRules = append(day.ConfigRules, snapshot.ConfigRule{ID: "day", Expression: mustParse(`starts_with(http.request.uri.path, "/wp-")`), Settings: snapshot.Settings{Block: new("block"), Ban: new(dur(24 * time.Hour))}})
+	h.load(envelope(day))
+	edgeError(t, h.do("GET", "/wp-login.php", nil), 403, "forbidden")
+	minute := testConfig(2)
+	minute.ConfigRules = append(minute.ConfigRules, snapshot.ConfigRule{ID: "minute", Expression: mustParse(`starts_with(http.request.uri.path, "/xmlrpc")`), Settings: snapshot.Settings{Block: new("block"), Ban: new(dur(time.Minute))}})
+	h.load(envelope(minute))
+	edgeError(t, h.do("GET", "/xmlrpc.php", nil), 403, "forbidden")
+	edgeError(t, h.do("GET", "/", nil), 403, "forbidden")
+	if n := h.metrics()[`edge_rejected_total{reason="banned"}`]; n != 1 {
+		t.Fatalf("banned rejections %v, want 1", n)
+	}
+}
+
+// A banned client that keeps tripping the trap queues one report, so one
+// scanner can't fill the queue; a renewal a minute or more later is reported
+// again.
+func TestRenewalsAreReportedOncePerMinute(t *testing.T) {
+	admin := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer admin.Close()
+	h := newHarness(t, map[string]string{"ADMIN_URL": admin.URL, "EDGE_SERVICE_TOKEN": "t0k", "STATS_INTERVAL": "30s"})
+	now := time.Now()
+	clock := h.fakeClock(now)
+	h.load(envelope(trapConfig(1)))
+	for range 5 {
+		trip(t, h, "a.example.com")
+	}
+	if n := len(h.srv.edge.banReports); n != 1 {
+		t.Fatalf("queued %d reports for one banned client, want 1", n)
+	}
+	clock.Store(now.Add(30 * time.Second).UnixMilli())
+	trip(t, h, "a.example.com")
+	if n := len(h.srv.edge.banReports); n != 1 {
+		t.Fatalf("queued %d reports for a renewal 30s later, want 1", n)
+	}
+	clock.Store(now.Add(time.Minute).UnixMilli())
+	trip(t, h, "a.example.com")
+	if n := len(h.srv.edge.banReports); n != 2 {
+		t.Fatalf("queued %d reports for a renewal a minute later, want 2", n)
+	}
+	if n := h.metrics()["edge_ban_reports_dropped_total"]; n != 0 {
+		t.Fatalf("dropped %v", n)
 	}
 }

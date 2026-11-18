@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,12 +72,20 @@ func FuzzDecodeAndCompile(f *testing.F) {
 	// A trap rule that bans the client IP.
 	trap := validEnvelope()
 	addTrap(trap.Active, new("block"), "24h")
-	if _, errs := CompileEnvelope(trap, testDeployment); errs != nil {
-		f.Fatalf("ban seed doesn't compile: %v", expr.Issues(errs))
-	}
 	trb, err := json.Marshal(trap)
 	if err != nil {
 		f.Fatal(err)
+	}
+	// Compile the decoded JSON, the form an edge reads, not the Go struct.
+	te, err := Decode(bytes.NewReader(trb))
+	if err != nil {
+		f.Fatalf("ban seed doesn't decode: %v", err)
+	}
+	if _, errs := CompileEnvelope(te, testDeployment); errs != nil {
+		f.Fatalf("ban seed doesn't compile: %v", expr.Issues(errs))
+	}
+	if i := slices.IndexFunc(te.Active.ConfigRules, func(r ConfigRule) bool { return r.ID == "trap" }); i < 0 || te.Active.ConfigRules[i].Settings.Ban == nil || time.Duration(*te.Active.ConfigRules[i].Settings.Ban) != 24*time.Hour {
+		f.Fatal("ban seed lost the trap rule's 24h ban")
 	}
 	f.Add(trb)
 	f.Fuzz(func(t *testing.T, data []byte) {

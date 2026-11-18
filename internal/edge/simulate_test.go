@@ -366,9 +366,16 @@ func TestSimulateIPLists(t *testing.T) {
 	for i := range tooMany {
 		tooMany[i] = fmt.Sprintf("list-%d", i)
 	}
-	for name, lists := range map[string][]string{"an uppercase name": {"AWS"}, "more lists than an edge holds": tooMany} {
-		if _, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: "/", IP: "198.51.100.7", IPLists: lists}); err == nil {
-			t.Errorf("%s accepted", name)
+	for name, tc := range map[string]struct {
+		lists []string
+		want  string
+	}{
+		"an uppercase name":             {[]string{"AWS"}, `"AWS" is not an IP list name`},
+		"more lists than an edge holds": {tooMany, fmt.Sprintf("%d lists, limit %d", expr.MaxIPLists+1, expr.MaxIPLists)},
+	} {
+		_, err := Simulate(cc, SimRequest{Method: "GET", Host: "h", Target: "/", IP: "198.51.100.7", IPLists: tc.lists})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %v, want one containing %q", name, err, tc.want)
 		}
 	}
 }

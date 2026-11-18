@@ -43,6 +43,10 @@ func TestCompileWarns(t *testing.T) {
 				Auth: &AuthSetting{Mode: "none"}, CORSPolicy: new(""), UpstreamTimeout: new(dur("5s")),
 			}})
 		}, "config_rules[0]", "every setting is overwritten"},
+		{"ban dropped by a later catch-all that blocks without ban", func(c *Config) {
+			addTrap(c, new("block"), "24h")
+			c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "catch-all", Expression: expr.True(), Settings: Settings{Block: new("log")}})
+		}, "config_rules[3]", "every setting is overwritten"},
 		{"host that is two things at once", func(c *Config) {
 			c.ConfigRules[0].Expression = mustParse(`http.host eq "a.example.com" and (ssl or http.host eq "b.example.com" and http.host eq "c.example.com")`)
 		}, "config_rules[0].expression", "can never all be true"},
@@ -516,5 +520,21 @@ func TestTemplateRender(t *testing.T) {
 	empty, _ := parseTemplate("")
 	if len(empty.Render(nil, nil)) != 0 {
 		t.Fatal("empty template rendered text")
+	}
+}
+
+// A list field matches when any element equals the value, so two eq terms on
+// it can both hold.
+func TestListFieldEqualityIsSatisfiable(t *testing.T) {
+	c := validConfig()
+	c.ConfigRules[0].Expression = mustParse(`client.ip_lists eq "aws" and client.ip_lists eq "azure"`)
+	out, warns, errs := Compile(c, testDeployment)
+	if out == nil {
+		t.Fatalf("compile failed: %v", expr.Issues(errs))
+	}
+	for _, w := range warns {
+		if strings.Contains(w.Msg, "can never all be true") {
+			t.Fatalf("unexpected warning: %v", expr.Issues(warns))
+		}
 	}
 }

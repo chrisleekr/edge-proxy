@@ -953,6 +953,10 @@ func (v *validator) configRules() {
 				}
 			}
 		}
+		// Only the winning block rule's ban applies, so a later block drops it.
+		if later["block"] {
+			later["ban"] = true
+		}
 		names := settingNames(r.Settings)
 		if len(names) > 0 && !slices.ContainsFunc(names, func(n string) bool { return !later[n] }) {
 			v.warn(fmt.Sprintf("config_rules[%d]", i), "every setting is overwritten by a later rule that matches all requests")
@@ -1469,7 +1473,8 @@ func walk(n expr.Node, neg bool, f func(r expr.Node, neg bool)) {
 }
 
 // unsatisfiable finds an "and" group requiring one single-valued field to
-// equal two different values.
+// equal two different values. List fields (including keyed ones) are skipped:
+// eq on them means "any element equals", so two values can both hold.
 func unsatisfiable(n expr.Node) bool {
 	if !n.IsGroup() {
 		return false
@@ -1477,7 +1482,10 @@ func unsatisfiable(n expr.Node) bool {
 	if n.Combinator == "and" && !n.Not {
 		seen := map[string]string{}
 		for _, r := range n.Rules {
-			if r.IsGroup() || r.Operator != "eq" || r.Key != "" {
+			if r.IsGroup() || r.Operator != "eq" {
+				continue
+			}
+			if f, ok := expr.LookupField(r.Field); !ok || f.Type == expr.TypeStringList {
 				continue
 			}
 			if prev, ok := seen[r.Field]; ok && prev != r.Value.One {

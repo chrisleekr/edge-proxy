@@ -105,7 +105,7 @@ function Lists({ canManage }: { canManage: boolean }) {
                   <td>
                     {canManage && (
                       <div className="flex flex-wrap gap-2">
-                        <Button disabled={change.isPending} onClick={() => change.mutate({ method: 'POST', path: `/api/denylists/${s.id}/refresh` })}>
+                        <Button disabled={change.isPending || !s.enabled} onClick={() => change.mutate({ method: 'POST', path: `/api/denylists/${s.id}/refresh` })}>
                           Refresh now
                         </Button>
                         <Button disabled={change.isPending} onClick={() => change.mutate({ method: 'PATCH', path: `/api/denylists/${s.id}`, body: { enabled: !s.enabled } })}>
@@ -115,7 +115,7 @@ function Lists({ canManage }: { canManage: boolean }) {
                           variant="danger"
                           title="Remove this list?"
                           action="Remove"
-                          confirm={<>Edges stop matching {s.name}, and rules that name it match no one, within about a minute, without a publish.</>}
+                          confirm={<>Edges drop {s.name} from <code>client.ip_lists</code> within about a minute, without a publish: a rule that requires it matches no one, and an exclusion that names it excludes no one.</>}
                           onConfirm={() => change.mutate({ method: 'DELETE', path: `/api/denylists/${s.id}` })}
                         >
                           Remove
@@ -138,6 +138,7 @@ function Lists({ canManage }: { canManage: boolean }) {
               pattern="[a-z0-9][a-z0-9\-]{0,62}"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              disabled={add.isPending}
               required
             />
             <Input
@@ -148,6 +149,7 @@ function Lists({ canManage }: { canManage: boolean }) {
               hint="An https address with no query, credentials or fragment, as plain text."
               value={url}
               onChange={(e) => setURL(e.target.value)}
+              disabled={add.isPending}
               required
             />
             <Check label="Allows ranges up to /8 (cloud providers)" checked={wide} onChange={(e) => setWide(e.target.checked)} />
@@ -174,7 +176,7 @@ function Lookup() {
     retry: false,
   });
   return (
-    <form className="flex flex-col gap-3" onSubmit={(e) => (e.preventDefault(), setAsked(ip.trim()))}>
+    <form className="flex flex-col gap-3" onSubmit={(e) => (e.preventDefault(), ip.trim() === asked ? void q.refetch() : setAsked(ip.trim()))}>
       <div className="flex flex-wrap items-end gap-3">
         <Input label="Is this IP listed?" className="min-w-72 flex-1" placeholder="203.0.113.7" value={ip} onChange={(e) => setIP(e.target.value)} />
         <Button type="submit" disabled={!ip.trim()}>
@@ -199,7 +201,7 @@ function Bans({ canManage }: { canManage: boolean }) {
     <Card
       id="bans"
       title="Banned IPs"
-      intro="Addresses a trap rule banned that are still banned on some edge, newest first, as the edges last reported them."
+      intro="Addresses a trap rule banned, newest first, as the edges last reported them. A ban shown here has not ended or been lifted, but an edge restart or removing its rule can end it without admin knowing."
       info="An IPv6 address is banned as its whole /64, shown by that range's first address. Each edge reports a ban within about a minute of recording it. At most 500 are shown."
     >
       <div className="flex flex-col gap-3">
@@ -228,7 +230,7 @@ function Bans({ canManage }: { canManage: boolean }) {
                         variant="danger"
                         title={`Lift the ban on ${b.ip}?`}
                         action="Lift ban"
-                        confirm={<>{b.ip} is served again on every edge within about a minute, and is banned again if it trips the trap.</>}
+                        confirm={<>The ban on {b.ip} ends on every edge within about a minute. Other rules still apply, and {b.ip} is banned again if it trips the trap.</>}
                         onConfirm={() => lift.mutate(b.ip)}
                       >
                         Lift ban

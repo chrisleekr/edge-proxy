@@ -144,7 +144,7 @@ func TestRequestAllocations(t *testing.T) {
 			}
 			s, req := inMemoryEdge(t, c, tc.target)
 			if tc.banned {
-				s.edge.bans.Add(netip.MustParseAddr("198.51.100.7"), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli(), Host: "api.example.com", Path: "/wp-login.php"})
+				s.edge.bans.Add(netip.MustParseAddr("198.51.100.7"), ratelimit.Ban{Rule: "trap", End: time.Now().Add(time.Hour).UnixMilli(), Host: "api.example.com", Path: "/wp-login.php"}, map[string]bool{"trap": true})
 			}
 			if tc.deny != "" {
 				lists, err := expr.NewIPLists([]string{"aws"}, [][]netip.Prefix{{netip.MustParsePrefix(tc.deny)}})

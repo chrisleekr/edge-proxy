@@ -15,7 +15,7 @@ import {
 } from 'react-querybuilder';
 import 'react-querybuilder/dist/query-builder.css';
 import { denylistsQuery } from './pages/IPLists';
-import { api, type Json, type Phase, type Rendered, type Schema } from './api';
+import { api, type Json, type Phase, type Rendered, type Schema, useCan } from './api';
 
 const dnd = createDndKitAdapter(DndKit);
 
@@ -109,14 +109,15 @@ function setKey(q: RuleGroupType, path: number[], key: string): RuleGroupType {
 // ValueEditor takes no value, a list (one item per line) or one value.
 function ValueEditor(props: ValueEditorProps) {
   const { schema } = props.context as Ctx;
+  const canReadLists = useCan()('stats.read');
   // Only the IP list field reads the lists; a role that cannot read them gets no hint.
-  const lists = useQuery({ ...denylistsQuery, enabled: props.field === 'client.ip_lists' });
+  const lists = useQuery({ ...denylistsQuery, enabled: props.field === 'client.ip_lists' && canReadLists });
   const op = schema.operators.find((o) => o.name === props.operator);
   if (!op || op.no_value) return null;
   let text: string | undefined;
   if (props.field === 'client.signals') {
     text = `Signal names: ${schema.rules.signals.map((s) => s.name).join(', ')}.`;
-  } else if (props.field === 'client.ip_lists' && lists.data) {
+  } else if (props.field === 'client.ip_lists' && canReadLists && lists.data) {
     const on = lists.data.filter((l) => l.enabled && l.entries > 0).map((l) => l.name);
     text = `${on.length > 0 ? `Lists that are on: ${on.join(', ')}.` : 'No list is on.'} A list that is off matches no one until you turn it on in IP lists.`;
   }

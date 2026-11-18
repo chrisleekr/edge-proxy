@@ -52,12 +52,12 @@ A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of se
 { "settings": { "block": "block", "ban": "24h" } }
 ```
 
-- **A ban lives on one edge.** Each edge keeps its own table in memory, so a client trips the rule once per edge, and a restart or rollout clears every ban. Nothing is stored in Valkey or Postgres.
-- **A ban follows its rule.** It applies only while the client's version still has a rule with that ID that sets `ban`. Removing the rule or its `ban`, a revert, or a [canary](publishing.md#canary) the client is not in lifts the ban at once.
+- **A ban lives on one edge.** Each edge keeps its own table in memory, so a client trips the rule once per edge, and a restart or rollout clears every ban. Enforcement reads only that memory; admin keeps the reported bans in Postgres for the [IP lists](bots.md#ip-lists) page.
+- **A ban follows its rule.** It applies only while the client's version still has a rule with that ID that sets `ban`. Removing the rule or its `ban`, a revert, or a [canary](publishing.md#canary) the client is not in sets the ban aside at once; if a rule with that ID that sets `ban` returns before the ban ends, it applies again. **Lift ban** on the [IP lists](bots.md#ip-lists) page ends it.
 - **Trusted clients and the kill switch.** A client on the [allowlist](#trusted-clients) is never banned or refused as banned, and `kill_switch.block` stops refusals as banned.
 - **`log` never bans.** Start with `"block": "log"` to see who the rule matches, then switch to `block` and add `ban`.
-- **Later rules win.** If a later matching rule sets `block` without `ban`, it overrides the trap for that request and no ban is recorded. A banned client whose request also matches a blocking rule is refused as `blocked`, and the ban is renewed when that rule sets `ban`.
-- **At most 100,000 bans per edge.** When the table is full a new ban is not stored and the client is not banned (fail open); each drop counts in `edge_ban_dropped_total`.
+- **Later rules win.** If a later matching rule sets `block` without `ban`, it overrides the trap for that request and no ban is recorded. A banned client whose request also matches a blocking rule is refused as `blocked`, and the ban is renewed when that rule sets `ban`. A renewal is reported to admin at most once a minute.
+- **About 100,000 bans per edge.** The table is split across 64 shards, so one can fill a little earlier. When it is full a new ban is not stored and the client is not banned (fail open); each drop counts in `edge_ban_dropped_total`.
 
 [Bot detection](bots.md#trap-paths) has an example.
 
