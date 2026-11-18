@@ -77,6 +77,7 @@ type Server struct {
 	changeLimit                             *ratelimit.Local[string] // password changes, per account
 
 	replica string // this admin instance, for its stats rows
+	gates   gateCache
 	agg     *aggregator
 	jwks    *jwks.Client
 	// alertClient sends anomalies to Alertmanager.

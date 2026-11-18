@@ -372,6 +372,35 @@ func TestPublishWithMaxInflightWaitsForEdgesThatReadIt(t *testing.T) {
 	status(t, pub.publishDraft("same policy without it"), 201)
 }
 
+// global.cdn_trusted_headers came with schema 8. A schema 7 policy that sets
+// it waits until every live edge reads schema 8, and the save that set it is
+// audited with the change.
+func TestPublishWithCDNTrustWaitsForEdgesThatReadIt(t *testing.T) {
+	h := newHarnessWith(t, map[string]string{"CLIENT_IP_SOURCE": "cloudflare"})
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	status(t, pub.save(`"0"`, testConfig(), adminTest), 200)
+	status(t, pub.publishDraft("v1"), 201)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "schema-7-edge", MaxSchema: 7, Deployment: h.s.cfg.Deployment.Fingerprint()}), 200)
+	c := testConfig()
+	c.Schema, c.Global.CDNTrustedHeaders = 7, &[]string{"cf-bot-score", "cf-verified-bot"}
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	var details string
+	if err := h.db.QueryRow(t.Context(), "SELECT details::text FROM audit_events WHERE action = 'config.save' ORDER BY seq DESC LIMIT 1").Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(details, "cdn_trusted_headers") {
+		t.Fatalf("details %s", details)
+	}
+	if p := decode[problem](t, pub.publishDraft("trust the bot headers")); p.Status != 409 || !strings.Contains(p.Detail, "edge schema-7-edge reads config schema up to 7") {
+		t.Fatalf("publish: %+v", p)
+	}
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "schema-7-edge", MaxSchema: snapshot.SupportedSchema, Deployment: h.s.cfg.Deployment.Fingerprint()}), 200)
+	status(t, pub.publishDraft("trust the bot headers"), 201)
+}
+
 // Admin validates against its own copy of the deployment variables. If a
 // live edge runs with different ones, it would reject what admin publishes,
 // keep its old snapshot and never report the new version, so admin refuses.
@@ -394,6 +423,17 @@ func TestPublishWaitsForEdgesWithTheSameDeployment(t *testing.T) {
 	}
 	if p := decode[problem](t, pub.publishDraft("blocked")); p.Status != 409 || !strings.Contains(p.Detail, "edge edge-b") {
 		t.Fatalf("publish: %+v", p)
+	}
+	// Fleet flags the same edge, and only that one.
+	differ := map[string]bool{}
+	for _, f := range decode[[]struct {
+		Instance       string
+		SettingsDiffer bool `json:"settings_differ"`
+	}](t, pub.do("GET", "/api/fleet", nil)) {
+		differ[f.Instance] = f.SettingsDiffer
+	}
+	if len(differ) != 3 || differ["edge-a"] || differ["old-build"] || !differ["edge-b"] {
+		t.Fatalf("settings_differ %v", differ)
 	}
 	// A revert restores what edges already served, so an edge reporting a
 	// different deployment, even a bogus one, can't block the way back.
@@ -638,4 +678,48 @@ func TestPublishWithClientAllowlistWaitsForEdgesThatReadIt(t *testing.T) {
 	c.Global.ClientAllowlist = nil
 	status(t, pub.save(pub.revision(), c, adminTest), 200)
 	status(t, pub.publishDraft("same policy without it"), 201)
+}
+
+// Edges report requests per client signal and admin stores the sums. During
+// a rolling deploy a newer edge reports more signals than an older one: the
+// minute keeps every entry, summed by index, and a list past the cap is cut.
+func TestReportedClientSignalsAreStoredAndPadded(t *testing.T) {
+	h, pub := published(t)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	rep := func(instance string, requests uint64, latency, signals []uint64) {
+		t.Helper()
+		status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: instance, ConfigSource: "admin", Versions: []edge.StatsCounts{{
+			Version: 1, Requests: requests, LatencyMS: latency, Signals: signals}}}), 200)
+	}
+	rep("edge-old", 10, []uint64{10}, []uint64{1, 2})
+	rep("edge-new", 20, []uint64{20, 0, 0, 0}, []uint64{10, 20, 30, 40})
+	rep("edge-new", 0, nil, make([]uint64, 40))
+	h.advance(time.Minute)
+	if err := h.s.flush(t.Context(), h.now()); err != nil {
+		t.Fatal(err)
+	}
+	rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
+	want := make([]uint64, maxClientSignals)
+	copy(want, []uint64{11, 22, 30, 40})
+	if len(rows) != 1 || !slices.Equal(rows[0].Signals, want) {
+		t.Fatalf("stats %+v", rows)
+	}
+}
+
+// Replicas of admin each write a row for the minute, and a row stored before
+// signals were counted has none. The merge sums them by index.
+func TestStatsMergeSumsClientSignalsOfDifferentLengths(t *testing.T) {
+	h, pub := published(t)
+	now := h.now().UTC().Truncate(time.Minute).Add(-time.Minute)
+	for i, c := range [][]int64{{}, {1, 2}, {10, 20, 30}} {
+		if _, err := h.db.Exec(t.Context(), `INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited, client_signals)
+			VALUES ($1, 1, $2, 1, 0, 0, 0, '{1}', '[]', '[]', $3)`, now, fmt.Sprint("r", i), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
+	if len(rows) != 1 || !slices.Equal(rows[0].Signals, []uint64{11, 22, 30}) {
+		t.Fatalf("stats %+v", rows)
+	}
 }

@@ -29,6 +29,19 @@ type Deployment struct {
 	// SourceHeaders are the client-IP, viewer and ingress secret headers.
 	// The edge strips them, so rules can neither read nor set them.
 	SourceHeaders []string
+	// CountryHeader is the header ip.src.country is read from. cdn_tor can
+	// fire only when it is cf-ipcountry, and SourceHeaders alone can't say
+	// which viewer field a header feeds. Not in Fingerprint: that already
+	// covers ViewerFields and SourceHeaders, and changing it would hold
+	// publishing during an upgrade.
+	CountryHeader string
+	// CDNHeaders are the headers the deployment's CDN may set (CDN_HEADERS).
+	// The edge logs them and rules may read them. A rule on one is
+	// client-controlled unless the policy trusts it.
+	CDNHeaders []string
+	// CDNTrustedDefault are the CDNHeaders the CDN sets on every request with
+	// no optional feature, trusted until global.cdn_trusted_headers is set.
+	CDNTrustedDefault []string
 	// AllowRegex enables the "matches" operator.
 	AllowRegex bool
 	// VerifiedBots allows client.verified_bot. Admin sets it when
@@ -53,7 +66,16 @@ func (d Deployment) Fingerprint() string {
 		return out
 	}
 	// VerifiedBots is left out: edges always set it, so it never differs between edges.
-	b, _ := json.Marshal([]any{sorted(d.ViewerFields, false), sorted(d.SourceHeaders, true), d.AllowRegex}) // strings and a bool
+	parts := []any{sorted(d.ViewerFields, false), sorted(d.SourceHeaders, true), d.AllowRegex}
+	// A deployment without CDN headers must keep the fingerprint older edges
+	// report, or an upgrade holds publishing for no difference.
+	if len(d.CDNHeaders) > 0 {
+		parts = append(parts, sorted(d.CDNHeaders, true))
+	}
+	if len(d.CDNTrustedDefault) > 0 {
+		parts = append(parts, sorted(d.CDNTrustedDefault, true))
+	}
+	b, _ := json.Marshal(parts) // string lists and a bool
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
 }
@@ -84,7 +106,16 @@ type Compiled struct {
 	Counts []StatusSet
 	// ClientAllowlist[i] is entry i of Config.Global.ClientAllowlist, parsed.
 	ClientAllowlist []netip.Prefix
+	// ChromiumFloor and FirefoxFloor are Config.Global.BrowserFloor as ints,
+	// 0 when unset, so the request path reads no map.
+	ChromiumFloor, FirefoxFloor int
+	// CDN is which headers the CDN signals read are trusted, so the request
+	// path reads no map.
+	CDN CDNTrust
 }
+
+// CDNTrust is which of the headers the CDN signals read the policy trusts.
+type CDNTrust struct{ BotScore, VerifiedBot, TLS, Country bool }
 
 // AllowedClient returns the allowlist entry, as written, that contains ip,
 // or "" when none does. ip must be unmapped, as the edge derives it.
@@ -119,7 +150,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema       = 1
-	SupportedSchema = 6
+	SupportedSchema = 8
 	// MaxInflightSchema is the first schema whose edges read
 	// global.max_inflight. A config of any schema may set it; admin then
 	// publishes it only once every live edge reads that schema.
@@ -136,6 +167,14 @@ const (
 	// global.client_allowlist. A config of any schema may set it; admin
 	// then waits for edges that read this schema.
 	ClientAllowlistSchema = 6
+	// BrowserFloorSchema is the first schema whose edges read
+	// global.browser_floor. A config of any schema may set it; admin then
+	// waits for edges that read this schema.
+	BrowserFloorSchema = 7
+	// CDNSignalSchema is the first schema whose edges know the CDN header
+	// signals and global.cdn_trusted_headers. A config of any schema may name
+	// them or set it; admin then waits for edges that read this schema.
+	CDNSignalSchema = 8
 	// MaxDistinct bounds a distinct rule's limit: the 1024-bit estimate
 	// drifts beyond it.
 	MaxDistinct = 1000
@@ -147,6 +186,8 @@ const (
 	MaxRulesPerPhase  = 200
 	MaxSiteWide       = 2
 	MaxKeyParts       = 5
+	// MaxCDNHeaders bounds CDN_HEADERS, which bounds every queued access record.
+	MaxCDNHeaders = 48
 	// MaxListLen bounds every other list and map: origins, header names,
 	// issuers, audiences, locales, templates, policies, ops.
 	MaxListLen      = 100
@@ -158,7 +199,9 @@ const (
 	MaxCount       = 1_000_000_000
 	MaxBackstopIPs = 10_000_000
 	MaxInflight    = 1_000_000
-	MaxRulePeriod  = 24 * time.Hour
+	// MaxBrowserFloor bounds a browser major version.
+	MaxBrowserFloor = 999
+	MaxRulePeriod   = 24 * time.Hour
 	// MaxExact bounds burst × period in ms for token and leaky buckets,
 	// leaving headroom under 2^53 for the scripts' intermediate sums.
 	MaxExact         = 1 << 51
@@ -292,13 +335,16 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	if slices.ContainsFunc(c.RateLimitRules, func(r RateLimitRule) bool { return !r.ExpiresAt.IsZero() }) {
 		needs = max(needs, ExpiresSchema)
 	}
+	if readsSignal(c, cdnSignals...) {
+		needs = max(needs, CDNSignalSchema)
+	}
 	templates := len(c.Global.Responses)
 	c = upgrade(c)
 	v := &validator{
 		d: d, c: c, schema1: schema1, addedTemplates: len(c.Global.Responses) - templates,
 		out:     &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}, NeedsSchema: needs},
 		viewer:  setOf(d.ViewerFields, caseSensitive),
-		sources: setOf(d.SourceHeaders, foldCase),
+		cdn:     cdnTrusted(c, d),
 		issuers: map[string]bool{},
 		locales: map[string]bool{},
 		ruleIDs: map[string]bool{},
@@ -307,6 +353,8 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	if len(v.errs) > 0 {
 		return nil, v.warns, v.errs
 	}
+	ready := func(h string) bool { return v.cdnSignalNeed(h) == "" }
+	v.out.CDN = CDNTrust{BotScore: ready("cf-bot-score"), VerifiedBot: ready("cf-verified-bot"), TLS: ready("cloudfront-viewer-tls"), Country: ready("cf-ipcountry")}
 	return v.out, v.warns, nil
 }
 
@@ -314,7 +362,7 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 // phase of c, so the admin rule builder and save can't disagree. It reads
 // only c's supported locales.
 func CheckExpression(n expr.Node, phase expr.Phase, c *Config, d Deployment) (errs, warns []expr.Issue) {
-	v := &validator{d: d, c: c, viewer: setOf(d.ViewerFields, caseSensitive), sources: setOf(d.SourceHeaders, foldCase), locales: setOf(c.Global.Locale.Supported, caseSensitive)}
+	v := &validator{d: d, c: c, viewer: setOf(d.ViewerFields, caseSensitive), cdn: cdnTrusted(c, d), locales: setOf(c.Global.Locale.Supported, caseSensitive)}
 	v.expression("", n, phase)
 	trim := func(is []expr.Issue) []expr.Issue {
 		for i := range is {
@@ -326,11 +374,13 @@ func CheckExpression(n expr.Node, phase expr.Phase, c *Config, d Deployment) (er
 }
 
 type validator struct {
-	d                         Deployment
-	c                         *Config
-	out                       *Compiled
-	errs, warns               []expr.Issue
-	viewer, sources           map[string]bool
+	d           Deployment
+	c           *Config
+	out         *Compiled
+	errs, warns []expr.Issue
+	viewer      map[string]bool
+	// cdn is the lower-case set of trusted CDN headers.
+	cdn                       map[string]bool
 	issuers, locales, ruleIDs map[string]bool
 	siteWideIP                bool
 	// schema1 is set when the stored config predates schema 2.
@@ -444,6 +494,8 @@ func (v *validator) global() {
 	}
 
 	v.clientAllowlist(g.ClientAllowlist)
+	v.browserFloor(g.BrowserFloor)
+	v.cdnTrustedHeaders(g.CDNTrustedHeaders)
 
 	v.templates(g.Responses)
 	d := g.Defaults
@@ -462,6 +514,103 @@ func (v *validator) global() {
 	v.cors(g.CORSPolicies)
 	v.locale(g.Locale, d.Locale)
 	v.forward("global.request_headers.forward", g.RequestHeaders.Forward)
+}
+
+// browserFloor checks and compiles global.browser_floor. Safari has no
+// floor: its version follows the OS, so a low one is a real user.
+func (v *validator) browserFloor(floor map[string]int) {
+	if len(floor) == 0 {
+		return
+	}
+	for _, k := range slices.Sorted(maps.Keys(floor)) {
+		path := "global.browser_floor." + k
+		if k != "chromium" && k != "firefox" {
+			v.err("global.browser_floor", "has no %q; use chromium or firefox", k)
+		} else if n := floor[k]; n < 1 || n > MaxBrowserFloor {
+			v.err(path, "must be 1 to %d", MaxBrowserFloor)
+		}
+	}
+	v.out.ChromiumFloor, v.out.FirefoxFloor = floor["chromium"], floor["firefox"]
+	v.out.NeedsSchema = max(v.out.NeedsSchema, BrowserFloorSchema)
+}
+
+// cdnTrusted is the lower-case set of CDN headers rules may treat as the
+// CDN's: the policy's list, else the deployment's default, plus every listed
+// source header, which the deployment already trusts. Entries outside
+// CDN_HEADERS are dropped here and warned about by cdnTrustedHeaders.
+func cdnTrusted(c *Config, d Deployment) map[string]bool {
+	listed := setOf(d.CDNHeaders, foldCase)
+	set := map[string]bool{}
+	names := d.CDNTrustedDefault
+	if l := c.Global.CDNTrustedHeaders; l != nil {
+		names = *l
+	}
+	for _, h := range names {
+		if h = strings.ToLower(h); listed[h] {
+			set[h] = true
+		}
+	}
+	for _, h := range d.CDNHeaders {
+		if d.source(h) {
+			set[strings.ToLower(h)] = true
+		}
+	}
+	return set
+}
+
+// CDNTrusted is the lower-case, sorted list of CDN headers c's rules may
+// treat as the CDN's in d, never nil so it marshals as [].
+func CDNTrusted(c *Config, d Deployment) []string {
+	return append([]string{}, slices.Sorted(maps.Keys(cdnTrusted(c, d)))...)
+}
+
+// cdnSignalNeed is what a CDN signal reading header h (lower case) still
+// needs, "" when nothing. cdn_tor reads the country the edge takes from
+// ip.src.country's header, so cf-ipcountry counts only as that source.
+func (v *validator) cdnSignalNeed(h string) string {
+	switch source := v.d.source(h); {
+	case h == "cf-ipcountry" && !strings.EqualFold(v.d.CountryHeader, h):
+		return "ip.src.country read from the cf-ipcountry header"
+	case v.cdn[h]:
+		return ""
+	case source:
+		return fmt.Sprintf("the %s header listed in CDN_HEADERS", h)
+	}
+	return fmt.Sprintf("the %s header listed in CDN_HEADERS and trusted in global.cdn_trusted_headers", h)
+}
+
+// cdnTrustedHeaders checks global.cdn_trusted_headers. Trusting a header
+// only silences the client-controlled warning and lets rules name the CDN
+// signals, which narrow a match, so it is policy rather than deployment config.
+func (v *validator) cdnTrustedHeaders(items *[]string) {
+	if items == nil {
+		return
+	}
+	const path = "global.cdn_trusted_headers"
+	v.out.NeedsSchema = max(v.out.NeedsSchema, CDNSignalSchema)
+	if len(*items) > MaxCDNHeaders {
+		v.err(path, "has %d headers; at most %d are allowed", len(*items), MaxCDNHeaders)
+		return
+	}
+	listed := setOf(v.d.CDNHeaders, foldCase)
+	v.list(path, *items, foldCase, func(h string) string {
+		switch {
+		case !expr.IsToken(h):
+			return fmt.Sprintf("%q is not a header name", h)
+		case v.d.source(h):
+			// A header can become a source header through VIEWER_HEADERS after
+			// the policy trusted it; that must not stop edges loading the live
+			// policy, and a listed source header is trusted anyway.
+			v.warn(path, "%s is a source header, always trusted when listed in CDN_HEADERS, so the entry does nothing", h)
+		case v.d.Managed(h):
+			return fmt.Sprintf("%s is managed by the edge and can't be trusted by policy", h)
+		case !listed[strings.ToLower(h)]:
+			// Removing a header from CDN_HEADERS must not stop edges loading
+			// the live policy, so the entry is dropped rather than refused.
+			v.warn(path, "%s is not in CDN_HEADERS, so the edge doesn't log, offer or trust it", h)
+		}
+		return ""
+	})
 }
 
 // clientAllowlist checks each entry and compiles the list. An entry the
@@ -1091,14 +1240,24 @@ func (v *validator) targetProblem(name string) string {
 	return v.managedProblem(name)
 }
 
-// managedProblem rejects header names no rule may read or write, on every
-// path that names a header (ops, placeholders, keys, expressions): the edge
-// manages, strips or frames them. Reading matters too: a client
-// can forge X-Edge-* before the edge replaces it, and source headers can
-// carry the ingress secret.
-func (v *validator) managedProblem(name string) string {
+// Managed reports a header name no rule may read or write: the edge
+// manages, strips or frames it. Reading matters too: a client can forge
+// X-Edge-* before the edge replaces it, and source headers can carry the
+// ingress secret.
+func (d Deployment) Managed(name string) bool {
 	l := strings.ToLower(name)
-	if reserved[l] || v.sources[l] || strings.HasPrefix(l, "x-edge-") || strings.HasPrefix(l, "x-forwarded-") {
+	return reserved[l] || d.source(l) || strings.HasPrefix(l, "x-edge-") || strings.HasPrefix(l, "x-forwarded-")
+}
+
+// source reports whether h is one of d's source headers, in any case.
+func (d Deployment) source(h string) bool {
+	return slices.ContainsFunc(d.SourceHeaders, func(s string) bool { return strings.EqualFold(s, h) })
+}
+
+// managedProblem rejects names Managed reports, on every path that names a
+// header (ops, placeholders, keys, expressions).
+func (v *validator) managedProblem(name string) string {
+	if v.d.Managed(name) {
 		return fmt.Sprintf("%s is managed by the edge and can't be used in rules", http.CanonicalHeaderKey(name))
 	}
 	return ""
@@ -1155,7 +1314,7 @@ func (v *validator) placeholderProblem(ph Placeholder) string {
 // an encoded path slips past.
 func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Matcher {
 	available := func(f string) bool { return v.viewer[f] || f == expr.VerifiedBotField && v.d.VerifiedBots }
-	env := expr.Env{Phase: phase, ViewerAvailable: available, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1}
+	env := expr.Env{Phase: phase, ViewerAvailable: available, CDNHeader: v.cdnSignalNeed, BrowserFloor: len(v.c.Global.BrowserFloor) > 0, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1}
 	m, issues := expr.Compile(n, env)
 	for _, is := range issues {
 		v.errs = append(v.errs, expr.Issue{Path: p + "." + is.Path, Msg: is.Msg})
@@ -1240,7 +1399,7 @@ func (v *validator) spoofableExclusion(p string, n expr.Node) {
 	warned := false
 	walk(n, false, func(r expr.Node, neg bool) {
 		op, _ := expr.LookupOp(r.Operator)
-		if !warned && clientControlled[r.Field] && neg != (op.Negates != "") {
+		if !warned && clientControlled[r.Field] && !v.cdnHeader(r) && neg != (op.Negates != "") {
 			v.warn(p+".expression", "excludes traffic using client-controlled %s; clients can set it to skip this rule. Exclude by ip.src or a verified claim", r.Field)
 			warned = true
 		}
@@ -1254,11 +1413,17 @@ func (v *validator) spoofableLogBlock(p string, n expr.Node) {
 	warned := false
 	walk(n, false, func(r expr.Node, neg bool) {
 		op, _ := expr.LookupOp(r.Operator)
-		if !warned && clientControlled[r.Field] && neg == (op.Negates != "") {
+		if !warned && clientControlled[r.Field] && !v.cdnHeader(r) && neg == (op.Negates != "") {
 			v.warn(p+".expression", "sets block to log for requests matching client-controlled %s; clients can set it to turn an earlier block rule off. Match by ip.src or a verified claim", r.Field)
 			warned = true
 		}
 	})
+}
+
+// cdnHeader reports a condition on a header the policy trusts the CDN to set,
+// not the client.
+func (v *validator) cdnHeader(r expr.Node) bool {
+	return r.Field == "http.request.headers" && v.cdn[strings.ToLower(r.Key)]
 }
 
 // walk calls f for every rule in n with whether an odd number of group
@@ -1474,8 +1639,13 @@ func statusRange(s string) (lo, hi int, ok bool) {
 // ReadsField reports whether any rule of c reads field. Admin ships the
 // verified crawler ranges only to a snapshot whose configs read them.
 func ReadsField(c *Config, field string) bool {
+	return readsAny(c, func(r expr.Node) bool { return r.Field == field })
+}
+
+// readsAny reports whether any condition in any rule of c satisfies match.
+func readsAny(c *Config, match func(r expr.Node) bool) bool {
 	found := false
-	f := func(r expr.Node, _ bool) { found = found || r.Field == field }
+	f := func(r expr.Node, _ bool) { found = found || match(r) }
 	for _, r := range c.ConfigRules {
 		walk(r.Expression, false, f)
 	}
@@ -1486,4 +1656,15 @@ func ReadsField(c *Config, field string) bool {
 		walk(r.Expression, false, f)
 	}
 	return found
+}
+
+// cdnSignals are the client.signals names added in CDNSignalSchema.
+var cdnSignals = []string{"cdn_likely_automated", "crawler_impersonated", "cdn_tor", "browser_tls_old"}
+
+// readsSignal reports whether any rule of c compares client.signals with one
+// of names, so an edge that predates them is not sent the config.
+func readsSignal(c *Config, names ...string) bool {
+	return readsAny(c, func(r expr.Node) bool {
+		return r.Field == expr.SignalsField && (slices.Contains(names, r.Value.One) || slices.ContainsFunc(r.Value.List, func(s string) bool { return slices.Contains(names, s) }))
+	})
 }

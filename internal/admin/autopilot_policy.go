@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/chrisleekr/edge-proxy/internal/edge"
 	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
@@ -101,13 +102,16 @@ func shapeOf(n expr.Node, key []string) [32]byte {
 	return sha256.Sum256(append(append(b, 0), strings.Join(key, "\x00")...))
 }
 
-// clientIPHeaders carry a client's address as CDNs and proxies send it.
-var clientIPHeaders = []string{"x-forwarded-for", "forwarded", "x-real-ip", "true-client-ip", "cf-connecting-ip", "cf-connecting-ipv6",
-	"cloudfront-viewer-address", "x-gclb-client-ip"}
+// subjectHeaders carry a client's address, network or near-exact location,
+// so a rule on them picks clients out like an IP or AS number would.
+var subjectHeaders = []string{"x-forwarded-for", "forwarded", "x-real-ip", "true-client-ip", "cf-connecting-ip", "cf-connecting-ipv6",
+	"cloudfront-viewer-address", "x-gclb-client-ip",
+	"cloudfront-viewer-isp", "cloudfront-viewer-postal-code", "cloudfront-viewer-latitude", "cloudfront-viewer-longitude", "cloudfront-viewer-asn",
+	"cf-postal-code", "cf-iplatitude", "cf-iplongitude"}
 
 // namesSubjects reports whether n picks clients out: any comparison on the
-// client's IP, AS number, X-Forwarded-For, a client IP header or a JWT
-// claim, with any operator, negated or not, or any value that is an
+// client's IP, AS number, X-Forwarded-For, a client IP, network or location
+// header or a JWT claim, with any operator, negated or not, or any value that is an
 // address or a prefix. Autopilot rules generalize to whoever crosses a
 // threshold.
 // ponytail: a deployment's own client IP header under a name not listed
@@ -120,7 +124,7 @@ func namesSubjects(n expr.Node) bool {
 	case "ip.src", "ip.src.asnum", "http.request.jwt.claims", "http.x_forwarded_for":
 		return true
 	case "http.request.headers":
-		if slices.Contains(clientIPHeaders, strings.ToLower(n.Key)) {
+		if slices.Contains(subjectHeaders, strings.ToLower(n.Key)) {
 			return true
 		}
 	}
@@ -239,8 +243,13 @@ func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, i
 
 	c.check("site_wide", !n.IsTrue(), "an autopilot rule never matches every request")
 	c.check("fail_mode", failMode == "open", "fail_mode is open: a Valkey outage never blocks traffic for an autopilot rule")
-	c.check("key_needs_ip_or_jwt", slices.ContainsFunc(r.Key, func(k string) bool { return k == "ip" || strings.HasPrefix(k, "jwt_claim:") }),
-		"the key includes ip or a jwt_claim, values a client can't choose")
+	// A ja4-only bucket holds every client on a fingerprint, so the
+	// expression must pick out the attack by a signal the edge computes.
+	shared := slices.Equal(r.Key, []string{"ja4"}) && len(signalScoped(n)) > 0
+	c.check("key_needs_ip_or_jwt", shared || slices.ContainsFunc(r.Key, func(k string) bool { return k == "ip" || strings.HasPrefix(k, "jwt_claim:") }),
+		"the key includes ip or a jwt_claim, or is ja4 alone with the expression requiring a client signal")
+	c.check("shared_key_penalty", !shared || r.Penalty == 0,
+		"a ja4-only rule has no penalty: a penalty is checked before the rule and would block every client on the fingerprint")
 	hostOnly := len(r.Key) > 0 && !slices.ContainsFunc(r.Key, func(k string) bool { return k != "host" })
 	c.check("constant_or_host_key", !slices.Contains(r.Key, "constant") && !hostOnly, "the key is not constant or host only")
 	c.check("missing_key_rejects", r.OnMissingKey != "reject", "a request without the key is never refused")
@@ -261,7 +270,7 @@ func (s *Server) policy(ctx context.Context, q querier, set AutopilotSettings, i
 		c.check("lifetime_over_max", !now.Add(c.ttl).After(end), fmt.Sprintf("the rule and the sensor it cites end by %s, max_lifetime after the sensor went live", end.UTC().Format(time.RFC3339)))
 	}
 	c.check("penalty_past_expiry", time.Duration(r.Penalty) <= c.ttl, "the penalty ends by the rule's expiry")
-	c.check("named_subjects", !namesSubjects(n), "the rule names no IP, AS number, X-Forwarded-For or JWT claim value")
+	c.check("named_subjects", !namesSubjects(n), "the rule names no IP, AS number, X-Forwarded-For, JWT claim value or a client IP, network or location header")
 	// The checks above read the model's own expression; what it publishes
 	// also leaves out what no autopilot rule may limit.
 	ex, err := activeExclusions(ctx, q, now)
@@ -360,6 +369,7 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 		return "", nil, 0, err
 	}
 	var fleet, evaluated, would, heavy, recent uint64
+	scope := sharedScope(ar.Rule)
 	// Subjects are checked only when the key starts with ip, which propose
 	// puts first: the display's first part is then the address the edge
 	// keyed. Later parts are client-written and never parsed.
@@ -392,18 +402,38 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 			if !r.Minute.Before(recentFrom.Truncate(time.Minute)) {
 				recent += rc.WouldLimit
 			}
-			heavy += heavyIn(rc.WouldLimit, top)
+			if scope == nil {
+				heavy += heavyIn(rc.WouldLimit, top)
+			}
 		}
 	}
 	// The budget is for collateral: the attackers, each a heavy share of a
 	// minute, are left out over the window, as the guard leaves them out.
 	collateral := withoutHeavy(would, heavy)
+	var bound sharedBound
+	if scope != nil {
+		// A shared bucket has no heavy subject to leave out, and most of
+		// its count is the attack: the signal's normal traffic bounds the
+		// collateral instead.
+		from := ar.LiveSince.Truncate(time.Minute)
+		if bound, err = s.newSharedBound(ctx, q, scope, ar.ID, rows, from, now, func(rc edge.RuleCounts) uint64 { return rc.WouldLimit }); err != nil {
+			return "", nil, 0, err
+		}
+		collateral = bound.collateral(would)
+	}
 	share := ratio(collateral, fleet)
 	// Stored for the per-rule guard, which compares limited requests with
-	// heavy subjects left out, so the shadow leaves them out too.
+	// heavy subjects left out, so the shadow leaves them out too. A shared
+	// rule's guard compares raw counts.
 	shadow := ratio(collateral, evaluated)
+	if scope != nil {
+		shadow = ratio(would, evaluated)
+	}
 	numbers := map[string]any{"fleet_requests": fleet, "evaluated": evaluated, "would_limit": would, "collateral_would_limit": collateral, "recent_would_limit": recent,
 		"share": share, "shadow_ratio": shadow, "raw_shadow_ratio": ratio(would, evaluated), "max_block_share": maxShare}
+	if scope != nil {
+		bound.add(numbers)
+	}
 	if share > maxShare {
 		return "block_share", numbers, shadow, nil
 	}

@@ -135,8 +135,9 @@ func TestAutopilotEnforceChecksSubjectAddresses(t *testing.T) {
 	})
 }
 
-// A comparison on the client's IP, AS number or a JWT claim picks clients
-// out, whatever its operator.
+// A comparison on the client's IP, AS number, a JWT claim or a CDN header
+// carrying the client's network or location picks clients out, whatever its
+// operator.
 func TestAutopilotRefusesAnyNamedSubject(t *testing.T) {
 	for _, expression := range []string{
 		`http.request.uri.path eq "/login" and not (ip.src ne 198.51.100.7)`,
@@ -145,6 +146,7 @@ func TestAutopilotRefusesAnyNamedSubject(t *testing.T) {
 		`http.request.uri.path eq "/login" and starts_with(http.request.jwt.claims["sub"], "adm")`,
 		`http.request.uri.path eq "/login" and http.x_forwarded_for eq "198.51.100.7"`,
 		`http.request.uri.path eq "/login" and http.request.headers["True-Client-IP"] wildcard "198.51.*"`,
+		`http.request.uri.path eq "/login" and http.request.headers["cloudfront-viewer-isp"] eq "Example ISP"`,
 		`http.request.uri.path eq "/login" and http.request.headers["x-client"] eq "198.51.100.7"`,
 		`http.request.uri.path eq "/login" and http.request.headers["x-client"] eq "2001:db8::/32"`,
 	} {

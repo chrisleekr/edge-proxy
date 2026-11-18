@@ -18,9 +18,12 @@ func planRule(expression string, key ...string) map[string]any {
 	return map[string]any{"expression": expression, "algorithm": "sliding_window", "limit": 10, "period": "1m", "key": key, "on_missing_key": "fallback_ip"}
 }
 
-// testPlan has two sensors, one with a first try admin must refuse. Both
-// names hold a hyphen and one a number, as a rule id ap-<name>-<n> does.
-var testPlan = plan{Sensors: []planSensor{
+// testPlan has two sensors, one with a first try admin must refuse, and a
+// rule for a browser_outdated surge. Both sensor names hold a hyphen and one
+// a number, as a rule id ap-<name>-<n> does.
+var testPlan = plan{Signals: []planSignal{
+	{Signal: "signal_surge", Mentions: "browser_outdated", Name: "fleet", Rule: planRule(`client.signals eq "browser_outdated"`, "ja4"), TTL: "5m"},
+}, Sensors: []planSensor{
 	{
 		Name:  "login-401",
 		Rule:  planRule(`http.request.uri.path eq "/login"`, "ip"),
@@ -126,6 +129,18 @@ func TestAgentPlansEnforceForItsSensor(t *testing.T) {
 	}
 }
 
+func TestAgentEnforcesItsSignalRuleWithNoSensor(t *testing.T) {
+	g := planSignal{Signal: "signal_surge", Mentions: "browser_outdated", Name: "fleet", Rule: planRule(`client.signals eq "browser_outdated"`, "ja4"), TTL: "5m"}
+	p := plan{Signals: []planSignal{g}}
+	brief := map[string]any{"kind": "anomaly", "signal": "signal_surge", "rule": "", "summary": map[string]any{"untrusted": "browser_outdated: 12.0% of requests in the last 1m"}}
+	got, verdict := p.steps("anomaly", brief, live{Evidence: []int{7}})
+	want := []step{{"get_case", map[string]any{}}, {"get_autopilot_state", map[string]any{}}, {"get_stats", map[string]any{}},
+		{"propose", map[string]any{"action": "enforce", "name": "fleet", "rule": g.Rule, "ttl": "5m", "evidence": map[string]any{"evidence_ids": []int{7}}}}}
+	if verdict != "attack" || !reflect.DeepEqual(withoutRationale(t, got), want) {
+		t.Fatalf("steps %v verdict %q, want %v attack", got, verdict, want)
+	}
+}
+
 func TestAgentAnswersOtherCasesBenign(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -137,6 +152,7 @@ func TestAgentAnswersOtherCasesBenign(t *testing.T) {
 		{"an anomaly on a person's rule", "anomaly", map[string]any{"kind": "anomaly", "signal": "rule_would_block", "rule": "login"}},
 		{"an anomaly on an autopilot rule the plan does not name", "anomaly", map[string]any{"kind": "anomaly", "signal": "rule_would_block", "rule": "ap-checkout-9"}},
 		{"an anomaly on no rule", "anomaly", map[string]any{"kind": "anomaly", "signal": "status_5xx", "rule": ""}},
+		{"a signal surge naming another signal", "anomaly", map[string]any{"kind": "anomaly", "signal": "signal_surge", "rule": "", "summary": map[string]any{"untrusted": "ua_missing: 40.0% of requests"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, verdict := testPlan.steps(tc.kind, tc.brief, live{})
@@ -205,9 +221,10 @@ func TestAutopilotPlanCompiles(t *testing.T) {
 	}
 	base.Config.Version = 1
 	// The load environment's admin and edges, as compose.yaml sets them:
-	// CloudFront is the trusted viewer source, so asnum is a key it accepts.
+	// CloudFront is the trusted viewer source, so asnum is a key it accepts,
+	// and ja4 is added for the fingerprint fleet's rule.
 	deployment, err := edge.LoadDeployment(func(k string) string {
-		return map[string]string{"CLIENT_IP_SOURCE": "cloudfront", "TRUSTED_PROXIES": "10.77.0.0/24"}[k]
+		return map[string]string{"CLIENT_IP_SOURCE": "cloudfront", "TRUSTED_PROXIES": "10.77.0.0/24", "VIEWER_HEADERS": "tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint"}[k]
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -238,6 +255,26 @@ func TestAutopilotPlanCompiles(t *testing.T) {
 			if d, err := time.ParseDuration(s.TTL); err != nil || d < 4*time.Minute {
 				t.Fatalf("%s ttl %q, want at least 4m, the shortest ttl admin renews within", s.Name, s.TTL)
 			}
+		}
+	})
+
+	t.Run("the signal rule compiles with the site-wide ip rule the policy holds", func(t *testing.T) {
+		if len(p.Signals) != 1 || p.Signals[0].Signal != "signal_surge" {
+			t.Fatalf("signals %v, want one on signal_surge", p.Signals)
+		}
+		r := overlayRule(t, "ap-"+p.Signals[0].Name+"-1", "block", p.Signals[0].Rule)
+		if !slices.Equal(r.Key, []string{"ja4"}) {
+			t.Fatalf("key %v, want [ja4]", r.Key)
+		}
+		compile(t, r)
+	})
+
+	t.Run("the signal rule is refused without a site-wide ip rule", func(t *testing.T) {
+		cfg := base.Config
+		cfg.RateLimitRules = nil
+		cfg.RateLimitRules = append(cfg.RateLimitRules, overlayRule(t, "ap-"+p.Signals[0].Name+"-1", "block", p.Signals[0].Rule))
+		if _, _, errs := snapshot.Compile(&cfg, deployment); errs == nil {
+			t.Fatal("compiled with no site-wide ip rule")
 		}
 	})
 

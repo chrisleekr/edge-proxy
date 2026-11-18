@@ -18,6 +18,13 @@ type Env struct {
 	// source for a viewer field, or VERIFIED_BOT_SOURCES for
 	// VerifiedBotField. Nil means none are available.
 	ViewerAvailable func(field string) bool
+	// BrowserFloor is whether the config sets global.browser_floor; without
+	// it browser_outdated never fires.
+	BrowserFloor bool
+	// CDNHeader returns what a CDN signal reading a header (lower case) still
+	// needs, as a phrase following "it needs", or "" when nothing. Nil means
+	// no CDN header is listed or trusted.
+	CDNHeader func(name string) string
 	// AllowRegex enables the "matches" operator (off by default).
 	AllowRegex bool
 	// RelativePaths accepts a path literal without its leading "/", as
@@ -200,9 +207,21 @@ func (c *checker) literal(f FieldDef, op OpDef, s string, inList bool) string {
 		}
 		return fmt.Sprintf("unknown signal %q; use %s", s, strings.Join(names, ", "))
 	}
+	if Signals[i].NeedsFloor && !c.env.BrowserFloor {
+		return fmt.Sprintf("%q can never match: it needs global.browser_floor, which is not set", s)
+	}
 	for _, n := range Signals[i].Needs {
 		if c.env.ViewerAvailable == nil || !c.env.ViewerAvailable(n) {
 			return fmt.Sprintf("%q can never match: it needs %s, which has no trusted source configured in this deployment", s, n)
+		}
+	}
+	for _, n := range Signals[i].NeedsHeaders {
+		need := "the " + n + " header listed in CDN_HEADERS and trusted in global.cdn_trusted_headers"
+		if c.env.CDNHeader != nil {
+			need = c.env.CDNHeader(n)
+		}
+		if need != "" {
+			return fmt.Sprintf("%q can never match: it needs %s", s, need)
 		}
 	}
 	return ""

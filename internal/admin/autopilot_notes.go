@@ -752,14 +752,35 @@ func citedNotes(ctx context.Context, q querier, proposal int64) ([]apNote, error
 
 // observeFor is how long an enforce rule observes before it may block: half
 // of observe_for, at least a minute, when it cites a confirmed attack
-// signature.
+// signature. A shared-key rule whose signal's normal traffic is within the
+// block share of the fleet observes one minute: even blocking all of it
+// fits the budget, and the minute gives attack_stopped its shadow counts.
 func (s *Server) observeFor(ctx context.Context, q querier, set AutopilotSettings, r apRule) (time.Duration, error) {
 	d := time.Duration(set.ObserveFor)
 	notes, err := citedNotes(ctx, q, r.ProposalID)
-	if err != nil || !slices.ContainsFunc(notes, func(n apNote) bool { return n.Kind == "attack_signature" }) {
+	if err != nil {
 		return d, err
 	}
-	return max(time.Minute, d/2), nil
+	if slices.ContainsFunc(notes, func(n apNote) bool { return n.Kind == "attack_signature" }) {
+		d = max(time.Minute, d/2)
+	}
+	scope := sharedScope(r.Rule)
+	if scope == nil || r.LiveSince == nil || d <= time.Minute {
+		return d, nil
+	}
+	from := r.LiveSince.Truncate(time.Minute)
+	baseline, _, known, err := s.signalBaseline(ctx, q, scope, from, from.Add(d))
+	if err != nil {
+		return 0, err
+	}
+	fleet, err := s.fleetPerMinute(ctx, q, from)
+	if err != nil {
+		return 0, err
+	}
+	if known && fleet > 0 && baseline/fleet <= blockShare(set, notes) {
+		return time.Minute, nil
+	}
+	return d, nil
 }
 
 // blockShare is the share of the fleet a rule may block: max_block_share,

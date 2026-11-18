@@ -45,6 +45,8 @@ func TestClientAllowlistNeedsSchema6Edges(t *testing.T) {
 	}
 	schema5 := validConfig()
 	schema5.Schema = 5
+	schema6 := validConfig()
+	schema6.Schema = 6
 	cases := []struct {
 		name   string
 		config *Config
@@ -55,7 +57,7 @@ func TestClientAllowlistNeedsSchema6Edges(t *testing.T) {
 		{"schema 5 policy with an empty list", schema5, set(), 5},
 		{"schema 5 policy with a trusted client", schema5, set("203.0.113.7"), 6},
 		{"schema 1 policy with a trusted client", olderConfig(1), set("203.0.113.7"), 6},
-		{"schema 6 policy with a trusted client", validConfig(), set("203.0.113.7"), 6},
+		{"schema 6 policy with a trusted client", schema6, set("203.0.113.7"), 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,4 +196,49 @@ func FuzzClientAllowlist(f *testing.F) {
 			}
 		}
 	})
+}
+
+// The browser floor came with schema 7. A policy of any schema may set it
+// and then needs edges that read schema 7. A rule naming browser_outdated is
+// accepted once the floor is set and compiles the floors the edge reads.
+func TestBrowserFloorNeedsSchema7Edges(t *testing.T) {
+	older := validConfig()
+	older.Schema = 6
+	cases := []struct {
+		name   string
+		config *Config
+		floor  map[string]int
+		want   int
+	}{
+		{"schema 6 policy without a floor", older, nil, 6},
+		{"schema 6 policy with an empty floor", older, map[string]int{}, 6},
+		{"schema 6 policy with a floor", older, map[string]int{"chromium": 130}, 7},
+		{"schema 1 policy with a floor", olderConfig(1), map[string]int{"chromium": 130}, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := *tc.config
+			c.Global.BrowserFloor = tc.floor
+			got, _, errs := Compile(&c, testDeployment)
+			if errs != nil {
+				t.Fatal(expr.Issues(errs))
+			}
+			if got.NeedsSchema != tc.want {
+				t.Fatalf("needs schema %d, want %d", got.NeedsSchema, tc.want)
+			}
+		})
+	}
+}
+
+func TestBrowserFloorCompilesAndAcceptsTheSignal(t *testing.T) {
+	c := validConfig()
+	c.Global.BrowserFloor = map[string]int{"chromium": 130, "firefox": 128}
+	c.ConfigRules = append(c.ConfigRules, ConfigRule{ID: "stale", Expression: mustParse(`client.signals eq "browser_outdated"`), Settings: Settings{BodyLimit: new(int64(1))}})
+	got, _, errs := Compile(c, testDeployment)
+	if errs != nil {
+		t.Fatal(expr.Issues(errs))
+	}
+	if got.ChromiumFloor != 130 || got.FirefoxFloor != 128 {
+		t.Fatalf("floors %d and %d", got.ChromiumFloor, got.FirefoxFloor)
+	}
 }

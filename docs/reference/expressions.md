@@ -33,7 +33,7 @@ true
 | `http.request.uri.args["name"]` | list | Query arguments. Names and values are percent-decoded once, and `+` is a space. The name matches exactly, case included: `args["debug"]` does not match `?DEBUG=1`, which an upstream that ignores name case still reads. Pairs containing `;` or a malformed `%` escape are skipped, and are also dropped from the forwarded query |
 | `http.host` | string | Lowercase |
 | `http.request.method` | string | Uppercase |
-| `http.request.headers["name"]` | list | Header name lowercase |
+| `http.request.headers["name"]` | list | Header name lowercase. A header in [`CDN_HEADERS`](../deploy/edge.md#cdn-headers) that the policy trusts (`global.cdn_trusted_headers`, or the deployment's default while it is unset) is the CDN's value, so a condition that excludes traffic on it gets no client-controlled warning; on any other a client can send the header itself. A source header can't be read; use its typed field |
 | `http.request.cookies["name"]` | list | |
 | `http.cookie`, `http.referer`, `http.user_agent`, `http.x_forwarded_for` | string | |
 | `ip.src` | ip | The trusted client IP |
@@ -52,21 +52,26 @@ A field marked "needs a trusted viewer header" is refused by validation unless t
 
 ## Client signals
 
-`client.signals` lists what a request shows of automation, computed by the edge from the request's headers and viewer fields. A signal is a hint, not proof: match it in a rule set to log only first, and combine it with other conditions. [Bot detection](../use/bots.md) has recipes.
+`client.signals` lists what a request shows of automation, computed by the edge from the request's headers, viewer fields and the CDN headers that are in `CDN_HEADERS` and trusted. A signal is a hint, not proof: match it in a rule set to log only first, and combine it with other conditions. [Bot detection](../use/bots.md) has recipes.
 
 | Signal | When | Needs |
 |---|---|---|
-| `ua_missing` | No `User-Agent`, or an empty one. Then no other signal is set | |
+| `ua_missing` | No `User-Agent`, or an empty one. Then no `User-Agent` signal is set; `cdn_likely_automated` and `cdn_tor` still can be | |
 | `ua_tool` | The `User-Agent` names an HTTP library, a command-line tool or a scanner, such as `curl/`, `python-requests/`, `sqlmap` or `nuclei`. Scanners come from the OWASP Core Rule Set's [scanner list](https://github.com/coreruleset/coreruleset/blob/main/rules/scanners-user-agents.data). Only the first 512 bytes are read | |
-| `ua_headless` | The `User-Agent` says `HeadlessChrome` or `PhantomJS` | |
+| `ua_headless` | The `User-Agent` says `HeadlessChrome`, `PhantomJS` or `Lightpanda` (its default is `Lightpanda/1.0`) | |
 | `browser_no_accept_language` | A modern browser without `Accept-Language` | |
 | `browser_no_sec_fetch` | A modern browser over HTTPS without `Sec-Fetch-Mode` | `ssl` |
 | `chromium_no_client_hints` | Chrome 89 or later over HTTPS without `Sec-CH-UA` | `ssl` |
-| `client_hints_mismatch` | A Chromium browser over HTTPS whose `Sec-CH-UA` "Chromium" or "Google Chrome" version differs from its `User-Agent` | `ssl` |
+| `client_hints_mismatch` | A Chromium browser over HTTPS whose `Sec-CH-UA` "Chromium" or "Google Chrome" version differs from its `User-Agent`; or a modern Firefox or Safari `User-Agent` that sends any `Sec-CH-UA`, since only Chromium sends it. The Firefox and Safari case doesn't read `ssl`, but a rule naming the signal still needs an `ssl` source | `ssl` |
 | `browser_http1` | A modern browser over HTTPS with HTTP/1.0 or HTTP/1.1, since browsers negotiate HTTP/2 only over TLS. Never on a WebSocket handshake (`Upgrade: websocket`, `Connection: upgrade` and `Sec-WebSocket-Key`). The handshake headers come from the client, so a client that adds them skips these checks; the exemption exists because browsers open WebSockets over HTTP/1.1. | `ssl`, `http.request.version` |
 | `browser_tls_mismatch` | A modern browser whose JA4 is not TLS 1.3, or negotiated neither `h2` nor `h3`. On a WebSocket handshake only the TLS version is checked. The handshake headers come from the client, so a client that adds them skips these checks; the exemption exists because browsers open WebSockets over HTTP/1.1. | `tls.client.ja4` |
+| `browser_outdated` | A Chrome (or other Chromium) or Firefox `User-Agent` whose major version is below `global.browser_floor` for that browser, including versions too old to count as modern. Safari has no floor. Validation refuses a rule naming it while no floor is set | `global.browser_floor` |
+| `cdn_likely_automated` | `Cf-Bot-Score` is 1 to 29 and `Cf-Verified-Bot` is not `true`, whatever the `User-Agent` says. Cloudflare scores 1 as automated and 2 to 29 as [likely automated](https://developers.cloudflare.com/bots/concepts/bot-score/). Cloudflare sends both headers only with Enterprise Bot Management: without it the signal is accepted but never fires | `cf-bot-score` and `cf-verified-bot` trusted |
+| `crawler_impersonated` | The `User-Agent` names `googlebot`, `bingbot`, `applebot`, `duckduckbot`, `yandexbot` or `baiduspider` and `Cf-Verified-Bot` is `false`, so Cloudflare did not verify the crawler. A request without `Cf-Verified-Bot` never sets it, so it needs Bot Management to ever fire. Known false positive: a real crawler on an address Cloudflare doesn't yet verify | `cf-verified-bot` trusted |
+| `cdn_tor` | `ip.src.country` is `T1`, the code Cloudflare uses for Tor. Set only when `cf-ipcountry` is listed in `CDN_HEADERS` and is the `ip.src.country` header, as on the `cloudflare` preset; a listed source header is always trusted. A fact about the address, not a verdict on the client. `T1` is not an ISO 3166 country code | `cf-ipcountry` listed and the `ip.src.country` header |
+| `browser_tls_old` | A modern browser whose `CloudFront-Viewer-TLS` doesn't start with `TLSv1.3:`, since modern browsers negotiate TLS 1.3 and [CloudFront offers it](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html). Not set on a request the CDN saw as plain HTTP when `ssl` is mapped, like the TLS fingerprints. Known false positive: a corporate TLS-inspecting proxy that only speaks TLS 1.2 | `cloudfront-viewer-tls` trusted |
 
-A modern browser is one whose `User-Agent` claims a version that sends `Sec-Fetch-Mode`, from [MDN's compatibility data](https://github.com/mdn/browser-compat-data/blob/main/http/headers/Sec-Fetch-Mode.json): Chrome 76 (and Edge, Opera and other Chromium browsers, which report a `Chrome/` version), Firefox 90 and Safari 16.4. Chrome, Firefox and Edge on iOS are never counted, since they send what Safari sends. Browsers send `Sec-Fetch-*` and client hints only over HTTPS, so those signals need an `ssl` source. A signal whose source field isn't configured can never fire, and validation refuses a rule that names it.
+A modern browser is one whose `User-Agent` claims a version that sends `Sec-Fetch-Mode`, from [MDN's compatibility data](https://github.com/mdn/browser-compat-data/blob/main/http/headers/Sec-Fetch-Mode.json): Chrome 76 (and Edge, Opera and other Chromium browsers, which report a `Chrome/` version), Firefox 90 and Safari 16.4. Chrome, Firefox and Edge on iOS are never counted, since they send what Safari sends. Browsers send `Sec-Fetch-*` and client hints only over HTTPS, so those signals need an `ssl` source. A signal whose source field isn't configured or whose CDN header isn't [trusted](../deploy/edge.md#cdn-headers), or `browser_outdated` without a floor, can never fire, and validation refuses a rule that names it. A config naming any of the four CDN signals needs schema 8 edges: admin waits for them.
 
 ## Operators
 

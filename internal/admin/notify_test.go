@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -73,8 +74,16 @@ func notifyHarness(t *testing.T) (*harness, *client, *fakeAlertmanager) {
 // notifyHarnessWith is notifyHarness with version 1 from config.
 func notifyHarnessWith(t *testing.T, config func(*harness) *snapshot.Config) (*harness, *client, *fakeAlertmanager) {
 	t.Helper()
+	return notifyHarnessEnv(t, nil, config)
+}
+
+// notifyHarnessEnv is notifyHarnessWith with deployment settings set.
+func notifyHarnessEnv(t *testing.T, env map[string]string, config func(*harness) *snapshot.Config) (*harness, *client, *fakeAlertmanager) {
+	t.Helper()
 	am := newFakeAlertmanager(t)
-	h := newHarnessWith(t, map[string]string{"ALERTMANAGER_URL": am.srv.URL + "/"})
+	e := map[string]string{"ALERTMANAGER_URL": am.srv.URL + "/"}
+	maps.Copy(e, env)
+	h := newHarnessWith(t, e)
 	h.mu.Lock()
 	h.clock = h.clock.Truncate(time.Minute).Add(45 * time.Second)
 	h.mu.Unlock()
@@ -83,6 +92,13 @@ func notifyHarnessWith(t *testing.T, config func(*harness) *snapshot.Config) (*h
 	status(t, pub.save(`"0"`, config(h), adminTest), 200)
 	status(t, pub.publishDraft("v1"), 201)
 	return h, pub, am
+}
+
+// floorConfig is testConfig with a browser floor, so browser_outdated can fire.
+func floorConfig() *snapshot.Config {
+	c := testConfig()
+	c.Global.BrowserFloor = map[string]int{"chromium": 100}
+	return c
 }
 
 // minute is one minute of a version's stats, version 1 unless set.
@@ -95,6 +111,9 @@ type minute struct {
 	// latency is the latency histogram's counts; all in the first bucket
 	// when nil.
 	latency []uint64
+	// signals is the per-client-signal request counts; none when nil, as for
+	// minutes stored before edges counted them.
+	signals []uint64
 }
 
 // put writes m for each of the minutes from minutes ago up to and
@@ -108,9 +127,9 @@ func (h *harness) put(from, to int, m minute) {
 	}
 	for i := to; i <= from; i++ {
 		h.statsSeq++
-		_, err := h.db.Exec(context.Background(), `INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited, rules)
-			VALUES ($1, $11, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, now.Add(time.Duration(-i)*time.Minute), fmt.Sprint("r", h.statsSeq),
-			m.requests, m.edge5xx, m.upstream5xx, m.authFailures, latency, orEmpty(m.rateLimit), orEmpty(m.top), orEmpty(m.rules), max(m.version, 1))
+		_, err := h.db.Exec(context.Background(), `INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited, rules, client_signals)
+			VALUES ($1, $11, $2, $3, $4, $5, $6, $7, $8, $9, $10, $12)`, now.Add(time.Duration(-i)*time.Minute), fmt.Sprint("r", h.statsSeq),
+			m.requests, m.edge5xx, m.upstream5xx, m.authFailures, latency, orEmpty(m.rateLimit), orEmpty(m.top), orEmpty(m.rules), max(m.version, 1), append([]uint64{}, m.signals...))
 		if err != nil {
 			h.t.Fatal(err)
 		}
@@ -243,6 +262,7 @@ func TestNotifyBlockSpikeCountsOnlyLiveMinutes(t *testing.T) {
 // Each signal reads the stats it is about: a fleet's traffic and errors, a
 // config rule's outcomes, and a rate-limit rule's counts and subjects.
 func TestNotifySignals(t *testing.T) {
+	outdated := func(n uint64) []uint64 { return signalCounts("browser_outdated", n) }
 	login := func(evaluated, limited, would, failed uint64) []edge.RuleCounts {
 		return []edge.RuleCounts{{ID: "login", Evaluated: evaluated, Limited: limited, WouldLimit: would, Failed: failed}}
 	}
@@ -255,6 +275,7 @@ func TestNotifySignals(t *testing.T) {
 		signal, rule     string
 	}{
 		{"traffic falls to a tenth", minute{requests: 1000}, minute{requests: 100}, "traffic_drop", ""},
+		{"browser_outdated goes from 1% to 60% of requests", minute{requests: 1000, signals: outdated(10)}, minute{requests: 1000, signals: outdated(600)}, "signal_surge", ""},
 		{"traffic grows tenfold", minute{requests: 1000}, minute{requests: 10_000}, "traffic_surge", ""},
 		{"a config rule's upstream starts failing", minute{requests: 1000, rules: admin(100, 0)}, minute{requests: 1000, upstream5xx: 50, rules: admin(100, 50)}, "rule_upstream_5xx_ratio", "admin-route"},
 		{"a rule stops matching", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)}, minute{requests: 1000, rateLimit: login(0, 0, 0, 0)}, "rule_stopped_matching", "login"},
@@ -266,7 +287,7 @@ func TestNotifySignals(t *testing.T) {
 			minute{requests: 1000, rateLimit: login(100, 30, 0, 0), top: []edge.TopCount{{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 32}}}, "rule_subject_dominates", "login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, pub, _ := notifyHarness(t)
+			h, pub, _ := notifyHarnessWith(t, func(*harness) *snapshot.Config { return floorConfig() })
 			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
 			n.FireAfter = 1
 			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
@@ -790,7 +811,7 @@ func TestNotifyNeedsEnoughToJudge(t *testing.T) {
 			slices.Repeat([]minute{{requests: 1000, upstream5xx: 2, rules: admin(30, 2)}}, 5), "rule_upstream_5xx_ratio", "admin-route", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, pub, _ := notifyHarness(t)
+			h, pub, _ := notifyHarnessWith(t, func(*harness) *snapshot.Config { return floorConfig() })
 			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
 			n.FireAfter = 1
 			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
@@ -802,6 +823,127 @@ func TestNotifyNeedsEnoughToJudge(t *testing.T) {
 			fired := slices.ContainsFunc(h.anomalies(pub), func(a anomaly) bool { return a.Signal == tc.signal && a.Rule == tc.rule && a.State == "firing" })
 			if fired != tc.fires {
 				t.Fatalf("%s fired %v, want %v: %+v", tc.signal, fired, tc.fires, h.anomalies(pub))
+			}
+		})
+	}
+}
+
+// signalCounts is a minute's per-signal counts with n under name.
+func signalCounts(name string, n uint64) []uint64 {
+	c := make([]uint64, len(expr.Signals))
+	for i, s := range expr.Signals {
+		if s.Name == name {
+			c[i] = n
+		}
+	}
+	return c
+}
+
+// A signal's share rising notifies only when the share is over its floor and
+// factor times its baseline, enough requests carry it, and the baseline
+// counted signals at all.
+func TestSignalSurgeNeedsARealRise(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		baseline, window minute
+		fires            bool
+	}{
+		{"share rises from 1% to 60%", minute{requests: 1000, signals: signalCounts("browser_outdated", 10)}, minute{requests: 1000, signals: signalCounts("browser_outdated", 600)}, true},
+		{"share stays at 20%", minute{requests: 1000, signals: signalCounts("browser_outdated", 200)}, minute{requests: 1000, signals: signalCounts("browser_outdated", 200)}, false},
+		{"share rises but under 300 requests carry it", minute{requests: 100, signals: signalCounts("browser_outdated", 1)}, minute{requests: 100, signals: signalCounts("browser_outdated", 50)}, false},
+		{"share rises but stays under the 5% floor", minute{requests: 1000, signals: signalCounts("browser_outdated", 1)}, minute{requests: 10_000, signals: signalCounts("browser_outdated", 400)}, false},
+		{"baseline stored before signals were counted gives no share", minute{requests: 1000}, minute{requests: 1000, signals: signalCounts("browser_outdated", 600)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pub, _ := notifyHarnessWith(t, func(*harness) *snapshot.Config { return floorConfig() })
+			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+			n.FireAfter = 1
+			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+			h.put(65, 6, tc.baseline)
+			h.put(5, 1, tc.window)
+			h.check()
+			var summary string
+			for _, a := range h.anomalies(pub) {
+				if a.Signal == "signal_surge" && a.State == "firing" {
+					summary = a.Summary
+				}
+			}
+			if tc.fires != (summary != "") {
+				t.Fatalf("firing %v, want %v (summary %q)", summary != "", tc.fires, summary)
+			}
+			if tc.fires && !strings.Contains(summary, "browser_outdated: 60.0% of requests in the last 5 minutes, against 1.0% in the hour before") {
+				t.Fatalf("summary %q", summary)
+			}
+		})
+	}
+}
+
+// Edges from the release before a signal existed report an array that ends
+// before its index. Their minutes give no baseline for it, not a share of 0.
+func TestSignalSurgeSkipsASignalTheBaselineEdgesDidNotReport(t *testing.T) {
+	h, pub, _ := notifyHarnessEnv(t, map[string]string{"CDN_HEADERS": "CloudFront-Viewer-TLS"}, func(*harness) *snapshot.Config {
+		c := testConfig()
+		c.Global.CDNTrustedHeaders = &[]string{"cloudfront-viewer-tls"}
+		return c
+	})
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.FireAfter = 1
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	all := signalCounts("browser_tls_old", 600)
+	h.put(65, 6, minute{requests: 1000, signals: make([]uint64, len(all)-1)})
+	h.put(5, 1, minute{requests: 1000, signals: all})
+	h.check()
+	for _, a := range h.anomalies(pub) {
+		if a.Signal == "signal_surge" && a.State == "firing" {
+			t.Fatalf("signal_surge firing: %s", a.Summary)
+		}
+	}
+}
+
+// A signal's count is only comparable between minutes under the same gate:
+// the floor for browser_outdated, trusted CDN headers for the CDN signals.
+// Publishing or changing a gate moves the share from what the old gate let
+// through to what the new one does, which is the policy, not an attack.
+func TestSignalSurgeIgnoresGateChanges(t *testing.T) {
+	floor := func(chromium int) func(*snapshot.Config) {
+		return func(c *snapshot.Config) { c.Global.BrowserFloor = map[string]int{"chromium": chromium} }
+	}
+	trust := func(c *snapshot.Config) { c.Global.CDNTrustedHeaders = &[]string{"cf-verified-bot"} }
+	for _, tc := range []struct {
+		name          string
+		first, second func(*snapshot.Config)
+		signal        string
+		// before is the signal's count a minute under first: 0 while its gate is closed.
+		before uint64
+		fires  bool
+	}{
+		{"publishing a floor", func(*snapshot.Config) {}, floor(100), "browser_outdated", 0, false},
+		{"raising the floor from 120 to 130", floor(120), floor(130), "browser_outdated", 10, false},
+		{"trusting a CDN header", func(*snapshot.Config) {}, trust, "crawler_impersonated", 0, false},
+		{"a new version under the same floor", floor(100), func(c *snapshot.Config) { floor(100)(c); c.Global.Backstop.Limit = 200 }, "browser_outdated", 10, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pub, _ := notifyHarnessEnv(t, map[string]string{"CDN_HEADERS": "CF-Verified-Bot"}, func(*harness) *snapshot.Config {
+				c := testConfig()
+				tc.first(c)
+				return c
+			})
+			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+			n.FireAfter = 1
+			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+			c := testConfig()
+			tc.second(c)
+			status(t, pub.save(pub.revision(), c, adminTest), 200)
+			status(t, pub.publishDraft("v2"), 201)
+			h.put(65, 6, minute{version: 1, requests: 1000, signals: signalCounts(tc.signal, tc.before)})
+			h.put(5, 1, minute{version: 2, requests: 1000, signals: signalCounts(tc.signal, 600)})
+			h.check()
+			var fired bool
+			for _, a := range h.anomalies(pub) {
+				fired = fired || a.Signal == "signal_surge" && a.State == "firing"
+			}
+			if fired != tc.fires {
+				t.Fatalf("signal_surge firing %v, want %v", fired, tc.fires)
 			}
 		})
 	}

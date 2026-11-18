@@ -83,7 +83,7 @@ AUDIT_HMAC_KEY=...
 CLIENT_IP_SOURCE=cloudfront
 ```
 
-Admin needs the edge's `CLIENT_IP_SOURCE`, and `VIEWER_HEADERS`, `ALLOW_REGEX` or `INGRESS_SECRET_HEADER` if you set them, with the same values, so it validates policy against the deployment edges really have. Then start it:
+Admin needs the edge's `CLIENT_IP_SOURCE`, and `VIEWER_HEADERS`, `CDN_HEADERS`, `ALLOW_REGEX` or `INGRESS_SECRET_HEADER` if you set them, with the same values, so it validates policy against the deployment edges really have. Then start it:
 
 ```bash
 # Loopback only: the HTTPS proxy on this host is admin's only way in.

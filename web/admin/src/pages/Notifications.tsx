@@ -105,6 +105,13 @@ const signals: { name: string; label: string; scope: Scope; fields: Threshold[];
     trips: (s) => `Trips when requests failing their token check are over ${times(num(s, 'factor'))} their baseline share and over ${pct(num(s, 'floor'))} of requests.${withEvents(s)}`,
   },
   {
+    name: 'signal_surge',
+    label: 'A client signal surged',
+    scope: 'fleet',
+    fields: [factor('Times the baseline share'), floor, least('Minimum requests'), events('Minimum requests with the signal')],
+    trips: (s) => `Trips when a client signal is over ${times(num(s, 'factor'))} its baseline share of requests and over ${pct(num(s, 'floor'))} of requests.${withEvents(s)}`,
+  },
+  {
     name: 'p99_latency',
     label: 'p99 latency',
     scope: 'fleet',

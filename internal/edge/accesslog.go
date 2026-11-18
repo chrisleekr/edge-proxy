@@ -36,7 +36,46 @@ type accessRecord struct {
 	spanID                                                                                 trace.SpanID
 	upErr                                                                                  error
 	cause                                                                                  upstreamCause
+
+	// The fields below are what browsers and CDNs send. Strings are kept as
+	// they are, since the request's strings are immutable; emit trims them.
+	ja3, continent, locale, authSub, referer string
+	// viewerVersion is the viewer HTTP version as the edge stores it.
+	viewerVersion string
+	hdr           [len(browserHeaders) + maxCDNHeaders]string
+	// ssl is only meaningful with hasSSL.
+	ssl, hasSSL bool
+	// reqBytes is the declared body length and respBytes what the edge wrote;
+	// negative means unknown.
+	reqBytes, respBytes int64
+	// ver names the rate-limit rules by their index.
+	ver   *version
+	rlIdx [maxRateLimitCalls + maxCountRules]int
+	nRL   int
 }
+
+// loggedHeader is a request header an access line carries, as attr.
+type loggedHeader struct{ key, attr string }
+
+func logged(keys ...string) []loggedHeader {
+	hs := make([]loggedHeader, len(keys))
+	for i, k := range keys {
+		hs[i] = loggedHeader{http.CanonicalHeaderKey(k), "http.request.header." + strings.ToLower(k)}
+	}
+	return hs
+}
+
+// browserHeaders are what bot tuning reads beyond the fingerprint, on every
+// deployment, with the client's own spelling cut. Referer is logged
+// separately, as an origin and path. An array, so its length sizes the record.
+var browserHeaders = [...]string{"Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-User", "Accept", "Accept-Language", "Accept-Encoding"}
+
+// maxHeaderValue and maxReferer bound logged header values: the client picks
+// them, and rejections are always logged.
+const (
+	maxHeaderValue = 256
+	maxReferer     = 512
+)
 
 // accessLog writes JSON access lines from one goroutine. When
 // its buffer is full a line is dropped and counted: logging never blocks a
@@ -46,23 +85,31 @@ type accessLog struct {
 	log    *slog.Logger
 	m      *metrics
 	sample float64
+	// headers are the browser headers then the deployment's CDN headers.
+	headers []loggedHeader
 }
 
 // logDraw picks which allowed requests are logged. A variable so tests can
 // choose the outcome.
 var logDraw = rand.Float64
 
-func newAccessLog(log *slog.Logger, m *metrics, sample float64, size int) *accessLog {
-	return &accessLog{ch: make(chan accessRecord, size), log: log, m: m, sample: sample}
+// The CDN's headers are logged as received: when the CDN does not set one,
+// the value is the client's.
+func newAccessLog(log *slog.Logger, m *metrics, sample float64, size int, cdn []string) *accessLog {
+	return &accessLog{ch: make(chan accessRecord, size), log: log, m: m, sample: sample, headers: logged(slices.Concat(browserHeaders[:], cdn)...)}
 }
 
 // decisionOf names how the edge answered: allow, or the rejection reason.
+// An access rule's would_block outranks would_limit, so a decision that
+// existed before log-only rate limits keeps its name.
 func decisionOf(st *reqState) string {
 	switch {
 	case st.rejected:
 		return reasonNames[st.reason]
 	case st.wouldBlock:
 		return "would_block"
+	case st.wouldLimit:
+		return "would_limit"
 	}
 	return "allow"
 }
@@ -92,6 +139,26 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 		sc := st.span.SpanContext()
 		rec.traceID, rec.spanID = sc.TraceID(), sc.SpanID()
 	}
+	if decision == "would_limit" {
+		rec.rateLimitRule = st.wlRule
+	}
+	rec.ja3, rec.continent, rec.viewerVersion, rec.ssl, rec.hasSSL = st.client.ja3, st.client.continent, st.client.version, st.client.ssl, st.client.hasSSL
+	if st.fields.localeSet {
+		rec.locale = st.fields.locale
+	}
+	// Only a verified token's subject: an unverified claim is the client's.
+	if st.auth == authVerified || st.auth == authCached {
+		rec.authSub = st.authSub
+	}
+	rec.reqBytes, rec.respBytes = r.ContentLength, st.sw.bytes
+	if st.sw.hijacked {
+		rec.respBytes = -1
+	}
+	for i, h := range a.headers {
+		rec.hdr[i], _ = first(r.Header[h.key])
+	}
+	rec.referer, _ = first(r.Header["Referer"])
+	rec.ver, rec.rlIdx, rec.nRL = st.ver, st.rlIdx, st.nRL
 	if st.ver != nil {
 		rec.version = st.ver.c.Config.Version
 		for _, i := range st.matched {
@@ -184,6 +251,27 @@ func cut(s string, n int) string {
 	return s[:n]
 }
 
+// refererOrigin is a Referer without its query, fragment and user info, or
+// "" when it is not an absolute URL with a host. A query can carry tokens.
+func refererOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Host == "" {
+		return ""
+	}
+	return cut(u.Scheme+"://"+u.Host+u.EscapedPath(), maxReferer)
+}
+
+// otelHTTPVersion writes the stored viewer version as OpenTelemetry does.
+func otelHTTPVersion(v string) string {
+	switch v {
+	case "2.0":
+		return "2"
+	case "3.0":
+		return "3"
+	}
+	return v
+}
+
 // maxUserAgent bounds the logged User-Agent. The client picks it, up to
 // MAX_HEADER_BYTES, and rejections are always logged.
 const maxUserAgent = 512
@@ -237,6 +325,49 @@ func (a *accessLog) emit(rec accessRecord) {
 	}
 	if rec.signals != 0 {
 		attrs = append(attrs, slog.Any("client.signals", signalLists[rec.signals]))
+	}
+	if rec.ja3 != "" {
+		attrs = append(attrs, slog.String("tls.client.ja3", rec.ja3))
+	}
+	if rec.continent != "" {
+		attrs = append(attrs, slog.String("client.geo.continent_code", rec.continent))
+	}
+	if rec.viewerVersion != "" {
+		attrs = append(attrs, slog.String("network.protocol.version", otelHTTPVersion(rec.viewerVersion)))
+	}
+	if rec.hasSSL {
+		scheme := "http"
+		if rec.ssl {
+			scheme = "https"
+		}
+		attrs = append(attrs, slog.String("url.scheme", scheme))
+	}
+	if rec.reqBytes >= 0 {
+		attrs = append(attrs, slog.Int64("http.request.body.size", rec.reqBytes))
+	}
+	if rec.respBytes >= 0 {
+		attrs = append(attrs, slog.Int64("http.response.body.size", rec.respBytes))
+	}
+	if rec.locale != "" {
+		attrs = append(attrs, slog.String("edge.locale", rec.locale))
+	}
+	if rec.authSub != "" {
+		attrs = append(attrs, slog.String("edge.auth_sub", cut(rec.authSub, maxHeaderValue)))
+	}
+	if rec.nRL > 0 {
+		names := make([]string, rec.nRL)
+		for i, idx := range rec.rlIdx[:rec.nRL] {
+			names[i] = rec.ver.rules[idx].ID
+		}
+		attrs = append(attrs, slog.Any("edge.rate_limit_rules", names))
+	}
+	for i, h := range a.headers {
+		if rec.hdr[i] != "" {
+			attrs = append(attrs, slog.String(h.attr, cut(rec.hdr[i], maxHeaderValue)))
+		}
+	}
+	if ref := refererOrigin(rec.referer); ref != "" {
+		attrs = append(attrs, slog.String("http.request.header.referer", ref))
 	}
 	if rec.traceID.IsValid() {
 		attrs = append(attrs, slog.String("trace_id", rec.traceID.String()), slog.String("span_id", rec.spanID.String()))

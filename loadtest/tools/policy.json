@@ -80,6 +80,10 @@
         "forward": {
           "mode": "all"
         }
+      },
+      "browser_floor": {
+        "chromium": 130,
+        "firefox": 130
       }
     },
     "auth": {
@@ -163,6 +167,22 @@
         "on_missing_key": "fallback_ip",
         "action": "block",
         "fail_mode": "open"
+      },
+      {
+        "id": "site-per-ip",
+        "expression": {
+          "combinator": "and",
+          "rules": []
+        },
+        "algorithm": "sliding_window",
+        "limit": 6000,
+        "period": "1m",
+        "key": [
+          "ip"
+        ],
+        "on_missing_key": "fallback_ip",
+        "action": "block",
+        "fail_mode": "open"
       }
     ],
     "request_header_rules": []
@@ -177,6 +197,7 @@
       },
       "expect": {
         "rate_limit_rules": [
+          "site-per-ip",
           "login"
         ]
       }

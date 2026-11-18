@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -381,5 +382,44 @@ func TestMetricsKeepRetiredVersionCounts(t *testing.T) {
 	}
 	if n, ok := m[`edge_ratelimit_rule_total{rule="per-ip-renamed",outcome="evaluated"}`]; !ok || n != 0 {
 		t.Fatalf("renamed rule's series %v (present %v), want 0", n, ok)
+	}
+}
+
+// A stale Chrome under a floor is counted once under browser_outdated in the
+// next report and in /metrics, and a request shed before the config step
+// (here an ambiguous path) counts no signal.
+func TestClientSignalsCounted(t *testing.T) {
+	h := newHarness(t, nil)
+	c := testConfig(1)
+	c.Global.BrowserFloor = map[string]int{"chromium": 130}
+	h.load(envelope(c))
+	const chrome120 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	h.statuses(3, "GET", "/", "User-Agent", chrome120, "Accept-Language", "en")
+	if got := h.statuses(1, "GET", "/a%00b", "User-Agent", chrome120, "Accept-Language", "en"); !eqInts(got, 400) {
+		t.Fatalf("ambiguous path: %v", got)
+	}
+	d := h.srv.poller.reg.deltas()
+	if len(d) != 1 || len(d[0].Signals) != numSignals {
+		t.Fatalf("report %+v", d)
+	}
+	for i, s := range expr.Signals {
+		want := uint64(0)
+		if s.Name == "browser_outdated" {
+			want = 3
+		}
+		if d[0].Signals[i] != want {
+			t.Errorf("signal %s counted %d, want %d", s.Name, d[0].Signals[i], want)
+		}
+	}
+	if n := h.metrics()[`edge_client_signal_total{signal="browser_outdated"}`]; n != 3 {
+		t.Fatalf("browser_outdated metric %v, want 3", n)
+	}
+}
+
+// Counting a request's signals sits on the request path: atomic adds only.
+func TestCountSignalsAllocatesNothing(t *testing.T) {
+	v := newStatsRegistry().use(&snapshot.Compiled{Config: &snapshot.Config{Version: 1}})[0]
+	if n := testing.AllocsPerRun(100, func() { v.countSignals(sigUATool | sigBrowserOutdated) }); n != 0 {
+		t.Fatalf("%v allocations per request, want 0", n)
 	}
 }

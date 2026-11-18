@@ -26,7 +26,9 @@ type fields struct {
 	// claims holds verified JWT claims as strings; nil without a verified token.
 	claims map[string][]string
 	// bots is the snapshot's verified crawler ranges.
-	bots    *expr.IPSet
+	bots *expr.IPSet
+	// floor is the snapshot's browser_outdated floor by browser kind.
+	floor   [4]int
 	signals uint16
 
 	args url.Values
@@ -179,7 +181,7 @@ func (f *fields) List(name, key string) []string {
 // requests a rule reads them for pay for them.
 func (f *fields) signalBits() uint16 {
 	if f.parsed&parsedSignals == 0 {
-		f.signals = signalsOf(f.r.Header, f.c)
+		f.signals = signalsOf(f.r.Header, f.c, f.floor)
 		f.parsed |= parsedSignals
 	}
 	return f.signals

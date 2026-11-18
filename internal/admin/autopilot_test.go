@@ -1129,7 +1129,7 @@ func TestAutopilotMetrics(t *testing.T) {
 			`admin_autopilot_proposals_total{action="retire",result="accepted"} 0`,
 			`admin_background_job_failures_total{job="autopilot"} 0`,
 		}
-		for _, reason := range []string{"not_overlay_shape", "site_wide", "fail_mode", "key_needs_ip_or_jwt", "constant_or_host_key", "missing_key_rejects",
+		for _, reason := range []string{"not_overlay_shape", "site_wide", "fail_mode", "key_needs_ip_or_jwt", "shared_key_penalty", "constant_or_host_key", "missing_key_rejects",
 			"ttl_over_max", "lifetime_over_max", "penalty_past_expiry", "named_subjects", "duplicate", "suppressed", "sweep_repeat", "compile", "budget_enforcing",
 			"budget_sensors", "observed_too_short", "block_share", "crawler_subject", "protected_subject", "attack_stopped",
 			"note_key", "note_jwt_key", "note_expected_pattern"} {

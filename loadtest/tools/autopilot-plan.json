@@ -146,5 +146,23 @@
         "on_missing_key": "fallback_ip"
       }
     }
+  ],
+  "signals": [
+    {
+      "signal": "signal_surge",
+      "mentions": "browser_outdated",
+      "name": "fingerprint-fleet",
+      "rule": {
+        "expression": "client.signals eq \"browser_outdated\" and http.request.method eq \"GET\" and starts_with(http.request.uri.path, \"/pages/\")",
+        "algorithm": "sliding_window",
+        "limit": 300,
+        "period": "1m",
+        "key": [
+          "ja4"
+        ],
+        "on_missing_key": "skip"
+      },
+      "ttl": "5m"
+    }
   ]
 }

@@ -1348,7 +1348,7 @@ test('a long similar route does not widen the page', async () => {
 test('fleet hides gone edges until asked', async () => {
   const at = Date.now();
   const edge = (instance: string, live: boolean, ago: number) => ({
-    instance, live, last_seen: new Date(at - ago).toISOString(), config_source: 'admin', bootstrap_age_seconds: 0, versions: [1], upstream: 'https://lb.example.com',
+    instance, live, last_seen: new Date(at - ago).toISOString(), config_source: 'admin', bootstrap_age_seconds: 0, versions: [1], upstream: 'https://lb.example.com', settings_differ: false,
   });
   // Gone edges first, to show the table puts the reporting edge on top.
   await page.route('**/api/fleet', (r) => r.fulfill({ json: [edge('edge-gone-a', false, 3_600_000), edge('edge-gone-b', false, 7_200_000), edge('edge-live', true, 5_000)] }));
@@ -1366,6 +1366,23 @@ test('fleet hides gone edges until asked', async () => {
     await expect(rows).toHaveCount(3);
     await expect(rows.first()).toContainText('edge-live');
     await expect(rows.nth(1)).toContainText('gone');
+  } finally {
+    await page.unroute('**/api/fleet');
+  }
+});
+
+test('fleet holds publishing only for a reporting edge whose settings differ', async () => {
+  const at = Date.now();
+  const edge = (instance: string, live: boolean, ago: number) => ({
+    instance, live, last_seen: new Date(at - ago).toISOString(), config_source: 'admin', bootstrap_age_seconds: 0, versions: [1], upstream: 'https://lb.example.com', settings_differ: true,
+  });
+  await page.route('**/api/fleet', (r) => r.fulfill({ json: [edge('edge-live', true, 5_000), edge('edge-gone', false, 3_600_000)] }));
+  try {
+    await page.goto('/fleet');
+    await expect(page.locator('tbody tr').filter({ hasText: 'edge-live' })).toContainText('settings differ');
+    const notice = page.getByRole('status').filter({ hasText: 'Publishing is held' });
+    await expect(notice).toContainText('Publishing is held: edge-live runs');
+    await expect(notice).not.toContainText('edge-gone');
   } finally {
     await page.unroute('**/api/fleet');
   }
@@ -1427,6 +1444,59 @@ test('fleet lists crawler range sources with their state in words', async () => 
     expect((await sideways()).page).toBe(0);
   } finally {
     await page.unroute('**/api/verified-bots');
+    await page.setViewportSize(size);
+  }
+});
+
+test('settings choose which CDN headers are trusted, and the default can be restored', async () => {
+  // The draft is checked on every edit, so the request shows what saving would store.
+  const trusted = async (act: () => Promise<void>) => {
+    const sent = page.waitForRequest((r) => r.url().endsWith('/api/draft/check') && r.method() === 'POST');
+    await act();
+    return ((await sent).postDataJSON() as { config: { global: { cdn_trusted_headers?: string[] } } }).config.global.cdn_trusted_headers;
+  };
+  await nav('Settings');
+  const card = page.locator('#trusted-cdn-headers');
+  await expect(card.getByRole('heading', { name: 'Trusted CDN headers', exact: true })).toBeVisible();
+  // The intro opens from the title's info button, so it is in the page while closed.
+  await expect(card.getByText("A rule on one gets no client-controlled warning, and the signals that read it can be used. The edge doesn't check")).toBeAttached();
+  // CloudFront adds none of its listed headers to every request, so its default trusts none.
+  await expect(card.getByText('Using the default: none trusted.')).toBeVisible();
+  await expect(card.getByLabel('cloudfront-viewer-city', { exact: true })).not.toBeChecked();
+  // Another edit keeps the draft unsaved, so restoring the default is checked too and shows what saving would store.
+  expect(await trusted(() => page.getByLabel('Maximum requests in progress per edge').fill('500'))).toBeUndefined();
+  expect(await trusted(() => card.getByLabel('cloudfront-viewer-city', { exact: true }).check())).toEqual(['cloudfront-viewer-city']);
+  await expect(card.getByText('Using the default')).toBeHidden();
+  expect(await trusted(() => card.getByRole('button', { name: 'Use the default' }).click())).toBeUndefined();
+  await expect(card.getByLabel('cloudfront-viewer-city', { exact: true })).not.toBeChecked();
+  await expect(card.getByText('Using the default: none trusted.')).toBeVisible();
+  await page.getByRole('button', { name: 'Discard' }).click();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+});
+
+test('fleet lists the CDN headers and the rule builder suggests them as header keys', async () => {
+  const size = page.viewportSize()!;
+  try {
+    for (const width of [1280, 375]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto('/fleet', { waitUntil: 'networkidle' });
+      const card = page.locator('#cdn-headers');
+      await expect(card.getByRole('heading', { name: 'CDN headers', exact: true })).toBeVisible();
+      await expect(card.getByText('cloudfront-viewer-city', { exact: true })).toBeVisible();
+      // CloudFront-Viewer-Country is mapped to a field, so rules may not read it, but it is still logged.
+      await expect(card.getByText('Also logged')).toContainText('cloudfront-viewer-country');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await nav('Rules');
+    const limits = page.getByRole('list', { name: 'Rate limit rules' }).locator('..');
+    await limits.getByRole('button', { name: 'Add rate limit rule' }).click();
+    await page.locator('.ruleGroup-addRule').first().click();
+    await page.locator('.rule').first().locator('.rule-fields').selectOption('http.request.headers');
+    const key = page.locator('.rule').first().getByLabel('Key');
+    await expect(key).toHaveAttribute('list', /.+/);
+    await expect(page.locator('datalist option[value="cloudfront-viewer-city"]')).toHaveCount(1);
+  } finally {
     await page.setViewportSize(size);
   }
 });

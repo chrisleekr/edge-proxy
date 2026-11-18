@@ -4,6 +4,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,7 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"viewer header pair without a header", map[string]string{"VIEWER_HEADERS": "ip.src.country"}, "must be field=Header"},
 		{"viewer header for a request field", map[string]string{"VIEWER_HEADERS": "http.host=X-Host"}, `"http.host" is not a viewer field`},
 		{"viewer headers with remote_addr", map[string]string{"CLIENT_IP_SOURCE": "remote_addr", "VIEWER_HEADERS": "ssl=X-Proto"}, "can't be used with remote_addr"},
+		{"CDN headers with remote_addr", map[string]string{"CLIENT_IP_SOURCE": "remote_addr", "CDN_HEADERS": "Cf-Ray"}, "can't be used with remote_addr: there is no CDN"},
 		{"upstream without a scheme", map[string]string{"UPSTREAM_URL": "lb:8080"}, "UPSTREAM_URL: is required"},
 		{"no upstream", map[string]string{"UPSTREAM_URL": ""}, "UPSTREAM_URL: is required"},
 		{"upstream with credentials", map[string]string{"UPSTREAM_URL": "https://u:s3cret@lb.internal"}, "UPSTREAM_URL: is required"},
@@ -213,6 +215,22 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"valkey URL with a bad port", map[string]string{"VALKEY_URL": "redis://u:s3cret@vk:notaport"}, `VALKEY_URL: invalid port ":notaport"`},
 		{"valkey URL with an unknown scheme", map[string]string{"VALKEY_URL": "http://vk:6379"}, "VALKEY_URL: valkey: invalid URL scheme"},
 		{"zero expected replicas", map[string]string{"EXPECTED_REPLICAS": "0"}, "EXPECTED_REPLICAS"},
+		{"CDN header that is a credential", map[string]string{"CDN_HEADERS": "CF-Ray, Authorization"}, "Authorization carries credentials or query values"},
+		{"CDN header that is a cookie", map[string]string{"CDN_HEADERS": "cookie"}, "Cookie carries credentials"},
+		{"CDN header that is an Access token", map[string]string{"CDN_HEADERS": "cf-access-jwt-assertion"}, "Cf-Access-Jwt-Assertion carries credentials"},
+		{"CDN header that is an Access service secret", map[string]string{"CDN_HEADERS": "CF-Access-Client-Secret"}, "Cf-Access-Client-Secret carries credentials"},
+		{"CDN header that carries the query string", map[string]string{"CDN_HEADERS": "CloudFront-Error-Args"}, "Cloudfront-Error-Args carries credentials or query values"},
+		{"CDN header that carries the error page URL", map[string]string{"CDN_HEADERS": "CloudFront-Error-Uri"}, "Cloudfront-Error-Uri carries credentials or query values"},
+		{"CDN header that is a proxy credential", map[string]string{"CDN_HEADERS": "Proxy-Authorization"}, "Proxy-Authorization carries credentials"},
+		{"CDN header that is an Access service ID", map[string]string{"CDN_HEADERS": "CF-Access-Client-Id"}, "Cf-Access-Client-Id carries credentials"},
+		{"CDN header that is the full referring URL", map[string]string{"CDN_HEADERS": "referer"}, "Referer carries credentials or query values"},
+		{"CDN header that is a load balancer OIDC token", map[string]string{"CDN_HEADERS": "x-amzn-oidc-accesstoken"}, "X-Amzn-Oidc-Accesstoken carries credentials"},
+		{"CDN header that every access line logs already", map[string]string{"CDN_HEADERS": "CF-Ray, accept-language"}, "Accept-Language is already logged on every access line"},
+		{"CDN header that is the logged User-Agent", map[string]string{"CDN_HEADERS": "user-agent"}, "User-Agent is already logged on every access line"},
+		{"CDN header that is the ingress secret", map[string]string{"CDN_HEADERS": "x-origin-secret", "INGRESS_SECRET_HEADER": "X-Origin-Secret", "INGRESS_SECRET_VALUES": "s"}, "X-Origin-Secret carries credentials"},
+		{"CDN header that isn't a name", map[string]string{"CDN_HEADERS": "CF-Ray,CF Ray"}, `"CF Ray" is not a header name`},
+		{"CDN header list with an empty entry", map[string]string{"CDN_HEADERS": "CF-Ray,"}, `"" is not a header name`},
+		{"more CDN headers than a record holds", map[string]string{"CDN_HEADERS": manyHeaders(maxCDNHeaders + 1)}, "lists 49 headers; at most 48"},
 		{"boolean typo", map[string]string{"BOOTSTRAP_ALLOW_STALE": "yes"}, "must be true or false"},
 	}
 	for _, tc := range cases {
@@ -265,5 +283,98 @@ func TestLoadDeployment(t *testing.T) {
 	// validates config against a client-IP source no edge runs with.
 	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "x-real-ip"})); err == nil || !strings.Contains(err.Error(), "CLIENT_IP_SOURCE") {
 		t.Fatalf("unknown CLIENT_IP_SOURCE: %v", err)
+	}
+}
+
+func manyHeaders(n int) string {
+	hs := make([]string, n)
+	for i := range hs {
+		hs[i] = "X-Cdn-" + strconv.Itoa(i)
+	}
+	return strings.Join(hs, ",")
+}
+
+// The CDN preset lists the headers the CDN documents, CDN_HEADERS replaces
+// them, and none turns them off. Admin validates with the same list.
+func TestCDNHeaders(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+		want func(got []string) bool
+	}{
+		{"cloudflare preset", map[string]string{"CLIENT_IP_SOURCE": "cloudflare"}, func(got []string) bool {
+			return len(got) == 20 && slices.Contains(got, "Cf-Ipcity") && slices.Contains(got, "Cf-Ja4") && slices.Contains(got, "Cf-Bot-Score")
+		}},
+		{"cloudfront preset", nil, func(got []string) bool {
+			return len(got) == 26 && slices.Contains(got, "Cloudfront-Viewer-Tls") && slices.Contains(got, "Cloudfront-Viewer-Ja4-Fingerprint")
+		}},
+		{"gcp has no default", map[string]string{"CLIENT_IP_SOURCE": "gcp"}, func(got []string) bool { return len(got) == 0 }},
+		{"the variable replaces the preset, in canonical case, without repeats", map[string]string{"CDN_HEADERS": "cf-ray, CF-RAY ,X-Geo-City"}, func(got []string) bool {
+			return slices.Equal(got, []string{"Cf-Ray", "X-Geo-City"})
+		}},
+		{"none turns the list off", map[string]string{"CDN_HEADERS": "none"}, func(got []string) bool { return len(got) == 0 }},
+		{"None in any case and with spaces turns the list off", map[string]string{"CDN_HEADERS": " None "}, func(got []string) bool { return len(got) == 0 }},
+		{"the limit itself is accepted", map[string]string{"CDN_HEADERS": manyHeaders(maxCDNHeaders)}, func(got []string) bool { return len(got) == maxCDNHeaders }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := cloudfrontEnv()
+			maps.Copy(e, tc.set)
+			c, err := LoadConfig(env(e))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := LoadDeployment(env(e))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.want(c.CDNHeaders) || !slices.Equal(d.CDNHeaders, c.CDNHeaders) || !slices.Equal(c.Deployment().CDNHeaders, c.CDNHeaders) {
+				t.Fatalf("edge list %v, admin list %v", c.CDNHeaders, d.CDNHeaders)
+			}
+		})
+	}
+	// An edge and admin with different lists must not look alike, or admin
+	// would publish to an edge that validates differently.
+	a, _ := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudflare"}))
+	b, _ := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudflare", "CDN_HEADERS": "CF-Ray"}))
+	if a.Fingerprint() == b.Fingerprint() {
+		t.Error("fingerprints match with different CDN_HEADERS")
+	}
+	if _, err := LoadDeployment(env(map[string]string{"CLIENT_IP_SOURCE": "cloudflare", "CDN_HEADERS": "Cookie"})); err == nil {
+		t.Error("admin accepted a credential header")
+	}
+}
+
+// Only the headers the CDN adds to every request, with no optional feature
+// turned on, are trusted by default, and only when they are listed. Edge and
+// admin agree on them.
+func TestCDNTrustedDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+		want []string
+	}{
+		{"cloudflare trusts the headers it adds to every request", map[string]string{"CLIENT_IP_SOURCE": "cloudflare"}, []string{"Cf-Ray", "Cf-Visitor"}},
+		{"cloudflare with a list that leaves one out", map[string]string{"CLIENT_IP_SOURCE": "cloudflare", "CDN_HEADERS": "cf-ray,Cf-Bot-Score"}, []string{"Cf-Ray"}},
+		{"cloudflare with none listed", map[string]string{"CLIENT_IP_SOURCE": "cloudflare", "CDN_HEADERS": "none"}, nil},
+		{"cloudfront adds nothing to trust", nil, nil},
+		{"gcp lists no headers", map[string]string{"CLIENT_IP_SOURCE": "gcp"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := cloudfrontEnv()
+			maps.Copy(e, tc.set)
+			c, err := LoadConfig(env(e))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := LoadDeployment(env(e))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(c.CDNTrustedDefault, tc.want) || !slices.Equal(d.CDNTrustedDefault, tc.want) || !slices.Equal(c.Deployment().CDNTrustedDefault, tc.want) {
+				t.Fatalf("edge %v, admin %v, want %v", c.CDNTrustedDefault, d.CDNTrustedDefault, tc.want)
+			}
+		})
 	}
 }

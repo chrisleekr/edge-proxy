@@ -91,6 +91,13 @@ type Config struct {
 	Instance      string
 
 	Tracing tracing.Config
+
+	// CDNHeaders are the canonical headers the CDN sets: logged, and offered
+	// to rules. Which of them rules trust is policy.
+	CDNHeaders []string
+	// CDNTrustedDefault are the CDNHeaders trusted until the policy says
+	// otherwise.
+	CDNTrustedDefault []string
 }
 
 // ClientIPSource says where the client IP comes from.
@@ -106,6 +113,14 @@ type ClientIPSource struct {
 var presets = map[string]struct {
 	ip     ClientIPSource
 	viewer map[string]string
+	// cdn are the headers the CDN documents adding, logged and offered to
+	// rules by default.
+	cdn []string
+	// cdnTrusted are the cdn headers the CDN adds to every proxied request
+	// with no optional feature, trusted unless the policy says otherwise.
+	// Whether the CDN replaces a client-sent copy is not documented; trusting
+	// one only silences a warning.
+	cdnTrusted []string
 }{
 	"cloudfront": {
 		ClientIPSource{Kind: "cloudfront", Header: "CloudFront-Viewer-Address", WithPort: true},
@@ -115,6 +130,8 @@ var presets = map[string]struct {
 			"ssl":                  "CloudFront-Forwarded-Proto",
 			"http.request.version": "CloudFront-Viewer-Http-Version",
 		},
+		[]string{"CloudFront-Viewer-Asn", "CloudFront-Viewer-Isp", "CloudFront-Viewer-Country", "CloudFront-Viewer-Country-Name", "CloudFront-Viewer-Country-Region", "CloudFront-Viewer-Country-Region-Name", "CloudFront-Viewer-City", "CloudFront-Viewer-Postal-Code", "CloudFront-Viewer-Metro-Code", "CloudFront-Viewer-Time-Zone", "CloudFront-Viewer-Latitude", "CloudFront-Viewer-Longitude", "CloudFront-Viewer-JA3-Fingerprint", "CloudFront-Viewer-JA4-Fingerprint", "CloudFront-Viewer-TLS", "CloudFront-Viewer-TLS-Details", "CloudFront-Viewer-Header-Order", "CloudFront-Viewer-Header-Count", "CloudFront-Viewer-Http-Version", "CloudFront-Forwarded-Proto", "CloudFront-Is-Android-Viewer", "CloudFront-Is-Desktop-Viewer", "CloudFront-Is-IOS-Viewer", "CloudFront-Is-Mobile-Viewer", "CloudFront-Is-SmartTV-Viewer", "CloudFront-Is-Tablet-Viewer"},
+		nil,
 	},
 	"cloudflare": {
 		ClientIPSource{Kind: "cloudflare", Header: "CF-Connecting-IP"},
@@ -122,6 +139,8 @@ var presets = map[string]struct {
 			"ip.src.country": "CF-IPCountry",
 			"ssl":            "X-Forwarded-Proto",
 		},
+		[]string{"CF-IPCountry", "CF-IPContinent", "CF-IPCity", "CF-Region", "CF-Region-Code", "CF-Metro-Code", "CF-Postal-Code", "CF-Timezone", "CF-IPLatitude", "CF-IPLongitude", "CF-Ray", "CF-Visitor", "True-Client-IP", "CF-JA4", "CF-JA3-Hash", "CF-Bot-Score", "CF-Verified-Bot", "CF-Cert-Verified", "CF-Cert-Presented", "CF-Cert-Revoked"},
+		[]string{"CF-Ray", "CF-Visitor"},
 	},
 	// An external Application Load Balancer has no fixed header names: the
 	// LB's custom request headers must set these from {client_ip_address},
@@ -136,6 +155,8 @@ var presets = map[string]struct {
 			"http.request.version": "X-Gclb-Protocol",
 			"ssl":                  "X-Gclb-Encrypted",
 		},
+		nil,
+		nil,
 	},
 }
 
@@ -178,6 +199,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		Tracing:          tracing.Load(&p.Parser, "edge-proxy"),
 	}
 	p.clientIP(c)
+	p.cdnHeaders(c)
 	p.trustedProxies(c)
 	p.upstream(c)
 	if s := p.Str("ADMIN_URL", ""); s != "" {
@@ -279,6 +301,56 @@ func (p *envParser) clientIP(c *Config) {
 	}
 }
 
+// neverLogged carry credentials, query values or a full URL, so CDN_HEADERS
+// can't name them. The access log keeps only Referer's origin and path.
+var neverLogged = map[string]bool{"Authorization": true, "Proxy-Authorization": true, "Cookie": true, "Referer": true,
+	"Cf-Access-Jwt-Assertion": true, "Cf-Access-Client-Id": true, "Cf-Access-Client-Secret": true, "Cloudfront-Error-Args": true, "Cloudfront-Error-Uri": true,
+	// Google IAP's signed JWT, and the AWS ALB OIDC access token and claims JWT.
+	"X-Goog-Iap-Jwt-Assertion": true, "X-Amzn-Oidc-Accesstoken": true, "X-Amzn-Oidc-Data": true}
+
+// maxCDNHeaders bounds every queued access record.
+const maxCDNHeaders = snapshot.MaxCDNHeaders
+
+// cdnHeaders reads CDN_HEADERS: a comma-separated list replacing the
+// preset's, or "none".
+func (p *envParser) cdnHeaders(c *Config) {
+	hs := presets[c.ClientIP.Kind].cdn
+	switch v := strings.TrimSpace(p.Str("CDN_HEADERS", "")); {
+	case v == "":
+	case strings.EqualFold(v, "none"):
+		hs = nil
+	default:
+		hs = strings.Split(v, ",")
+	}
+	secret := http.CanonicalHeaderKey(c.IngressSecretHeader)
+	trusted := presets[c.ClientIP.Kind].cdnTrusted
+	for _, h := range hs {
+		k := http.CanonicalHeaderKey(strings.TrimSpace(h))
+		switch {
+		case !expr.IsToken(k):
+			p.Fail("CDN_HEADERS", fmt.Sprintf("%q is not a header name", h))
+		case neverLogged[k] || k == secret:
+			p.Fail("CDN_HEADERS", fmt.Sprintf("%s carries credentials or query values and is never logged", k))
+		// Logged already, so listing one would log it twice.
+		case k == "User-Agent" || slices.Contains(browserHeaders[:], k):
+			p.Fail("CDN_HEADERS", fmt.Sprintf("%s is already logged on every access line", k))
+		case !slices.Contains(c.CDNHeaders, k):
+			c.CDNHeaders = append(c.CDNHeaders, k)
+		}
+	}
+	for _, h := range trusted {
+		if k := http.CanonicalHeaderKey(h); slices.Contains(c.CDNHeaders, k) {
+			c.CDNTrustedDefault = append(c.CDNTrustedDefault, k)
+		}
+	}
+	if c.ClientIP.Kind == "remote_addr" && len(c.CDNHeaders) > 0 {
+		p.Fail("CDN_HEADERS", "can't be used with remote_addr: there is no CDN to set them")
+	}
+	if len(c.CDNHeaders) > maxCDNHeaders {
+		p.Fail("CDN_HEADERS", fmt.Sprintf("lists %d headers; at most %d", len(c.CDNHeaders), maxCDNHeaders))
+	}
+}
+
 // trustedProxies reads TRUSTED_PROXIES. Only the edge needs it: admin
 // validates config without seeing traffic, and its own proxy is
 // ADMIN_TRUSTED_PROXIES.
@@ -315,6 +387,7 @@ func LoadDeployment(getenv func(string) string) (snapshot.Deployment, error) {
 	p := &envParser{envparse.Parser{Get: getenv}}
 	c := &Config{AllowRegex: p.Bool("ALLOW_REGEX"), IngressSecretHeader: p.Str("INGRESS_SECRET_HEADER", "")}
 	p.clientIP(c)
+	p.cdnHeaders(c)
 	if err := p.Err(); err != nil {
 		return snapshot.Deployment{}, err
 	}
@@ -323,7 +396,7 @@ func LoadDeployment(getenv func(string) string) (snapshot.Deployment, error) {
 
 // Deployment is what snapshot validation needs to know about this deployment.
 func (c *Config) Deployment() snapshot.Deployment {
-	d := snapshot.Deployment{AllowRegex: c.AllowRegex, VerifiedBots: true}
+	d := snapshot.Deployment{AllowRegex: c.AllowRegex, VerifiedBots: true, CDNHeaders: c.CDNHeaders, CDNTrustedDefault: c.CDNTrustedDefault}
 	for f, h := range c.Viewer {
 		d.ViewerFields = append(d.ViewerFields, f)
 		d.SourceHeaders = append(d.SourceHeaders, h)
@@ -334,6 +407,7 @@ func (c *Config) Deployment() snapshot.Deployment {
 	if c.IngressSecretHeader != "" {
 		d.SourceHeaders = append(d.SourceHeaders, c.IngressSecretHeader)
 	}
+	d.CountryHeader = c.Viewer["ip.src.country"]
 	slices.Sort(d.ViewerFields)
 	return d
 }
