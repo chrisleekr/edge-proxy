@@ -29,6 +29,12 @@ type Deployment struct {
 	// SourceHeaders are the client-IP, viewer and ingress secret headers.
 	// The edge strips them, so rules can neither read nor set them.
 	SourceHeaders []string
+	// CountryHeader is the header ip.src.country is read from. cdn_tor can
+	// fire only when it is cf-ipcountry, and SourceHeaders alone can't say
+	// which viewer field a header feeds. Not in Fingerprint: that already
+	// covers ViewerFields and SourceHeaders, and changing it would hold
+	// publishing during an upgrade.
+	CountryHeader string
 	// CDNHeaders are the headers the deployment's CDN may set (CDN_HEADERS).
 	// The edge logs them and rules may read them. A rule on one is
 	// client-controlled unless the policy trusts it.
@@ -563,7 +569,7 @@ func CDNTrusted(c *Config, d Deployment) []string {
 // ip.src.country's header, so cf-ipcountry counts only as that source.
 func (v *validator) cdnSignalNeed(h string) string {
 	switch source := v.d.source(h); {
-	case h == "cf-ipcountry" && !source:
+	case h == "cf-ipcountry" && !strings.EqualFold(v.d.CountryHeader, h):
 		return "ip.src.country read from the cf-ipcountry header"
 	case v.cdn[h]:
 		return ""

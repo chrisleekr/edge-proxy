@@ -699,7 +699,9 @@ export function Stats() {
       >
         Client signals
       </Title>
-      <Table head={['Signal', 'Requests', 'Share']} num={[1, 2]} empty={q.data && `No request showed a client signal ${r.phrase}.`}>
+      <ErrorBox error={signalNames.error} />
+      {/* Names come from the schema; without it, counts can't be named, so "none" would be wrong. */}
+      <Table head={['Signal', 'Requests', 'Share']} num={[1, 2]} empty={q.data && signalNames.data && `No request showed a client signal ${r.phrase}.`}>
         {signals.map((x) => (
           <tr key={x.name}>
             <td className="font-mono">{x.name}</td>

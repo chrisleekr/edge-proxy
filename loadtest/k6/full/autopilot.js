@@ -51,7 +51,7 @@ const collateral = new Rate('collateral_429');
 const blocked = new Rate('attack_blocked');
 const expired = new Counter('expired');
 const asnKeyRefused = new Counter('asn_key_refused');
-const fleetReached = new Rate('fleet_reached_upstream');
+const fleetBlocked = new Rate('fleet_429');
 const cohortLimited = new Rate('cohort_429');
 const timeToFirstBlock = new Trend('time_to_first_block_seconds');
 
@@ -66,8 +66,9 @@ for (const a of Object.keys(attacks)) {
 // The fleet's rule ends with its ttl like the others; the run doesn't wait for it.
 thresholds['time_to_case_seconds{attack:fleet}'] = ['max<180'];
 thresholds['time_to_enforce_seconds{attack:fleet}'] = ['max<180'];
-// Once enforcing, 300 a minute of 100 a second is 5%; 10% is a 90% cut.
-thresholds.fleet_reached_upstream = ['rate<0.1'];
+// Once enforcing, 300 a minute of 100 a second is 5%; 90% answered 429 is a 90% cut.
+// A 503 or a failed connection is not a block, so only a 429 counts.
+thresholds.fleet_429 = ['rate>0.9'];
 thresholds.cohort_429 = ['rate==0'];
 thresholds.time_to_first_block_seconds = ['min<600'];
 
@@ -277,7 +278,7 @@ export function fleet(d) {
     blockSeen = true;
     timeToFirstBlock.add((Date.now() - d.started - warmupMs) / 1000);
   }
-  if (enforcingFor(d, 'fleet', FLEET_RULE)) fleetReached.add(r.status === 200);
+  if (enforcingFor(d, 'fleet', FLEET_RULE)) fleetBlocked.add(r.status === 429);
 }
 
 // 300 real users on the fleet's fingerprint with a current browser, from the
@@ -323,7 +324,7 @@ export function watchFleet(d) {
   if (!opened) timeToCase.add(1e6, { attack: 'fleet' });
   if (!enforced) {
     timeToEnforce.add(1e6, { attack: 'fleet' });
-    fleetReached.add(true);
+    fleetBlocked.add(false);
     timeToFirstBlock.add(1e6);
   }
 }

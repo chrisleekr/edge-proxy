@@ -183,24 +183,42 @@ type cohort struct {
 	configRules map[string]bool
 }
 
-func (s *Server) cohort(ctx context.Context, shared map[string]bool, version int64, from, to time.Time) (*cohort, error) {
+func (s *Server) cohort(ctx context.Context, version int64, from, to time.Time) (*cohort, error) {
 	// Uses the (version, minute) index: only this version's minutes are
 	// read and decoded.
-	return s.cohortWhere(ctx, s.db, shared, "version = $1 AND minute >= $2 AND minute < $3", version, from, to)
+	return s.cohortWhere(ctx, s.db, "version = $1 AND minute >= $2 AND minute < $3", version, from, to)
 }
 
 // cohortWhere is the cohort of the stats rows cond selects. cond is a
 // constant; values go in args. A rule's heavy subjects are found minute by
 // minute and left out of its limited count once, over the whole window,
-// except for the rules in shared (see sharedRules), whose count stays raw.
-func (s *Server) cohortWhere(ctx context.Context, q querier, shared map[string]bool, cond string, args ...any) (*cohort, error) {
+// except for the rules that are shared (see sharedRules) in the version a
+// row was served under, whose count stays raw. A rule's key can change
+// between versions, so each row is classified by its own version's rules.
+func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args ...any) (*cohort, error) {
 	rows, err := s.statsWhere(ctx, q, cond, args...)
 	if err != nil {
 		return nil, err
 	}
 	c := &cohort{rules: map[string]*edge.RuleCounts{}, configRules: map[string]bool{}}
 	heavy := map[string]uint64{}
+	sharedBy := map[int64]map[string]bool{}
 	for _, r := range rows {
+		shared, ok := sharedBy[r.Version]
+		if !ok {
+			// A version that is gone counts as having no shared rules: heavy
+			// subjects are left out, as for any per-client key.
+			vr, err := s.loadVersion(ctx, q, r.Version)
+			var p *problem
+			switch {
+			case errors.As(err, &p) && p.Status == http.StatusNotFound:
+			case err != nil:
+				return nil, err
+			default:
+				shared = sharedRules(&vr.Config)
+			}
+			sharedBy[r.Version] = shared
+		}
 		addTotals(&c.Totals, r.Totals)
 		// Estimates per rule and subject, summed across replicas.
 		top := map[string]map[string]uint64{}
@@ -472,10 +490,10 @@ func (s *Server) runGuard(ctx context.Context) error {
 		started = c.StartedAt
 		// Both cohorts over the same minutes.
 		from := maxTime(c.StepStartedAt, now.Add(-time.Duration(g.Window))).Truncate(time.Minute)
-		if sub, err = s.cohort(ctx, sharedRules(&subject.Config), subject.Version, from, now); err != nil {
+		if sub, err = s.cohort(ctx, subject.Version, from, now); err != nil {
 			return err
 		}
-		if base, err = s.cohort(ctx, sharedRules(&baseline.Config), baseline.Version, from, now); err != nil {
+		if base, err = s.cohort(ctx, baseline.Version, from, now); err != nil {
 			return err
 		}
 	} else {
@@ -497,10 +515,10 @@ func (s *Server) runGuard(ctx context.Context) error {
 		if baseline, err = s.previousVersion(ctx, subject); err != nil || baseline == nil {
 			return err
 		}
-		if sub, err = s.cohortWhere(ctx, s.db, sharedRules(&subject.Config), judgedOrAfter+" AND minute >= $2 AND minute < $3", subject.Version, subject.PublishedAt.Truncate(time.Minute), now); err != nil {
+		if sub, err = s.cohortWhere(ctx, s.db, judgedOrAfter+" AND minute >= $2 AND minute < $3", subject.Version, subject.PublishedAt.Truncate(time.Minute), now); err != nil {
 			return err
 		}
-		if base, err = s.cohortWhere(ctx, s.db, sharedRules(&baseline.Config), "version < $1 AND minute >= $2 AND minute < $3", subject.Version,
+		if base, err = s.cohortWhere(ctx, s.db, "version < $1 AND minute >= $2 AND minute < $3", subject.Version,
 			subject.PublishedAt.Add(-time.Duration(g.Window)).Truncate(time.Minute), subject.PublishedAt); err != nil {
 			return err
 		}

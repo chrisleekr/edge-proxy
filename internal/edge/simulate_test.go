@@ -421,7 +421,7 @@ func TestSimulateEvaluatesCDNSignals(t *testing.T) {
 		snapshot.ConfigRule{ID: "tor", Expression: mustParse(`client.signals eq "cdn_tor"`), Settings: snapshot.Settings{BodyLimit: new(int64(2048))}},
 	)
 	c.Global.CDNTrustedHeaders = &[]string{"Cf-Bot-Score", "Cf-Verified-Bot"}
-	flare, _, errs := snapshot.Compile(c, snapshot.Deployment{ViewerFields: []string{"ip.src.country"}, SourceHeaders: []string{"CF-IPCountry"}, CDNHeaders: []string{"Cf-Ipcountry", "Cf-Ray", "Cf-Bot-Score", "Cf-Verified-Bot"}, CDNTrustedDefault: []string{"Cf-Ray"}})
+	flare, _, errs := snapshot.Compile(c, snapshot.Deployment{ViewerFields: []string{"ip.src.country"}, CountryHeader: "CF-IPCountry", SourceHeaders: []string{"CF-IPCountry"}, CDNHeaders: []string{"Cf-Ipcountry", "Cf-Ray", "Cf-Bot-Score", "Cf-Verified-Bot"}, CDNTrustedDefault: []string{"Cf-Ray"}})
 	if errs != nil {
 		t.Fatal(expr.Issues(errs))
 	}

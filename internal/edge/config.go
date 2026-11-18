@@ -407,6 +407,7 @@ func (c *Config) Deployment() snapshot.Deployment {
 	if c.IngressSecretHeader != "" {
 		d.SourceHeaders = append(d.SourceHeaders, c.IngressSecretHeader)
 	}
+	d.CountryHeader = c.Viewer["ip.src.country"]
 	slices.Sort(d.ViewerFields)
 	return d
 }

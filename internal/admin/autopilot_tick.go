@@ -582,7 +582,7 @@ func (s *Server) ruleGuard(ctx context.Context, q querier, g GuardSettings, set 
 	if !g.Enabled || sig.Mode == "off" || r.EnforcingSince == nil || now.Sub(*r.EnforcingSince) > time.Duration(g.Window) {
 		return nil, nil
 	}
-	c, err := s.cohortWhere(ctx, q, map[string]bool{r.ID: snapshot.SharedKey(r.Rule.Key)}, "minute >= $1 AND minute < $2", r.EnforcingSince.Truncate(time.Minute), now)
+	c, err := s.cohortWhere(ctx, q, "minute >= $1 AND minute < $2", r.EnforcingSince.Truncate(time.Minute), now)
 	if err != nil || c.Requests < g.MinRequests {
 		return nil, err
 	}

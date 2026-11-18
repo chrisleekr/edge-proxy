@@ -20,6 +20,7 @@ import (
 func cloudflare() Deployment {
 	return Deployment{
 		ViewerFields:      []string{"http.request.version", "ip.src.asnum", "ip.src.country", "ssl"},
+		CountryHeader:     "CF-IPCountry",
 		SourceHeaders:     []string{"CF-IPCountry", "X-Forwarded-Proto", "X-Asn", "X-Http-Version", "CF-Connecting-IP"},
 		CDNHeaders:        []string{"Cf-Ipcountry", "Cf-Ipcity", "Cf-Ray", "Cf-Visitor", "Cf-Bot-Score", "Cf-Verified-Bot"},
 		CDNTrustedDefault: []string{"Cf-Ray", "Cf-Visitor"},
@@ -92,8 +93,13 @@ func TestCDNHeaderConditionsAreNotClientControlled(t *testing.T) {
 func TestCDNSignalsNeedTheirHeadersTrusted(t *testing.T) {
 	countryElsewhere := cloudflare()
 	countryElsewhere.SourceHeaders = []string{"X-Country", "X-Forwarded-Proto", "X-Asn", "X-Http-Version", "CF-Connecting-IP"}
+	countryElsewhere.CountryHeader = "X-Country"
 	unlistedCountry := cloudflare()
 	unlistedCountry.CDNHeaders = []string{"Cf-Ipcity", "Cf-Ray", "Cf-Visitor", "Cf-Bot-Score", "Cf-Verified-Bot"}
+	cfCountryOnAnotherField := cloudflare()
+	cfCountryOnAnotherField.ViewerFields = append(cfCountryOnAnotherField.ViewerFields, "tls.client.ja4")
+	cfCountryOnAnotherField.SourceHeaders = []string{"X-Country", "CF-IPCountry", "X-Forwarded-Proto", "X-Asn", "X-Http-Version", "CF-Connecting-IP"}
+	cfCountryOnAnotherField.CountryHeader = "X-Country"
 	cases := []struct {
 		name, signal string
 		d            Deployment
@@ -111,6 +117,7 @@ func TestCDNSignalsNeedTheirHeadersTrusted(t *testing.T) {
 		{"Tor on a CloudFront deployment, which never reports T1", "cdn_tor", cloudfront(), nil, `"cdn_tor" can never match: it needs ip.src.country read from the cf-ipcountry header`},
 		{"Tor on Cloudflare by default", "cdn_tor", cloudflare(), nil, ""},
 		{"Tor on Cloudflare without the country header listed", "cdn_tor", unlistedCountry, nil, `"cdn_tor" can never match: it needs the cf-ipcountry header listed in CDN_HEADERS`},
+		{"Tor with CF-IPCountry the source of another viewer field, not the country", "cdn_tor", cfCountryOnAnotherField, nil, `"cdn_tor" can never match: it needs ip.src.country read from the cf-ipcountry header`},
 		{"Tor with the country header trusted but the country read from another header", "cdn_tor", countryElsewhere, trustedList("Cf-Ipcountry"), `"cdn_tor" can never match: it needs ip.src.country read from the cf-ipcountry header`},
 	}
 	for _, tc := range cases {
@@ -135,6 +142,7 @@ func TestCDNSignalsNeedTheirHeadersTrusted(t *testing.T) {
 func TestCDNTorFlagNeedsTheCountrySource(t *testing.T) {
 	countryElsewhere := cloudflare()
 	countryElsewhere.SourceHeaders = []string{"X-Country", "X-Forwarded-Proto", "X-Asn", "X-Http-Version", "CF-Connecting-IP"}
+	countryElsewhere.CountryHeader = "X-Country"
 	cases := []struct {
 		name    string
 		d       Deployment

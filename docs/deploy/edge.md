@@ -39,7 +39,7 @@ ASN and the TLS fingerprints are opt-in. Add `X-Gclb-Asn: {asn}`, `X-Gclb-Ja4: {
 | CDN | Add to `VIEWER_HEADERS` | Also needed |
 |---|---|---|
 | CloudFront | `tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint,tls.client.ja3=CloudFront-Viewer-JA3-Fingerprint` | Add both headers to the cache behavior's [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html#tls-related-versions); a cache policy can't carry them. They are present only for HTTPS requests, and the edge ignores them on a request whose `ssl` is false. The preset's viewer headers need the same policy |
-| Cloudflare | `tls.client.ja4=cf-ja4` | [JA4 fingerprints](https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/) are available only with Enterprise Bot Management, which is what sets `CF-JA4`. Name another header here if you have Cloudflare set one from the fingerprint |
+| Cloudflare | `tls.client.ja4=cf-ja4` | [JA4 fingerprints](https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/) need Enterprise Bot Management, and the ["Add bot protection headers" Managed Transform](https://developers.cloudflare.com/rules/transform/managed-transforms/reference/) is what sets `CF-JA4`. Turn it on before mapping the header: whether Cloudflare replaces a client-sent copy isn't documented, so without the transform a client's own value could be read as the fingerprint. Name another header here if you have Cloudflare set one from the fingerprint |
 
 A preset can be extended this way, such as `VIEWER_HEADERS=tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint`, which keeps the preset's other headers.
 
@@ -75,7 +75,7 @@ What a listed header does:
 
 Turn on the feature that sets each header before trusting it:
 
-- **Cloudflare:** the Managed Transforms that add the headers, such as "Add visitor location headers", and, on Enterprise with Bot Management, "Add bot protection headers". Without Bot Management Cloudflare sends no bot headers, so `cdn_likely_automated` and `crawler_impersonated` are accepted but never fire.
+- **Cloudflare:** the Managed Transforms that add the headers, such as "Add visitor location headers", and, on Enterprise with Bot Management, "Add bot protection headers". Without Bot Management Cloudflare sends no bot headers, so don't trust `CF-Bot-Score` or `CF-Verified-Bot` then: a client could send its own and fire `cdn_likely_automated` or `crawler_impersonated`.
 - **CloudFront:** an [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html) that adds the headers.
 - **Reach:** `TRUSTED_PROXIES`, or a NetworkPolicy, limited to the CDN's connector, so no client reaches the edge directly.
 

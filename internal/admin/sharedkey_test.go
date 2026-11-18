@@ -67,3 +67,37 @@ func TestSharedKeyNotify(t *testing.T) {
 		}
 	}
 }
+
+// A rule's key can change between versions inside the baseline window. Each
+// row is classified by the rules of the version that served it, so rows from
+// when the rule was shared keep their one bucket's blocks.
+func TestSharedKeyGuardBaselineSpansAKeyChange(t *testing.T) {
+	h := newHarness(t)
+	h.user("pub", "admin")
+	pub := h.signedIn("pub")
+	c := testConfig()
+	c.RateLimitRules[0].Key = []string{"constant"}
+	status(t, pub.save(`"0"`, c, adminTest), 200)
+	status(t, pub.publishDraft("v1"), 201)
+	h.advance(4 * time.Minute)
+	// Version 1 limited 40% in one bucket; version 2, per-IP, limited none.
+	h.putStats(1, 3, 1_000, 0, 0, []int64{1_000}, `[{"id":"login","evaluated":1000,"limited":400}]`,
+		`[{"rule":"login","key":"k","display":"198.51.100.7","limited":200}]`)
+	c.RateLimitRules[0].Key = []string{"ip"}
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("v2"), 201)
+	h.advance(4 * time.Minute)
+	h.putStats(2, 3, 1_000, 0, 0, []int64{1_000}, `[{"id":"login","evaluated":1000,"limited":0}]`, "[]")
+	c.Global.Defaults.BodyLimit = 2048 // a publish that leaves login unchanged
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("v3"), 201)
+	h.advance(4 * time.Minute)
+	h.putStats(3, 3, 1_000, 0, 0, []int64{1_000}, `[{"id":"login","evaluated":1000,"limited":200}]`, "[]")
+	h.live("edge-a", 3)
+	if err := h.s.runGuard(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if out := outcomeOf(t, pub, 3); out.Decision != decisionOK || out.Signals["unchanged_rule_limited_ratio"].Tripped {
+		t.Fatalf("outcome %+v", out)
+	}
+}

@@ -18,9 +18,12 @@ func planRule(expression string, key ...string) map[string]any {
 	return map[string]any{"expression": expression, "algorithm": "sliding_window", "limit": 10, "period": "1m", "key": key, "on_missing_key": "fallback_ip"}
 }
 
-// testPlan has two sensors, one with a first try admin must refuse. Both
-// names hold a hyphen and one a number, as a rule id ap-<name>-<n> does.
-var testPlan = plan{Sensors: []planSensor{
+// testPlan has two sensors, one with a first try admin must refuse, and a
+// rule for a browser_outdated surge. Both sensor names hold a hyphen and one
+// a number, as a rule id ap-<name>-<n> does.
+var testPlan = plan{Signals: []planSignal{
+	{Signal: "signal_surge", Mentions: "browser_outdated", Name: "fleet", Rule: planRule(`client.signals eq "browser_outdated"`, "ja4"), TTL: "5m"},
+}, Sensors: []planSensor{
 	{
 		Name:  "login-401",
 		Rule:  planRule(`http.request.uri.path eq "/login"`, "ip"),
