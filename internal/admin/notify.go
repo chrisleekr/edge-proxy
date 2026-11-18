@@ -239,21 +239,18 @@ func shareCheck(what string, get func(*edge.Totals) (uint64, uint64)) func(Notif
 
 // signalSurge trips when a client signal's share of requests is over factor
 // times its baseline share and over the floor. Shares divide by the requests
-// of minutes that reported signals, so a baseline stored before edges
-// counted them is never read as a share of zero. A signal is judged only
+// of minutes that reported the signal, so a baseline stored before edges
+// counted it is never read as a share of zero. A signal is judged only
 // against baseline minutes of versions with the window's gate for it, so
 // publishing a floor or trusting a CDN header is not a surge.
 func signalSurge(s NotifySignal, w, b *span, _ string) (bool, string) {
-	if w.sigRequests < s.MinRequests {
-		return false, ""
-	}
 	worst, wShare, bShare := -1, 0.0, 0.0
-	for i := range min(len(w.Signals), len(expr.Signals)) {
-		if b.gatedRequests[i] == 0 {
+	for i := range expr.Signals {
+		if w.gatedRequests[i] < s.MinRequests || b.gatedRequests[i] == 0 {
 			continue
 		}
-		now, before := ratio(w.Signals[i], w.sigRequests), ratio(b.gatedSignals[i], b.gatedRequests[i])
-		if w.Signals[i] >= s.MinEvents && now > max(s.Floor, s.Factor*before) && now > wShare {
+		now, before := ratio(w.gatedSignals[i], w.gatedRequests[i]), ratio(b.gatedSignals[i], b.gatedRequests[i])
+		if w.gatedSignals[i] >= s.MinEvents && now > max(s.Floor, s.Factor*before) && now > wShare {
 			worst, wShare, bShare = i, now, before
 		}
 	}
@@ -378,10 +375,9 @@ func loadNotify(ctx context.Context, q querier) (NotifySettings, error) {
 type span struct {
 	minutes int
 	edge.Totals
-	// sigRequests is the requests of the rows that carry signal counts.
-	sigRequests uint64
 	// gatedSignals and gatedRequests are, per signal, the counts and
-	// requests of the rows whose gate for it is the window's, from addGated.
+	// requests of the rows that report it under the window's gate for it,
+	// from addGated.
 	gatedSignals, gatedRequests []uint64
 	limits                      map[string]*edge.RuleCounts
 	outcomes                    map[string]*edge.RuleOutcome
@@ -402,15 +398,15 @@ func newSpan(minutes int) *span {
 // addGated counts r's signals for each signal whose gate under g is open and
 // equals ref's.
 func (s *span) addGated(r statsRow, g, ref []string) {
-	if len(r.Signals) == 0 || g == nil {
+	if g == nil {
 		return
 	}
-	for i := range ref {
+	// A row shorter than a signal's index is from edges that did not count
+	// it yet; its requests are not a share of zero.
+	for i := range min(len(ref), len(r.Signals)) {
 		if ref[i] != "" && g[i] == ref[i] {
 			s.gatedRequests[i] += r.Requests
-			if i < len(r.Signals) {
-				s.gatedSignals[i] += r.Signals[i]
-			}
+			s.gatedSignals[i] += r.Signals[i]
 		}
 	}
 }
@@ -442,9 +438,6 @@ func windowGates(rows []statsRow, gates map[int64][]string) []string {
 
 func (s *span) add(r statsRow) {
 	addTotals(&s.Totals, r.Totals)
-	if len(r.Signals) > 0 {
-		s.sigRequests += r.Requests
-	}
 	// Rule IDs are unique across phases and a row lists each once.
 	for _, rc := range r.RateLimit {
 		s.live[rc.ID] += r.Requests
@@ -697,6 +690,9 @@ func (s *Server) findAnomalies(ctx context.Context, n NotifySettings) ([]finding
 		return nil, err
 	}
 	ref := windowGates(window, gates)
+	for _, r := range window {
+		w.addGated(r, gates[r.Version], ref)
+	}
 	for _, r := range rows {
 		b.add(r)
 		b.addGated(r, gates[r.Version], ref)

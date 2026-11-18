@@ -878,6 +878,28 @@ func TestSignalSurgeNeedsARealRise(t *testing.T) {
 	}
 }
 
+// Edges from the release before a signal existed report an array that ends
+// before its index. Their minutes give no baseline for it, not a share of 0.
+func TestSignalSurgeSkipsASignalTheBaselineEdgesDidNotReport(t *testing.T) {
+	h, pub, _ := notifyHarnessEnv(t, map[string]string{"CDN_HEADERS": "CloudFront-Viewer-TLS"}, func(*harness) *snapshot.Config {
+		c := testConfig()
+		c.Global.CDNTrustedHeaders = &[]string{"cloudfront-viewer-tls"}
+		return c
+	})
+	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+	n.FireAfter = 1
+	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+	all := signalCounts("browser_tls_old", 600)
+	h.put(65, 6, minute{requests: 1000, signals: make([]uint64, len(all)-1)})
+	h.put(5, 1, minute{requests: 1000, signals: all})
+	h.check()
+	for _, a := range h.anomalies(pub) {
+		if a.Signal == "signal_surge" && a.State == "firing" {
+			t.Fatalf("signal_surge firing: %s", a.Summary)
+		}
+	}
+}
+
 // A signal's count is only comparable between minutes under the same gate:
 // the floor for browser_outdated, trusted CDN headers for the CDN signals.
 // Publishing or changing a gate moves the share from what the old gate let
