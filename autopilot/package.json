@@ -10,10 +10,10 @@
     "replay": "node src/replay.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.319",
+    "@anthropic-ai/claude-agent-sdk": "0.3.327",
     "@anthropic-ai/sdk": "1.10.0",
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@openai/agents": "0.21.0",
+    "@openai/agents": "0.22.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

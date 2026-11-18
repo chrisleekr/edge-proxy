@@ -55,7 +55,7 @@ lint:
 # Docker for testcontainers: tests and Valkey benchmarks start real Valkey.
 .docker: &docker
   services:
-    - name: docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+    - name: docker:29.10.0-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
       alias: docker
       # TLS off so dind starts without certificates (testcontainers GitLab guide).
       command: ["--tls=false"]
@@ -155,7 +155,7 @@ autopilot:
 # POSIX sh for it.
 load:
   stage: check
-  image: docker:29.9.3@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+  image: docker:29.10.0@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   <<: *docker
   cache: []
   script:
@@ -170,7 +170,7 @@ load:
 # schedule before a release.
 load-full:
   stage: check
-  image: docker:29.9.3@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+  image: docker:29.10.0@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   <<: *docker
   timeout: 3h
   cache: []
@@ -189,13 +189,13 @@ load-full:
 # local build and smoke test, so no dev tags are pushed.
 publish-latest:
   stage: publish
-  image: docker:29.9.3@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+  image: docker:29.10.0@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   interruptible: false
   cache: []
   # Its own TLS daemon: this job sends registry credentials, unlike the test
   # jobs that share the plain-TCP one.
   services:
-    - name: docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+    - name: docker:29.10.0-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376

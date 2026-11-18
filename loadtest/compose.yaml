@@ -199,7 +199,7 @@ services:
   # make demo only: Routes in admin is built from these lines. It reads
   # Docker's socket to find edge-1's output, which a load test never needs.
   log-shipper:
-    image: timberio/vector:0.61.0-distroless-libc@sha256:1a3451978644d5cd4b99a0b28c990791e2f7e1efbea4184122f1c59a56448143
+    image: timberio/vector:0.62.0-distroless-libc@sha256:22100806cedabab3768edd6ac919be1a3a026b1020c5b280174a54573572db9d
     profiles: [demo]
     command: [--config, /etc/vector/vector.yaml]
     configs: [{ source: vector, target: /etc/vector/vector.yaml }]
