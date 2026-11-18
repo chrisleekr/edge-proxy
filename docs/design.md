@@ -1403,7 +1403,7 @@ The admin UI is covered by a small set of end-to-end browser smoke tests for the
 
 ### 18.3 Load
 
-**Tool:** k6 (Docker image `grafana/k6:2.3.0`) against `loadtest/compose.yaml`. Nothing goes through AWS, a WAF or Cloudflare.
+**Tool:** k6 (Docker image `grafana/k6:2.4.0`) against `loadtest/compose.yaml`. Nothing goes through AWS, a WAF or Cloudflare.
 
 **The compose environment runs:**
 - 3 edges

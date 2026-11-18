@@ -5,7 +5,7 @@
 # npm runs on the build host and installs the optional packages for the
 # target's OS, CPU and libc, so a multi-platform build needs no emulation
 # and each platform holds only its own glibc Claude Code binary.
-FROM --platform=$BUILDPLATFORM node:26.13.0-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS deps
+FROM --platform=$BUILDPLATFORM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS deps
 ARG TARGETARCH
 WORKDIR /app
 COPY autopilot/package.json autopilot/package-lock.json ./

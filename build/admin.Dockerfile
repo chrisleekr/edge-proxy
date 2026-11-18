@@ -1,6 +1,6 @@
 # Admin image: the UI is built with Node, embedded with go:embed, and the
 # static binary runs on distroless as nonroot. Node is never in the image.
-FROM --platform=$BUILDPLATFORM node:26.13.0-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS ui
+FROM --platform=$BUILDPLATFORM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS ui
 WORKDIR /ui
 COPY web/admin/package.json web/admin/package-lock.json ./
 RUN npm ci
@@ -9,7 +9,7 @@ RUN npm run build
 
 # Build stages run on the build host and cross-compile, so a multi-platform
 # build needs no emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./

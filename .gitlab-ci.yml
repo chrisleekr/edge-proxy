@@ -34,7 +34,7 @@ variables:
   CACHE_COMPRESSION_LEVEL: fastest
 
 default:
-  image: golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d
+  image: golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf
   # Lets auto-cancel stop a superseded pipeline.
   interruptible: true
   # One cache per job: race, fuzz and cover builds differ, so a shared key
@@ -55,7 +55,7 @@ lint:
 # Docker for testcontainers: tests and Valkey benchmarks start real Valkey.
 .docker: &docker
   services:
-    - name: docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+    - name: docker:29.10.0-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
       alias: docker
       # TLS off so dind starts without certificates (testcontainers GitLab guide).
       command: ["--tls=false"]
@@ -119,7 +119,7 @@ commits:
 
 docs:
   stage: check
-  image: ghcr.io/astral-sh/uv:0.13.8-python3.12-alpine@sha256:77f6e42a88636e1a4eb30d0a250aaba62226e93566df21855bc3a2709865b3be
+  image: ghcr.io/astral-sh/uv:0.13.9-python3.12-alpine@sha256:027aeaa2c0ed9e50cd8218251074998aeeebfd07c7a5f15c0185a43688809d2c
   cache: []
   script:
     - ./scripts/ci/docs.sh
@@ -155,7 +155,7 @@ autopilot:
 # POSIX sh for it.
 load:
   stage: check
-  image: docker:29.9.3@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+  image: docker:29.10.0@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   <<: *docker
   cache: []
   script:
@@ -170,7 +170,7 @@ load:
 # schedule before a release.
 load-full:
   stage: check
-  image: docker:29.9.3@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+  image: docker:29.10.0@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   <<: *docker
   timeout: 3h
   cache: []
@@ -189,13 +189,13 @@ load-full:
 # local build and smoke test, so no dev tags are pushed.
 publish-latest:
   stage: publish
-  image: docker:29.9.3@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+  image: docker:29.10.0@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   interruptible: false
   cache: []
   # Its own TLS daemon: this job sends registry credentials, unlike the test
   # jobs that share the plain-TCP one.
   services:
-    - name: docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+    - name: docker:29.10.0-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376
