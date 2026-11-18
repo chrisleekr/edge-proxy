@@ -22,13 +22,18 @@ if [[ -n "${base}" ]]; then
   else
     mod="$(go list -m)"
     while IFS= read -r f; do
-      case "${f}" in
-        */testdata/*) d="${f%%/testdata/*}" ;;
-        testdata/*) d="." ;;
-        *.go) d="$(dirname "${f}")" ;;
-        *) continue ;;
-      esac
-      [[ "${d}" == "." ]] && changed+="${mod}"$'\n' || changed+="${mod}/${d}"$'\n'
+      d="$(dirname "${f}")"
+      if [[ "${f}" == *.go && "/${f}" != */testdata/* ]]; then
+        [[ "${d}" == "." ]] && changed+="${mod}"$'\n' || changed+="${mod}/${d}"$'\n'
+        continue
+      fi
+      # Other files reach a package as testdata or go:embed, both somewhere below
+      # the package directory, so every ancestor directory counts as changed.
+      while [[ "${d}" != "." ]]; do
+        changed+="${mod}/${d}"$'\n'
+        d="$(dirname "${d}")"
+      done
+      changed+="${mod}"$'\n'
     done <<<"${files}"
   fi
 fi
