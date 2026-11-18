@@ -240,17 +240,19 @@ func shareCheck(what string, get func(*edge.Totals) (uint64, uint64)) func(Notif
 // signalSurge trips when a client signal's share of requests is over factor
 // times its baseline share and over the floor. Shares divide by the requests
 // of minutes that reported signals, so a baseline stored before edges
-// counted them is never read as a share of zero.
+// counted them is never read as a share of zero. A signal is judged only
+// against baseline minutes of versions with the window's gate for it, so
+// publishing a floor or trusting a CDN header is not a surge.
 func signalSurge(s NotifySignal, w, b *span, _ string) (bool, string) {
-	if w.sigRequests < s.MinRequests || b.sigRequests == 0 {
+	if w.sigRequests < s.MinRequests {
 		return false, ""
 	}
 	worst, wShare, bShare := -1, 0.0, 0.0
 	for i := range min(len(w.Signals), len(expr.Signals)) {
-		now, before := ratio(w.Signals[i], w.sigRequests), 0.0
-		if i < len(b.Signals) {
-			before = ratio(b.Signals[i], b.sigRequests)
+		if b.gatedRequests[i] == 0 {
+			continue
 		}
+		now, before := ratio(w.Signals[i], w.sigRequests), ratio(b.gatedSignals[i], b.gatedRequests[i])
 		if w.Signals[i] >= s.MinEvents && now > max(s.Floor, s.Factor*before) && now > wShare {
 			worst, wShare, bShare = i, now, before
 		}
@@ -378,8 +380,11 @@ type span struct {
 	edge.Totals
 	// sigRequests is the requests of the rows that carry signal counts.
 	sigRequests uint64
-	limits      map[string]*edge.RuleCounts
-	outcomes    map[string]*edge.RuleOutcome
+	// gatedSignals and gatedRequests are, per signal, the counts and
+	// requests of the rows whose gate for it is the window's, from addGated.
+	gatedSignals, gatedRequests []uint64
+	limits                      map[string]*edge.RuleCounts
+	outcomes                    map[string]*edge.RuleOutcome
 	// live is the requests of the minutes and versions whose reports
 	// list each rule. Edges list every rule of their version, matched or
 	// not, so a rule missing from a report was not live there.
@@ -390,8 +395,49 @@ type span struct {
 }
 
 func newSpan(minutes int) *span {
-	return &span{minutes: minutes, limits: map[string]*edge.RuleCounts{}, outcomes: map[string]*edge.RuleOutcome{}, live: map[string]uint64{},
+	return &span{minutes: minutes, gatedSignals: make([]uint64, len(expr.Signals)), gatedRequests: make([]uint64, len(expr.Signals)), limits: map[string]*edge.RuleCounts{}, outcomes: map[string]*edge.RuleOutcome{}, live: map[string]uint64{},
 		top: map[string]map[string]*edge.TopCount{}}
+}
+
+// addGated counts r's signals for each signal whose gate under g is open and
+// equals ref's.
+func (s *span) addGated(r statsRow, g, ref []string) {
+	if len(r.Signals) == 0 || g == nil {
+		return
+	}
+	for i := range ref {
+		if ref[i] != "" && g[i] == ref[i] {
+			s.gatedRequests[i] += r.Requests
+			if i < len(r.Signals) {
+				s.gatedSignals[i] += r.Signals[i]
+			}
+		}
+	}
+}
+
+// windowGates is, per signal, the gate every row that reports signals
+// shares, or "" when they differ or it is closed.
+func windowGates(rows []statsRow, gates map[int64][]string) []string {
+	ref := make([]string, len(expr.Signals))
+	first := true
+	for _, r := range rows {
+		if len(r.Signals) == 0 {
+			continue
+		}
+		for i := range ref {
+			g := ""
+			if gates[r.Version] != nil {
+				g = gates[r.Version][i]
+			}
+			if first {
+				ref[i] = g
+			} else if ref[i] != g {
+				ref[i] = ""
+			}
+		}
+		first = false
+	}
+	return ref
 }
 
 func (s *span) add(r statsRow) {
@@ -630,6 +676,7 @@ func (s *Server) findAnomalies(ctx context.Context, n NotifySettings) ([]finding
 	if err != nil {
 		return nil, err
 	}
+	window := rows
 	for _, r := range rows {
 		w.add(r)
 	}
@@ -639,8 +686,20 @@ func (s *Server) findAnomalies(ctx context.Context, n NotifySettings) ([]finding
 	if err != nil {
 		return nil, err
 	}
+	var versions []int64
+	for _, r := range append(slices.Clone(window), rows...) {
+		if !slices.Contains(versions, r.Version) {
+			versions = append(versions, r.Version)
+		}
+	}
+	gates, err := s.versionGates(ctx, s.db, versions)
+	if err != nil {
+		return nil, err
+	}
+	ref := windowGates(window, gates)
 	for _, r := range rows {
 		b.add(r)
+		b.addGated(r, gates[r.Version], ref)
 	}
 	rules, err := s.liveRules(ctx)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -73,8 +74,16 @@ func notifyHarness(t *testing.T) (*harness, *client, *fakeAlertmanager) {
 // notifyHarnessWith is notifyHarness with version 1 from config.
 func notifyHarnessWith(t *testing.T, config func(*harness) *snapshot.Config) (*harness, *client, *fakeAlertmanager) {
 	t.Helper()
+	return notifyHarnessEnv(t, nil, config)
+}
+
+// notifyHarnessEnv is notifyHarnessWith with deployment settings set.
+func notifyHarnessEnv(t *testing.T, env map[string]string, config func(*harness) *snapshot.Config) (*harness, *client, *fakeAlertmanager) {
+	t.Helper()
 	am := newFakeAlertmanager(t)
-	h := newHarnessWith(t, map[string]string{"ALERTMANAGER_URL": am.srv.URL + "/"})
+	e := map[string]string{"ALERTMANAGER_URL": am.srv.URL + "/"}
+	maps.Copy(e, env)
+	h := newHarnessWith(t, e)
 	h.mu.Lock()
 	h.clock = h.clock.Truncate(time.Minute).Add(45 * time.Second)
 	h.mu.Unlock()
@@ -83,6 +92,13 @@ func notifyHarnessWith(t *testing.T, config func(*harness) *snapshot.Config) (*h
 	status(t, pub.save(`"0"`, config(h), adminTest), 200)
 	status(t, pub.publishDraft("v1"), 201)
 	return h, pub, am
+}
+
+// floorConfig is testConfig with a browser floor, so browser_outdated can fire.
+func floorConfig() *snapshot.Config {
+	c := testConfig()
+	c.Global.BrowserFloor = map[string]int{"chromium": 100}
+	return c
 }
 
 // minute is one minute of a version's stats, version 1 unless set.
@@ -271,7 +287,7 @@ func TestNotifySignals(t *testing.T) {
 			minute{requests: 1000, rateLimit: login(100, 30, 0, 0), top: []edge.TopCount{{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 32}}}, "rule_subject_dominates", "login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, pub, _ := notifyHarness(t)
+			h, pub, _ := notifyHarnessWith(t, func(*harness) *snapshot.Config { return floorConfig() })
 			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
 			n.FireAfter = 1
 			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
@@ -795,7 +811,7 @@ func TestNotifyNeedsEnoughToJudge(t *testing.T) {
 			slices.Repeat([]minute{{requests: 1000, upstream5xx: 2, rules: admin(30, 2)}}, 5), "rule_upstream_5xx_ratio", "admin-route", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, pub, _ := notifyHarness(t)
+			h, pub, _ := notifyHarnessWith(t, func(*harness) *snapshot.Config { return floorConfig() })
 			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
 			n.FireAfter = 1
 			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
@@ -839,7 +855,7 @@ func TestSignalSurgeNeedsARealRise(t *testing.T) {
 		{"baseline stored before signals were counted gives no share", minute{requests: 1000}, minute{requests: 1000, signals: signalCounts("browser_outdated", 600)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, pub, _ := notifyHarness(t)
+			h, pub, _ := notifyHarnessWith(t, func(*harness) *snapshot.Config { return floorConfig() })
 			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
 			n.FireAfter = 1
 			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
@@ -857,6 +873,55 @@ func TestSignalSurgeNeedsARealRise(t *testing.T) {
 			}
 			if tc.fires && !strings.Contains(summary, "browser_outdated: 60.0% of requests in the last 5 minutes, against 1.0% in the hour before") {
 				t.Fatalf("summary %q", summary)
+			}
+		})
+	}
+}
+
+// A signal's count is only comparable between minutes under the same gate:
+// the floor for browser_outdated, trusted CDN headers for the CDN signals.
+// Publishing or changing a gate moves the share from what the old gate let
+// through to what the new one does, which is the policy, not an attack.
+func TestSignalSurgeIgnoresGateChanges(t *testing.T) {
+	floor := func(chromium int) func(*snapshot.Config) {
+		return func(c *snapshot.Config) { c.Global.BrowserFloor = map[string]int{"chromium": chromium} }
+	}
+	trust := func(c *snapshot.Config) { c.Global.CDNTrustedHeaders = &[]string{"cf-verified-bot"} }
+	for _, tc := range []struct {
+		name          string
+		first, second func(*snapshot.Config)
+		signal        string
+		// before is the signal's count a minute under first: 0 while its gate is closed.
+		before uint64
+		fires  bool
+	}{
+		{"publishing a floor", func(*snapshot.Config) {}, floor(100), "browser_outdated", 0, false},
+		{"raising the floor from 120 to 130", floor(120), floor(130), "browser_outdated", 10, false},
+		{"trusting a CDN header", func(*snapshot.Config) {}, trust, "crawler_impersonated", 0, false},
+		{"a new version under the same floor", floor(100), func(c *snapshot.Config) { floor(100)(c); c.Global.Backstop.Limit = 200 }, "browser_outdated", 10, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pub, _ := notifyHarnessEnv(t, map[string]string{"CDN_HEADERS": "CF-Verified-Bot"}, func(*harness) *snapshot.Config {
+				c := testConfig()
+				tc.first(c)
+				return c
+			})
+			n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
+			n.FireAfter = 1
+			status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
+			c := testConfig()
+			tc.second(c)
+			status(t, pub.save(pub.revision(), c, adminTest), 200)
+			status(t, pub.publishDraft("v2"), 201)
+			h.put(65, 6, minute{version: 1, requests: 1000, signals: signalCounts(tc.signal, tc.before)})
+			h.put(5, 1, minute{version: 2, requests: 1000, signals: signalCounts(tc.signal, 600)})
+			h.check()
+			var fired bool
+			for _, a := range h.anomalies(pub) {
+				fired = fired || a.Signal == "signal_surge" && a.State == "firing"
+			}
+			if fired != tc.fires {
+				t.Fatalf("signal_surge firing %v, want %v", fired, tc.fires)
 			}
 		})
 	}

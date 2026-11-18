@@ -54,7 +54,7 @@ With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** 
 | `edge_5xx_ratio` | 5xx the edge sent itself are over 2 times their baseline share and over 1%, with at least 20 of them | critical |
 | `upstream_5xx_ratio` | 5xx from the upstream are over 2 times their baseline share and over 2%, with at least 20 of them | critical |
 | `auth_failure_ratio` | Requests failing their token check are over 2 times their baseline share and over 5%, with at least 20 of them | warning |
-| `signal_surge` | A [client signal](../reference/expressions.md#client-signals) is over 3 times its baseline share of requests and over 5%, with at least 300 requests showing it. The summary names the signal with the largest share. Shares count only the requests of minutes whose edges reported signals, so a baseline from before they did is not read as a share of zero | warning |
+| `signal_surge` | A [client signal](../reference/expressions.md#client-signals) is over 3 times its baseline share of requests and over 5%, with at least 300 requests showing it. The summary names the signal with the largest share. Shares count only the requests of minutes whose edges reported signals, so a baseline from before they did is not read as a share of zero. A signal is judged only against baseline minutes whose config version had the same browser floor or trusted CDN headers as the window, so publishing or changing them does not trip it | warning |
 | `p99_latency` | p99 latency is over 1.5 times the baseline's and over 100ms, with at least 1,000 requests, so p99 rests on the 10 slowest or more | warning |
 
 **Per rule**, for every rule of the active and canary versions:

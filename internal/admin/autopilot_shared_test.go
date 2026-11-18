@@ -27,13 +27,17 @@ func ja4Harness(t *testing.T) (*harness, *client, *client) {
 	return h, pub, agent
 }
 
-// signalDays stores the previous 3 days with the signal at perMinute around
-// the clock time a rule that just went live runs in, and an hour of 10,000
-// requests a minute before now.
-func (h *harness) signalDays(perMinute uint64) {
+// signalDays stores the previous 3 days, under ja4Harness's version 2 whose
+// floor is the active one, with the signal at perMinute around the clock
+// time a rule that just went live runs in, and an hour of 10,000 requests
+// a minute before now.
+func (h *harness) signalDays(perMinute uint64) { h.signalDaysOn(2, perMinute) }
+
+// signalDaysOn is signalDays with the days stored under version.
+func (h *harness) signalDaysOn(version int64, perMinute uint64) {
 	h.t.Helper()
 	for k := 1; k <= 3; k++ {
-		h.put(1440*k+8, 1440*k-8, minute{requests: 10_000, signals: signalCounts("browser_outdated", perMinute)})
+		h.put(1440*k+8, 1440*k-8, minute{version: version, requests: 10_000, signals: signalCounts("browser_outdated", perMinute)})
 	}
 	h.put(60, 1, minute{requests: 10_000})
 }
@@ -183,6 +187,34 @@ func TestAutopilotSharedKeyUnmeasuredBaseline(t *testing.T) {
 	}
 }
 
+// The days were stored under a version with no browser floor, where
+// browser_outdated could not fire, so their zeros are not normal traffic.
+// The rule is judged on its raw would-limit count and observes the full time.
+func TestAutopilotSharedKeyBaselineBeforeTheFloorIsUnknown(t *testing.T) {
+	t.Run("shared rule is not bounded by days stored before the floor was set", func(t *testing.T) {
+		h, _, id := sharedObservedFrom(t, func(h *harness) { h.signalDaysOn(1, 0) })
+		h.tick()
+		if st := ruleState(t, h, id); st != "rejected" || lastReason(t, h, id, "rejected") != "block_share" {
+			t.Fatalf("rule %s, reason %q", st, lastReason(t, h, id, "rejected"))
+		}
+		var known bool
+		if err := h.db.QueryRow(t.Context(), `SELECT (numbers->>'baseline_known')::bool FROM autopilot_transitions WHERE rule_id = $1 AND to_state = 'rejected'`, id).Scan(&known); err != nil || known {
+			t.Fatalf("baseline_known %v, err %v", known, err)
+		}
+	})
+	t.Run("shared rule observes the full time when its baseline days were stored before the floor", func(t *testing.T) {
+		h, pub, agent := ja4Harness(t)
+		h.signalDaysOn(1, 0)
+		id := liveRule(t, h, pub, agent, proposal("enforce", "fp-outdated", sharedRule()))
+		h.advance(2 * time.Minute)
+		shadowMinutes(h, pub, id, 2, 900)
+		h.tick()
+		if st := ruleState(t, h, id); st != "observing" {
+			t.Fatalf("rule %s, want observing", st)
+		}
+	})
+}
+
 // Normal traffic carries browser_outdated 5 a minute and client_hints_mismatch
 // 2,000. The rule would limit 900 a minute, of 10,000.
 func TestAutopilotSharedKeyScopeShape(t *testing.T) {
@@ -190,7 +222,7 @@ func TestAutopilotSharedKeyScopeShape(t *testing.T) {
 		c := signalCounts("browser_outdated", 5)
 		c[slices.IndexFunc(expr.Signals, func(d expr.SignalDef) bool { return d.Name == "client_hints_mismatch" })] = 2_000
 		for k := 1; k <= 3; k++ {
-			h.put(1440*k+8, 1440*k-8, minute{requests: 10_000, signals: c})
+			h.put(1440*k+8, 1440*k-8, minute{version: 2, requests: 10_000, signals: c})
 		}
 		h.put(60, 1, minute{requests: 10_000})
 	}
@@ -267,10 +299,14 @@ func TestAutopilotSharedKeyGuard(t *testing.T) {
 }
 
 func TestAutopilotSignalSurgeOpensCase(t *testing.T) {
-	h, _, agent, _ := alertHarness(t, 1)
+	h, pub, agent, _ := alertHarness(t, 1)
 	agent.seen()
-	h.put(65, 6, minute{requests: 1000, signals: signalCounts("browser_outdated", 10)})
-	h.put(5, 1, minute{requests: 1000, signals: signalCounts("browser_outdated", 600)})
+	c := testConfig()
+	c.Global.BrowserFloor = map[string]int{"chromium": 100}
+	status(t, pub.save(pub.revision(), c, adminTest), 200)
+	status(t, pub.publishDraft("v2"), 201)
+	h.put(65, 6, minute{version: 2, requests: 1000, signals: signalCounts("browser_outdated", 10)})
+	h.put(5, 1, minute{version: 2, requests: 1000, signals: signalCounts("browser_outdated", 600)})
 	h.check()
 	h.tick()
 	var n int
