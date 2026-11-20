@@ -16,7 +16,8 @@ import { Publish, useDraftDiff, useVersions } from './pages/Publish';
 import { Rules } from './pages/Rules';
 import { Subject } from './pages/Subject';
 import { Palette } from './Palette';
-import { CORS, Issuers, Settings, Templates } from './pages/Sections';
+import { ValueListEditor } from './pages/ValueListEditor';
+import { CORS, Issuers, Settings, Templates, ValueLists } from './pages/Sections';
 import { Tests } from './pages/Tests';
 import { Account, Users } from './pages/Users';
 import { Compare, VersionDetail, Versions } from './pages/Versions';
@@ -293,6 +294,7 @@ function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
     // Keyed by path so moving between rules (back, forward) resets the form.
     rules: () => (parts[1] ? <RuleEditor key={path} phase={parts[1]} id={decodePart(parts[2])} /> : <Rules />),
     templates: () => <Templates />,
+    'value-lists': () => (parts[1] ? <ValueListEditor key={path} list={parts[1] === '_new' ? '' : decodePart(parts[1])} /> : <ValueLists />),
     cors: () => <CORS />,
     issuers: () => <Issuers />,
     settings: () => <Settings canManage={can('settings.manage')} />,
@@ -491,6 +493,9 @@ function SaveBar({ path, canWrite }: { path: string; canWrite: boolean }) {
     if (r) return `/rules/${p.phase}/${encodeURIComponent(r.id)}`;
     if (/^config\.global\.(responses|defaults\.responses)\b/.test(path)) return '/templates';
     if (path.startsWith('config.global.cors_policies')) return '/cors';
+    const g = /^config\.global\.lists\["([^"]+)"\]/.exec(path);
+    if (g) return `/value-lists/${encodeURIComponent(g[1]!)}`;
+    if (path.startsWith('config.global.lists')) return '/value-lists';
     if (path.startsWith('config.auth')) return '/issuers';
     if (/^config\.(global|kill_switch)\b/.test(path)) return '/settings';
     return undefined;
@@ -517,6 +522,11 @@ function SaveBar({ path, canWrite }: { path: string; canWrite: boolean }) {
     if (tc) return tc[1] ? `trusted client ${Number(tc[1]) + 1}` : 'trusted client allowlist';
     const t = /^config\.global\.(responses|cors_policies)\["([^"]+)"\](.*)$/.exec(p);
     if (t) return `${t[1] === 'responses' ? 'template' : 'CORS policy'} ${t[2]}${rest(t[3]!)}`;
+    const g = /^config\.global\.lists\["([^"]+)"\](.*)$/.exec(p);
+    // Values are edited one per line, so a value is named by its line.
+    const gv = g && /^\.values\[(\d+)\]$/.exec(g[2]!);
+    if (gv) return `value list ${g[1]}, line ${Number(gv[1]) + 1}`;
+    if (g) return `value list ${g[1]}${rest(g[2]!)}`;
     return words(p);
   };
   if (!d.dirty && !unsaved && !save.data && !save.error) return null;

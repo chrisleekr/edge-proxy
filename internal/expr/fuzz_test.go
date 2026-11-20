@@ -24,10 +24,14 @@ func FuzzBuilderAST(f *testing.F) {
 		`{"field":"http.user_agent","operator":"matches","value":"^curl/"}`,
 		`{"field":"client.signals","operator":"in","value":["ua_tool","browser_tls_mismatch"]}`,
 		`{"field":"tls.client.ja4","operator":"eq","value":"t13d1516h2_8daaf6152771_02713d6af862"}`,
+		`{"field":"http.user_agent","operator":"contains","value":{"list":"agents"}}`,
+		`{"combinator":"or","not":true,"rules":[{"field":"ip.src.country","operator":"not_in","value":{"list":"eu"}},{"field":"http.request.uri.path","operator":"ends_with","value":{"list":"paths"}}]}`,
+		`{"field":"http.user_agent","operator":"eq","value":"$agents"}`,
+		`{"field":"http.user_agent","operator":"in","value":{"list":"agents","extra":1}}`,
 	} {
 		f.Add([]byte(s), "/A/b", "10.1.2.3")
 	}
-	env := Env{Phase: PhaseRateLimit, ViewerAvailable: allViewer, AllowRegex: true}
+	env := Env{Phase: PhaseRateLimit, ViewerAvailable: allViewer, AllowRegex: true, Lists: testLists}
 	f.Fuzz(func(t *testing.T, data []byte, val, ip string) {
 		var n Node
 		if json.Unmarshal(data, &n) != nil {

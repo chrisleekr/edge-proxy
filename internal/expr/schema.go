@@ -71,6 +71,49 @@ type FieldDef struct {
 	// Deprecated fields still validate and run; the rule builder stops
 	// offering them because a better field replaces them.
 	Deprecated bool
+	// ListKind names what a value list for this field holds, such as "User
+	// agents"; "" means no value list can. Edge-computed, mapped and IP fields
+	// have none: checks that read their values see only values written in the
+	// condition, and addresses go in IP lists.
+	ListKind string
+	// ListExact limits such a list to "in" and "not in": its values have a
+	// fixed format, so a pattern of them is no use.
+	ListExact bool
+}
+
+// ValueList is a named list of values in global.lists for one field. Rules
+// use it only with that field, so its values are checked as that field's.
+type ValueList struct {
+	Field  string   `json:"field"`
+	Values []string `json:"values"`
+}
+
+var listPatternOps = []string{"in", "not_in", "contains", "not_contains", "starts_with", "not_starts_with", "ends_with", "not_ends_with", "wildcard", "strict_wildcard", "matches"}
+
+// ListOps returns the operators that take a value list for field f, or nil.
+func ListOps(f FieldDef) []string {
+	switch {
+	case f.ListKind == "":
+		return nil
+	case f.ListExact:
+		return []string{"in", "not_in"}
+	}
+	return listPatternOps
+}
+
+// ListValueProblem returns why s can't be a value of a value list for f, or "".
+// It applies only the checks every operator the list allows shares, so
+// ".php" is fine in a path list used with "ends with"; a rule using it with
+// "in" is refused where it names the list.
+func ListValueProblem(f FieldDef, s string) string {
+	if s == "" {
+		return "is blank; delete the line"
+	}
+	op := opsByName["contains"]
+	if f.ListExact {
+		op = opsByName["in"]
+	}
+	return literalProblem(f, op, s, true)
 }
 
 // Case is the letter case of a field's values.
@@ -87,32 +130,32 @@ const (
 var Fields = []FieldDef{
 	{Name: "http.request.full_uri", Label: "URI Full", Type: TypeString, Source: SourceRequest},
 	{Name: "http.request.uri", Label: "URI", Type: TypeString, Source: SourceRequest},
-	{Name: "http.request.uri.path", Label: "URI Path", Type: TypeString, Source: SourceRequest, Slash: true},
+	{Name: "http.request.uri.path", Label: "URI Path", Type: TypeString, Source: SourceRequest, Slash: true, ListKind: "URL paths"},
 	{Name: "http.request.uri.query", Label: "URI Query String", Type: TypeString, Source: SourceRequest},
-	{Name: "http.request.uri.args", Label: "URI Query Argument", Type: TypeStringList, Keyed: true, Source: SourceRequest},
-	{Name: "http.host", Label: "Hostname", Type: TypeString, Source: SourceRequest, Case: CaseLower},
+	{Name: "http.request.uri.args", Label: "URI Query Argument", Type: TypeStringList, Keyed: true, Source: SourceRequest, ListKind: "Query values"},
+	{Name: "http.host", Label: "Hostname", Type: TypeString, Source: SourceRequest, Case: CaseLower, ListKind: "Hostnames"},
 	{Name: "http.request.method", Label: "Request Method", Type: TypeString, Source: SourceRequest, TokenValue: true, Case: CaseUpper},
-	{Name: "http.request.headers", Label: "Header", Type: TypeStringList, Keyed: true, LowerKey: true, TokenKey: true, Source: SourceRequest},
+	{Name: "http.request.headers", Label: "Header", Type: TypeStringList, Keyed: true, LowerKey: true, TokenKey: true, Source: SourceRequest, ListKind: "Header values"},
 	{Name: "http.cookie", Label: "Cookie", Type: TypeString, Source: SourceRequest},
-	{Name: "http.request.cookies", Label: "Cookie (named)", Type: TypeStringList, Keyed: true, TokenKey: true, Source: SourceRequest},
-	{Name: "http.referer", Label: "Referer", Type: TypeString, Source: SourceRequest},
-	{Name: "http.user_agent", Label: "User Agent", Type: TypeString, Source: SourceRequest},
+	{Name: "http.request.cookies", Label: "Cookie (named)", Type: TypeStringList, Keyed: true, TokenKey: true, Source: SourceRequest, ListKind: "Cookie values"},
+	{Name: "http.referer", Label: "Referer", Type: TypeString, Source: SourceRequest, ListKind: "Referers"},
+	{Name: "http.user_agent", Label: "User Agent", Type: TypeString, Source: SourceRequest, ListKind: "User agents"},
 	{Name: "http.x_forwarded_for", Label: "X-Forwarded-For", Type: TypeString, Source: SourceRequest},
 	{Name: "ip.src", Label: "IP Source Address", Type: TypeIP, Source: SourceClientIP},
-	{Name: "ip.src.country", Label: "Country", Type: TypeString, Source: SourceViewer, Case: CaseUpper},
-	{Name: "ip.src.continent", Label: "Continent", Type: TypeString, Source: SourceViewer, Case: CaseUpper},
-	{Name: "ip.src.asnum", Label: "AS Num", Type: TypeInt, Source: SourceViewer},
+	{Name: "ip.src.country", Label: "Country", Type: TypeString, Source: SourceViewer, Case: CaseUpper, ListKind: "Countries", ListExact: true},
+	{Name: "ip.src.continent", Label: "Continent", Type: TypeString, Source: SourceViewer, Case: CaseUpper, ListKind: "Continents", ListExact: true},
+	{Name: "ip.src.asnum", Label: "AS Num", Type: TypeInt, Source: SourceViewer, ListKind: "AS numbers", ListExact: true},
 	{Name: "ssl", Label: "SSL/HTTPS", Type: TypeBool, Source: SourceViewer},
 	{Name: "http.request.version", Label: "HTTP Version", Type: TypeString, Source: SourceViewer},
 	{Name: "client_cert.verified", Label: "Client Certificate Verified", Type: TypeBool, Source: SourceViewer},
-	{Name: "tls.client.ja4", Label: "JA4 Fingerprint", Type: TypeString, Source: SourceViewer},
-	{Name: "tls.client.ja3", Label: "JA3 Fingerprint", Type: TypeString, Source: SourceViewer},
+	{Name: "tls.client.ja4", Label: "JA4 Fingerprint", Type: TypeString, Source: SourceViewer, ListKind: "JA4 fingerprints", ListExact: true},
+	{Name: "tls.client.ja3", Label: "JA3 Fingerprint", Type: TypeString, Source: SourceViewer, ListKind: "JA3 fingerprints", ListExact: true},
 	{Name: SignalsField, Label: "Client Signals", Type: TypeStringList, Source: SourceEdge, Exact: true},
 	{Name: VerifiedBotField, Label: "Verified Crawler", Type: TypeBool, Source: SourceEdge},
 	{Name: IPListsField, Label: "IP lists", Type: TypeStringList, Source: SourceEdge, Exact: true},
 	{Name: DenylistedField, Label: "On any IP list", Type: TypeBool, Source: SourceEdge, Deprecated: true},
 	{Name: "edge.locale", Label: "Locale", Type: TypeString, Source: SourceLocale},
-	{Name: "http.request.jwt.claims", Label: "JWT claim", Type: TypeStringList, Keyed: true, Source: SourceJWT},
+	{Name: "http.request.jwt.claims", Label: "JWT claim", Type: TypeStringList, Keyed: true, Source: SourceJWT, ListKind: "JWT claim values"},
 }
 
 // SignalsField is the edge-computed list of client signals.

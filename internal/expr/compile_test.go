@@ -221,6 +221,8 @@ func FuzzParseRenderRoundTrip(f *testing.F) {
 		`true`, `ssl and (http.host eq "a" or not ip.src in {10.0.0.0/8})`,
 		`not starts_with(http.request.uri.path, "/x\"y")`, `http.request.headers["A"] strict wildcard "\\*"`,
 		`ip.src.asnum ge 1 or not (ssl and true)`,
+		`http.user_agent contains $bad-agents and not ip.src.country in $eu`, `starts_with(http.request.uri.path, $paths)`,
+		`http.user_agent eq "$x"`, `http.user_agent in {$x}`, `http.user_agent contains $`, `ip.src.asnum eq $1`,
 	} {
 		f.Add(s)
 	}

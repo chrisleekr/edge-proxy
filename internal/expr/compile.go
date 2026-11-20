@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"cmp"
 	"net/netip"
 	"net/textproto"
 	"regexp"
@@ -33,7 +34,38 @@ func Compile(n Node, env Env) (Matcher, []Issue) {
 	if is := Check(n, env); is != nil {
 		return nil, is
 	}
-	return compileGroup(Normalize(n)), nil
+	return compileGroup(Normalize(Expand(n, env.Lists))), nil
+}
+
+// Expand returns n with every $name value replaced by the value list's values:
+// "in $name" becomes an "in" list, and a pattern operator becomes one condition
+// per value under "or", negated for a negated operator, so "not contains $name"
+// means no value contains any of them. That is what a reference means, so
+// the compiler and the checks that read values both use it. n must have
+// passed Check with the same lists.
+func Expand(n Node, lists map[string]ValueList) Node {
+	if n.IsGroup() {
+		out := n
+		out.Rules = make([]Node, len(n.Rules))
+		for i, c := range n.Rules {
+			out.Rules[i] = Expand(c, lists)
+		}
+		return out
+	}
+	if n.Value.ListName == "" {
+		return n
+	}
+	vals := lists[n.Value.ListName].Values
+	op, _ := LookupOp(n.Operator)
+	if op.List {
+		n.Value = Value{List: vals, IsList: true}
+		return n
+	}
+	or := Node{Combinator: "or", Not: op.Negates != "", Rules: make([]Node, len(vals))}
+	for i, s := range vals {
+		or.Rules[i] = Node{Field: n.Field, Key: n.Key, Operator: cmp.Or(op.Negates, op.Name), Value: Value{One: s}}
+	}
+	return or
 }
 
 func compileGroup(g Node) Matcher {

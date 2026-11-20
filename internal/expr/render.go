@@ -58,6 +58,9 @@ func renderRule(b *strings.Builder, r Node) {
 	}
 	f := fieldRef(r)
 	v := func() { renderValue(b, r.Field, r.Value.One) }
+	if r.Value.ListName != "" {
+		v = func() { b.WriteString("$" + r.Value.ListName) }
+	}
 	switch positive {
 	case "starts_with", "ends_with":
 		b.WriteString(positive + "(" + f + ", ")
@@ -66,6 +69,11 @@ func renderRule(b *strings.Builder, r Node) {
 	case "is_true":
 		b.WriteString(f)
 	case "in":
+		if r.Value.ListName != "" {
+			b.WriteString(f + " in ")
+			v()
+			break
+		}
 		b.WriteString(f + " in {")
 		for i, item := range r.Value.List {
 			if i > 0 {
@@ -115,7 +123,7 @@ func quote(s string) string {
 }
 
 func isBareWord(s string) bool {
-	if s == "" || keywords[s] {
+	if s == "" || s[0] == '$' || keywords[s] {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

@@ -49,7 +49,7 @@ Anchor the expression on paths your own sites and services never use. `/wp-` als
 
 ## IP lists
 
-The **IP lists** page (Monitor, IP lists) holds named lists of addresses: your own, typed on the page, such as an office or partner network, and downloaded lists of known abusers and the address ranges of cloud providers, crawlers, monitors and CDNs. A list says nothing about allowing or blocking: the rule that names it does, whether it blocks, logs, rate limits or [always allows](policy.md#always-allow). `client.ip_lists` holds the names of the lists that hold the request's client IP, so a rule says which ones it means:
+The **IP lists** page (Policy, IP lists) holds named lists of addresses: your own, typed on the page, such as an office or partner network, and downloaded lists of known abusers and the address ranges of cloud providers, crawlers, monitors and CDNs. A list says nothing about allowing or blocking: the rule that names it does, whether it blocks, logs, rate limits or [always allows](policy.md#always-allow). `client.ip_lists` holds the names of the lists that hold the request's client IP, so a rule says which ones it means:
 
 ```text
 client.ip_lists in {"aws" "azure"}

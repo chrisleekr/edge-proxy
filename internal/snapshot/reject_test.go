@@ -23,7 +23,7 @@ type rejectCase struct {
 func TestCompileRejects(t *testing.T) {
 	cases := []rejectCase{
 		// Top level.
-		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 13 is not supported"},
+		{"newer schema than this build reads", func(c *Config) { c.Schema = SupportedSchema + 1 }, nil, "schema", "schema 14 is not supported"},
 		{"version zero", func(c *Config) { c.Version = 0 }, nil, "version", "at least 1"},
 		{"config over 8 MB", addHugeHeaderRules, nil, "", "bytes as JSON"},
 

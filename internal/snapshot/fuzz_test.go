@@ -88,21 +88,26 @@ func FuzzDecodeAndCompile(f *testing.F) {
 		f.Fatal("ban seed lost the trap rule's 24h ban")
 	}
 	f.Add(trb)
-	// An always-allow rule.
-	withAllow := validEnvelope()
-	addAllow(withAllow.Active, `client.ip_lists in {"office"}`, nil)
-	ab, err := json.Marshal(withAllow)
+	// A value list, rules naming it with a pattern and a list operator, and an
+	// always-allow rule.
+	withLists := validEnvelope()
+	withValueList(withLists.Active, "agents", expr.ValueList{Field: "http.user_agent", Values: []string{"curl/", "python-requests/"}})
+	withValueList(withLists.Active, "asns", expr.ValueList{Field: "ip.src.asnum", Values: []string{"64500", "64501"}})
+	useValueList(withLists.Active, "tools", `http.user_agent contains $agents`)
+	useValueList(withLists.Active, "networks", `not ip.src.asnum in $asns`)
+	addAllow(withLists.Active, `client.ip_lists in {"office"}`, nil)
+	gb, err := json.Marshal(withLists)
 	if err != nil {
 		f.Fatal(err)
 	}
-	ae, err := Decode(bytes.NewReader(ab))
+	ge, err := Decode(bytes.NewReader(gb))
 	if err != nil {
-		f.Fatalf("allow seed doesn't decode: %v", err)
+		f.Fatalf("value lists seed doesn't decode: %v", err)
 	}
-	if _, errs := CompileEnvelope(ae, testDeployment); errs != nil {
-		f.Fatalf("allow seed doesn't compile: %v", expr.Issues(errs))
+	if _, errs := CompileEnvelope(ge, testDeployment); errs != nil {
+		f.Fatalf("value lists seed doesn't compile: %v", expr.Issues(errs))
 	}
-	f.Add(ab)
+	f.Add(gb)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e, err := Decode(bytes.NewReader(data))
 		if err != nil {

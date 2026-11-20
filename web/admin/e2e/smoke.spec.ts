@@ -11,6 +11,7 @@ test.describe.configure({ mode: 'serial' });
 const user = process.env.SMOKE_USER!;
 const password = process.env.SMOKE_PASSWORD!;
 const oncall = process.env.SMOKE_ONCALL_USER!;
+const viewer = process.env.SMOKE_VIEWER_USER!;
 
 let page: Page;
 test.beforeAll(async ({ browser }) => {
@@ -1202,8 +1203,8 @@ test('the sidebar groups pages by job', async () => {
   const main = page.getByRole('navigation', { name: 'Main' });
   // Headings and links in document order, so each link sits under its group.
   await expect(main.locator('p, a')).toHaveText([
-    'Monitor', 'Dashboard', 'Stats', 'Traffic map', 'Routes', 'Fleet', 'IP lists', 'Notifications', 'Autopilot',
-    'Policy', 'Rules', 'Templates', 'CORS policies', 'Issuers', 'Settings',
+    'Monitor', 'Dashboard', 'Stats', 'Traffic map', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
+    'Policy', 'Rules', 'Value lists', 'IP lists', 'Templates', 'CORS policies', 'Issuers', 'Settings',
     'Release', 'Tests and simulate', 'Publish', 'Versions',
     'Admin', 'Audit log', 'Users and tokens',
   ]);
@@ -1658,9 +1659,320 @@ async function newAccessRule(id: string) {
   return page.locator('.rule').first();
 }
 
-test('an always-allow rule asks for an IP list, adds it in one click and shows the Allow badge', async () => {
+test('a value list made on the Value lists page is used in a rule with Use a list', async () => {
   // The IP list test above leaves an unapplied rule open, whose leave guard would hold a link.
-  await page.goto('/rules');
+  await page.goto('/value-lists');
+  await page.getByRole('button', { name: 'New value list' }).click();
+  await page.getByLabel('Name', { exact: true }).fill('bad-agents');
+  await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'User agents' });
+  await page.getByLabel('Values', { exact: true }).fill('curl/\npython-requests/');
+  await expect(page.getByText('2 of 10,000')).toBeVisible();
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  await expect(page.getByRole('link', { name: 'bad-agents' })).toBeVisible();
+
+  const cond = await newAccessRule('list-agents');
+  await cond.locator('.rule-fields').selectOption('http.user_agent');
+  await cond.locator('.rule-operators').selectOption('contains');
+  await page.getByLabel(/^Action/).selectOption('log');
+  await cond.getByLabel('Use a list').check();
+  await cond.getByLabel('Value list', { exact: true }).selectOption('bad-agents');
+  await expect(cond).toContainText('contains any of the 2');
+  await expect(cond).toContainText("Counts as 2 of this rule's 32 conditions");
+  await expect(page.getByTestId('preview-text')).toContainText('$bad-agents');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+
+  await nav('Value lists');
+  await expect(page.getByRole('link', { name: 'list-agents' })).toBeVisible();
+  await page.getByRole('link', { name: 'bad-agents' }).click();
+  await expect(page.getByRole('combobox', { name: /^Holds/ })).toHaveCount(0);
+  await expect(page.getByText('It cannot change while rules use the value list')).toBeVisible();
+  await discardDraft();
+});
+
+test('a value list name the server refuses keeps Apply to draft off', async () => {
+  await page.goto('/value-lists/_new');
+  await page.getByLabel('Name', { exact: true }).fill('Bad Name');
+  await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'User agents' });
+  await expect(page.getByRole('alert').filter({ hasText: 'lowercase letters, digits' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeDisabled();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Cancel' }).click();
+});
+
+test('renaming a value list rewrites the rules that use it', async () => {
+  await page.goto('/value-lists/_new');
+  await page.getByLabel('Name', { exact: true }).fill('old-agents');
+  await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'User agents' });
+  await page.getByLabel('Values', { exact: true }).fill('curl/');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  const cond = await newAccessRule('rename-agents');
+  await cond.locator('.rule-fields').selectOption('http.user_agent');
+  await cond.locator('.rule-operators').selectOption('contains');
+  await page.getByLabel(/^Action/).selectOption('log');
+  await cond.getByLabel('Use a list').check();
+  await cond.getByLabel('Value list', { exact: true }).selectOption('old-agents');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+
+  // A rule in another phase, with the condition inside a nested group.
+  await nav('Rules');
+  const limits = page.getByRole('list', { name: 'Rate limit rules' }).locator('..');
+  await limits.getByRole('button', { name: 'Add rate limit rule' }).click();
+  await page.getByLabel('Rule ID').fill('rename-limit');
+  await page.locator('.ruleGroup-addGroup').first().click();
+  const inner = page.locator('.ruleGroup .ruleGroup');
+  await inner.locator('.ruleGroup-addRule').click();
+  const nested = inner.locator('.rule').first();
+  await nested.locator('.rule-fields').selectOption('http.user_agent');
+  await nested.locator('.rule-operators').selectOption('contains');
+  await nested.getByLabel('Use a list').check();
+  await nested.getByLabel('Value list', { exact: true }).selectOption('old-agents');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+
+  await nav('Value lists');
+  await page.getByRole('link', { name: 'old-agents' }).click();
+  await page.getByLabel('Name', { exact: true }).fill('new-agents');
+  await expect(page.getByText('Renaming also updates the rules that use it: rename-agents, rename-limit.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  await expect(page.getByRole('link', { name: 'new-agents' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'old-agents' })).toHaveCount(0);
+
+  const used = page.getByRole('listitem').filter({ hasText: 'new-agents' });
+  await expect(used).toContainText('rename-agents');
+  await expect(used).toContainText('rename-limit');
+  for (const id of ['rename-agents', 'rename-limit']) {
+    await page.getByRole('link', { name: id }).click();
+    await expect(page.getByTestId('preview-text')).toContainText('$new-agents');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await nav('Value lists');
+  }
+  await expect(page.getByText('has problems')).toHaveCount(0);
+  await discardDraft();
+});
+
+// Moves by link, not by URL: a reload would drop the unsaved draft.
+async function addAgentList(name: string) {
+  await nav('Value lists');
+  await page.getByRole('button', { name: 'New value list' }).click();
+  await page.getByLabel('Name', { exact: true }).fill(name);
+  await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'User agents' });
+  await page.getByLabel('Values', { exact: true }).fill('curl/');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+}
+
+test('renaming a value list to a name another list has keeps Apply to draft off', async () => {
+  await addAgentList('dup-a');
+  await addAgentList('dup-b');
+  await page.getByRole('link', { name: 'dup-b' }).click();
+  await page.getByLabel('Name', { exact: true }).fill('dup-a');
+  await expect(page.getByText('A value list called dup-a already exists.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeDisabled();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await discardDraft();
+});
+
+test('Delete value list removes the list from the draft', async () => {
+  await addAgentList('gone-list');
+  await page.getByRole('link', { name: 'gone-list' }).click();
+  await page.getByRole('button', { name: 'Delete value list' }).click();
+  await confirm('Delete value list');
+  await expect(page.getByRole('heading', { name: 'Value lists', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'gone-list' })).toHaveCount(0);
+  await discardDraft();
+});
+
+// Saves a draft holding these value lists and access rules through the admin
+// API, as a save from another session would, runs the flow on it, and puts the
+// saved draft back.
+async function withSavedDraft(lists: Record<string, { field: string; values: string[] }>, rules: object[], run: () => Promise<void>) {
+  const put = (config: unknown) =>
+    page.evaluate(async (c) => {
+      const cur = (await (await fetch('/api/draft')).json()) as { revision: number; tests: unknown };
+      const res = await fetch('/api/draft', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': `"${cur.revision}"` }, body: JSON.stringify({ config: c, tests: cur.tests ?? [] }) });
+      if (!res.ok) throw new Error(`PUT /api/draft ${res.status}: ${await res.text()}`);
+    }, config);
+  await page.goto('/value-lists');
+  const before = await page.evaluate(async () => ((await (await fetch('/api/draft')).json()) as { config: { global: object; config_rules: object[] | null } }).config);
+  await put({ ...before, global: { ...before.global, lists }, config_rules: [...(before.config_rules ?? []), ...rules] });
+  try {
+    await page.goto('/value-lists');
+    await run();
+  } finally {
+    await put(before);
+    await page.goto('/value-lists');
+  }
+}
+
+test('a draft already over the cap on value list values in rules still applies a rename, and shows the cap', async () => {
+  // 20 rules each use one 10,000 value list: exactly the 200,000 the server accepts.
+  const values = Array.from({ length: 10_000 }, (_, i) => `/p${i}`);
+  const rules = Array.from({ length: 20 }, (_, i) => ({
+    id: `use-${String(i).padStart(2, '0')}`,
+    expression: { combinator: 'and', rules: [{ field: 'http.request.uri.path', operator: 'in', value: { list: 'huge-paths' } }] },
+    settings: { block: 'log' },
+  }));
+  await withSavedDraft({ 'huge-paths': { field: 'http.request.uri.path', values } }, rules, async () => {
+    // A 21st use takes the unsaved draft over the cap, which the rule editor does not hold against its own rule.
+    const cond = await newAccessRule('use-20');
+    await cond.locator('.rule-fields').selectOption('http.request.uri.path');
+    await cond.locator('.rule-operators').selectOption('in');
+    await page.getByLabel(/^Action/).selectOption('log');
+    await cond.getByLabel('Use a list').check();
+    await cond.getByLabel('Value list', { exact: true }).selectOption('huge-paths');
+    await page.getByRole('button', { name: 'Apply to draft' }).click();
+    await nav('Value lists');
+    await page.getByRole('link', { name: 'huge-paths', exact: true }).click();
+    await page.getByLabel('Name', { exact: true }).fill('huge-renamed');
+    await expect(page.getByText(/rules use value lists holding 210,000 values in all; at most 200,000 are allowed/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Apply to draft' }).click();
+    await expect(page.getByRole('link', { name: 'huge-renamed', exact: true })).toBeVisible();
+    await discardDraft();
+  });
+});
+
+test('a value list that takes the draft over the value list count shows it and keeps Apply to draft off', async () => {
+  const lists = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`seed-${String(i).padStart(3, '0')}`, { field: 'http.user_agent', values: ['curl/'] }]));
+  await withSavedDraft(lists, [], async () => {
+    await page.goto('/value-lists/_new');
+    await page.getByLabel('Name', { exact: true }).fill('one-too-many');
+    await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'User agents' });
+    await page.getByLabel('Values', { exact: true }).fill('curl/');
+    await expect(page.getByText('has 101 value lists; at most 100 are allowed')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeDisabled();
+    await expect(page.getByText('This change breaks rules')).toHaveCount(0);
+    page.once('dialog', (dialog) => void dialog.accept());
+    await page.getByRole('button', { name: 'Cancel' }).click();
+  });
+});
+
+test('a check answered with an error that has no title or reason phrase does not count as passed', async () => {
+  await page.goto('/value-lists/_new');
+  // HTTP/2 and HTTP/3 send no reason phrase, which a Response built here also lacks.
+  await page.evaluate(() => {
+    const real = window.fetch;
+    window.fetch = (input, init) =>
+      (typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).includes('/api/draft/check') ? Promise.resolve(new Response('<html>bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } })) : real(input, init);
+  });
+  await page.getByLabel('Name', { exact: true }).fill('no-answer');
+  await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'User agents' });
+  await page.getByLabel('Values', { exact: true }).fill('curl/');
+  await expect(page.getByText('Could not check the value list: HTTP 502')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeDisabled();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.reload();
+});
+
+test('a value list that does not exist says so', async () => {
+  await page.goto('/value-lists/nope');
+  await expect(page.getByText('Value list not found')).toBeVisible();
+});
+
+test('a viewer reads a value list and a rule with no word about Apply, even when the check fails', async ({ browser }) => {
+  // Saved, so the viewer's own session reads them.
+  const rule = { id: 'reader-rule', expression: { combinator: 'and', rules: [{ field: 'http.user_agent', operator: 'contains', value: { list: 'reader-agents' } }] }, settings: { block: 'log' } };
+  await withSavedDraft({ 'reader-agents': { field: 'http.user_agent', values: ['curl/'] } }, [rule], async () => {
+    const other = await (await browser.newContext()).newPage();
+    await other.goto('/');
+    await other.getByLabel('Username').fill(viewer);
+    await other.getByLabel('Password').fill(password);
+    await other.getByRole('button', { name: 'Sign in' }).click();
+    await expect(other.getByRole('navigation', { name: 'Main' })).toBeVisible();
+    await other.route('**/api/draft/check', (r) => r.fulfill({ status: 502, contentType: 'text/html', body: '<html>bad gateway</html>' }));
+    const checked = other.waitForResponse((r) => r.url().endsWith('/api/draft/check'));
+    await other.goto('/value-lists/reader-agents');
+    await expect(other.getByText('Your role can read the policy but not change it.')).toBeVisible();
+    await expect(other.getByLabel('Values', { exact: true })).toBeDisabled();
+    await checked;
+    // Let React render what the failed check returned before asserting it shows nothing.
+    await other.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    await expect(other.getByText(/Could not check|Checking the/)).toHaveCount(0);
+    await expect(other.getByRole('button', { name: 'Apply to draft' })).toHaveCount(0);
+    const ruleChecked = other.waitForResponse((r) => r.url().endsWith('/api/draft/check'));
+    await other.goto('/rules/config/reader-rule');
+    await expect(other.getByText('Your role can read the policy but not change it.')).toBeVisible();
+    await ruleChecked;
+    await other.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    await expect(other.getByText(/Could not check|Checking the/)).toHaveCount(0);
+    await other.context().close();
+  });
+});
+
+test('the Value lists link from a user agent condition opens the editor holding user agents', async () => {
+  const cond = await newAccessRule('ua-link');
+  await cond.locator('.rule-fields').selectOption('http.user_agent');
+  await cond.locator('.rule-operators').selectOption('contains');
+  await cond.getByLabel('Use a list').check();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await cond.getByRole('link', { name: 'Value lists' }).click();
+  await expect(page.getByRole('combobox', { name: /^Holds/ })).toHaveValue('http.user_agent');
+  await page.getByRole('button', { name: 'Cancel' }).click();
+});
+
+test('a value change that breaks a rule using the list keeps Apply to draft off and names the rule', async () => {
+  await page.goto('/value-lists/_new');
+  await page.getByLabel('Name', { exact: true }).fill('url-paths');
+  await page.getByRole('combobox', { name: /^Holds/ }).selectOption({ label: 'URL paths' });
+  await page.getByLabel('Values', { exact: true }).fill('/admin');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  const cond = await newAccessRule('in-paths');
+  await cond.locator('.rule-fields').selectOption('http.request.uri.path');
+  await cond.locator('.rule-operators').selectOption('in');
+  await page.getByLabel(/^Action/).selectOption('log');
+  await cond.getByLabel('Use a list').check();
+  await cond.getByLabel('Value list', { exact: true }).selectOption('url-paths');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+
+  await nav('Value lists');
+  await page.getByRole('link', { name: 'url-paths' }).click();
+  // ".php" is a fine path value for "ends with" but never matches under "in".
+  await page.getByLabel('Values', { exact: true }).fill('.php');
+  await expect(page.getByText('This change breaks rules')).toBeVisible();
+  await expect(page.getByRole('alert').getByRole('link', { name: 'in-paths' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply to draft' })).toBeDisabled();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await discardDraft();
+});
+
+test('the values box grows with its lines instead of scrolling', async () => {
+  await page.goto('/value-lists/_new');
+  await page.getByLabel('Values', { exact: true }).fill(Array.from({ length: 30 }, (_, i) => `line-${i}`).join('\n'));
+  const grown = await page.getByLabel('Values', { exact: true }).evaluate((e) => e.scrollHeight <= e.clientHeight);
+  expect(grown).toBe(true);
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Cancel' }).click();
+});
+
+test('typed values are saved as a value list from the rule, which switches to it', async () => {
+  await addAgentList('taken-agents');
+  const cond = await newAccessRule('inline-agents');
+  await cond.locator('.rule-fields').selectOption('http.user_agent');
+  await cond.locator('.rule-operators').selectOption('in');
+  await page.getByLabel(/^Action/).selectOption('log');
+  await cond.getByLabel('Values', { exact: true }).fill('curl/\npython-requests/');
+  await cond.getByRole('button', { name: 'Save as list' }).click();
+  await cond.getByLabel('List name').fill('Bad Name');
+  await expect(cond.getByText(/lowercase letters, digits/)).toBeVisible();
+  await expect(cond.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await cond.getByLabel('List name').fill('taken-agents');
+  await expect(cond.getByText('“taken-agents” already exists')).toBeVisible();
+  await expect(cond.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await cond.getByLabel('List name').fill('saved-agents');
+  await expect(cond.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+  await cond.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(cond.getByLabel('Value list', { exact: true })).toHaveValue('saved-agents');
+  await expect(cond).toContainText('is one of the 2 values');
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  await nav('Value lists');
+  await expect(page.getByRole('listitem').filter({ hasText: 'saved-agents' })).toContainText('User agents · 2 values');
+  await discardDraft();
+});
+
+
+test('an always-allow rule asks for an IP list, adds it in one click and shows the Allow badge', async () => {
   const cond = await newAccessRule('allow-office');
   await cond.getByLabel('Value').fill('/office');
   await page.getByLabel(/^Action/).selectOption('allow');

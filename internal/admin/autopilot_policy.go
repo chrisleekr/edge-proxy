@@ -120,6 +120,11 @@ func namesSubjects(n expr.Node) bool {
 	if n.IsGroup() {
 		return slices.ContainsFunc(n.Rules, namesSubjects)
 	}
+	// A value list's values were chosen by a person and can't be seen here, and
+	// an autopilot rule naming one would stop the value list being removed.
+	if n.Value.ListName != "" {
+		return true
+	}
 	switch n.Field {
 	case "ip.src", "ip.src.asnum", "http.request.jwt.claims", "http.x_forwarded_for":
 		return true

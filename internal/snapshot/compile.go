@@ -151,7 +151,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema       = 1
-	SupportedSchema = 12
+	SupportedSchema = 13
 	// MaxInflightSchema is the first schema whose edges read
 	// global.max_inflight. A config of any schema may set it; admin then
 	// publishes it only once every live edge reads that schema.
@@ -193,6 +193,17 @@ const (
 	// A config of any schema may set it; admin then waits for edges that read
 	// this schema.
 	AllowSchema = 12
+	// ValueListsSchema is the first schema whose edges read global.lists and
+	// {"list": name}. Schema 12 builds read an earlier, incompatible form, so
+	// it needs its own schema. A config of any schema may use them; admin then
+	// waits for edges that read this schema.
+	ValueListsSchema = 13
+	// MaxListValues bounds one value list.
+	MaxListValues = 10_000
+	// MaxListUses bounds the value list values compiled across every rule: each
+	// use builds its own set, so a large list named by many rules would
+	// otherwise multiply edge memory.
+	MaxListUses = 200_000
 	// MaxDistinct bounds a distinct rule's limit: the 1024-bit estimate
 	// drifts beyond it.
 	MaxDistinct = 1000
@@ -365,6 +376,9 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	if ReadsField(c, expr.IPListsField) {
 		needs = max(needs, IPListsSchema)
 	}
+	if len(c.Global.Lists) > 0 {
+		needs = max(needs, ValueListsSchema)
+	}
 	if slices.ContainsFunc(c.ConfigRules, func(r ConfigRule) bool { return r.Settings.Allow }) {
 		needs = max(needs, AllowSchema)
 	}
@@ -418,6 +432,8 @@ type validator struct {
 	// addedTemplates is the forbidden template upgrade added, which the
 	// template count allows for: an older config at the cap must still load.
 	addedTemplates int
+	// listUses counts the value list values every rule expression names.
+	listUses int
 }
 
 func (v *validator) err(path, format string, args ...any) {
@@ -505,6 +521,9 @@ func (v *validator) config() {
 	v.unused()
 	v.rateLimitRules()
 	v.headerRules()
+	if v.listUses > MaxListUses {
+		v.err("global.lists", "rules use value lists holding %s values in all; at most %s are allowed, since each use is compiled on its own", thousands(v.listUses), thousands(MaxListUses))
+	}
 }
 
 func (v *validator) global() {
@@ -541,6 +560,7 @@ func (v *validator) global() {
 		}
 	}
 
+	v.valueLists(g.Lists)
 	v.cors(g.CORSPolicies)
 	v.locale(g.Locale, d.Locale)
 	v.forward("global.request_headers.forward", g.RequestHeaders.Forward)
@@ -984,7 +1004,39 @@ func (v *validator) configRules() {
 	}
 }
 
-// unused warns about a CORS policy, issuer or template nothing refers to:
+func (v *validator) valueLists(gs map[string]expr.ValueList) {
+	if len(gs) > MaxListLen {
+		v.err("global.lists", "has %d value lists; at most %d are allowed", len(gs), MaxListLen)
+	}
+	for _, name := range slices.Sorted(maps.Keys(gs)) {
+		g := gs[name]
+		p := fmt.Sprintf("global.lists[%q]", name)
+		v.name(p, name)
+		f, ok := expr.LookupField(g.Field)
+		if !ok || f.ListKind == "" {
+			v.err(p+".field", "%q can't have a value list; IP addresses go in an IP list", g.Field)
+			continue
+		}
+		if len(g.Values) == 0 || len(g.Values) > MaxListValues {
+			v.err(p+".values", "must hold 1 to %s values", thousands(MaxListValues))
+			continue
+		}
+		seen := make(map[string]int, len(g.Values))
+		for i, s := range g.Values {
+			vp := fmt.Sprintf("%s.values[%d]", p, i)
+			if j, dup := seen[s]; dup {
+				v.err(vp, "repeats line %d", j+1)
+				continue
+			}
+			seen[s] = i
+			if msg := expr.ListValueProblem(f, s); msg != "" {
+				v.err(vp, "%s", msg)
+			}
+		}
+	}
+}
+
+// unused warns about a CORS policy, value list, issuer or template nothing refers to:
 // it saves and publishes but changes no response.
 func (v *validator) unused() {
 	c := v.c
@@ -1012,6 +1064,13 @@ func (v *validator) unused() {
 	for _, name := range slices.Sorted(maps.Keys(c.Global.CORSPolicies)) {
 		if !cors[name] {
 			v.warn(fmt.Sprintf("global.cors_policies[%q]", name), `no access rule selects it, so it has no effect; set "cors_policy": %q in an access rule's settings`, name)
+		}
+	}
+	named := map[string]bool{}
+	readsAny(c, func(r expr.Node) bool { named[r.Value.ListName] = true; return false })
+	for _, name := range slices.Sorted(maps.Keys(c.Global.Lists)) {
+		if !named[name] {
+			v.warn(fmt.Sprintf("global.lists[%q]", name), "no rule uses it as $%s, so it has no effect", name)
 		}
 	}
 	for i, is := range c.Auth.Issuers {
@@ -1422,7 +1481,7 @@ func (v *validator) placeholderProblem(ph Placeholder) string {
 // an encoded path slips past.
 func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Matcher {
 	available := func(f string) bool { return v.viewer[f] || f == expr.VerifiedBotField && v.d.VerifiedBots }
-	env := expr.Env{Phase: phase, ViewerAvailable: available, CDNHeader: v.cdnSignalNeed, BrowserFloor: len(v.c.Global.BrowserFloor) > 0, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1}
+	env := expr.Env{Phase: phase, ViewerAvailable: available, CDNHeader: v.cdnSignalNeed, BrowserFloor: len(v.c.Global.BrowserFloor) > 0, AllowRegex: v.d.AllowRegex, RelativePaths: v.schema1, Lists: v.c.Global.Lists}
 	m, issues := expr.Compile(n, env)
 	for _, is := range issues {
 		v.errs = append(v.errs, expr.Issue{Path: p + "." + is.Path, Msg: is.Msg})
@@ -1434,6 +1493,12 @@ func (v *validator) expression(p string, n expr.Node, phase expr.Phase) expr.Mat
 		for _, is := range expr.Check(n, env) {
 			v.warn(p+"."+is.Path, "%s", is.Msg)
 		}
+	}
+	if m != nil {
+		walk(n, false, func(r expr.Node, _ bool) { v.listUses += len(env.Lists[r.Value.ListName].Values) })
+		// The checks below read values, so they see a value list's values as
+		// written in the condition.
+		n = expr.Expand(n, env.Lists)
 	}
 	rawWarned := false
 	walk(n, false, func(r expr.Node, _ bool) {
