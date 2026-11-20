@@ -1971,23 +1971,9 @@ test('typed values are saved as a value list from the rule, which switches to it
   await discardDraft();
 });
 
-
-test('an always-allow rule asks for an IP list, adds it in one click and shows the Allow badge', async () => {
-  const cond = await newAccessRule('allow-office');
-  await cond.getByLabel('Value').fill('/office');
-  await page.getByLabel(/^Action/).selectOption('allow');
-  await expect(page.getByText('an always-allow rule must require').first()).toBeVisible();
-  await page.getByLabel('IP list', { exact: true }).selectOption('smoke-list');
-  await page.getByRole('button', { name: 'Add condition: client is on IP list' }).click();
-  await expect(page.getByTestId('preview-text')).toContainText('client.ip_lists');
-  await expect(page.getByText('an always-allow rule must require')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Apply to draft' }).click();
-  const rule = page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'allow-office', exact: true }) });
-  await expect(rule).toContainText('always allow');
-  await discardDraft();
-});
-
 test('a typed IP list is added, edited, and a bad address is named by its line', async () => {
+  // An earlier IP list test leaves an unapplied rule open, whose leave guard would hold a link.
+  await page.goto('/');
   await nav('IP lists');
   await page.getByLabel('Name', { exact: true }).fill('office-ips');
   await page.getByLabel('Addresses, one per line').fill('203.0.113.10\n198.51.100.0/24');
@@ -2005,6 +1991,22 @@ test('a typed IP list is added, edited, and a bad address is named by its line',
   await edit.getByRole('button', { name: 'Save' }).click();
   await expect(edit).toHaveCount(0);
   await expect(row.getByRole('cell', { name: '3', exact: true })).toBeVisible();
+});
+
+test('an always-allow rule asks for an IP list, adds it in one click and shows the Allow badge', async () => {
+  await page.goto('/rules');
+  const cond = await newAccessRule('allow-office');
+  await cond.getByLabel('Value').fill('/office');
+  await page.getByLabel(/^Action/).selectOption('allow');
+  await expect(page.getByText('an always-allow rule must require').first()).toBeVisible();
+  await page.getByLabel('IP list', { exact: true }).selectOption('office-ips');
+  await page.getByRole('button', { name: 'Add condition: client is on IP list' }).click();
+  await expect(page.getByTestId('preview-text')).toContainText('client.ip_lists');
+  await expect(page.getByText('an always-allow rule must require')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  const rule = page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'allow-office', exact: true }) });
+  await expect(rule).toContainText('always allow');
+  await discardDraft();
 });
 
 test('when admin stops answering the screen says traffic is unaffected, and Try again recovers', async () => {

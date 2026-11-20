@@ -109,6 +109,7 @@ While bypassed, nothing the edge does applies:
 ## Upgrade
 
 1. Read the release notes.
-2. Run `admin migrate` with the new image.
-3. Roll admin, then roll edges. Roll the autopilot runner with admin: a runner and admin from different releases disagree on the verdict schema. An older runner refuses the newer verdict and reports the run as `invalid_output`, so admin queues the case again once and marks it `failed` if that attempt fails too; an older admin refuses a newer runner's result, so the case stays running until its lease lapses.
-4. Publish config that uses a new schema only after every edge is upgraded. Admin enforces this: it refuses the publish while any live edge can't read the schema.
+2. When the release notes say so, stop every admin replica before `admin migrate` and start the new admin after it: an older admin still running after a migration that renames stored data (such as the one that renames the denylist tables to IP list tables) fails or writes rows the new release does not read.
+3. Run `admin migrate` with the new image.
+4. Roll admin, then roll edges. Roll the autopilot runner with admin: a runner and admin from different releases disagree on the verdict schema. An older runner refuses the newer verdict and reports the run as `invalid_output`, so admin queues the case again once and marks it `failed` if that attempt fails too; an older admin refuses a newer runner's result, so the case stays running until its lease lapses.
+5. Publish config that uses a new schema only after every edge is upgraded. Admin enforces this: it refuses the publish while any live edge can't read the schema.
