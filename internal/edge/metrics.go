@@ -72,8 +72,8 @@ type metrics struct {
 	rulesCapped, backstopUntracked, localUntracked atomic.Uint64
 	penaltyHits, penaltyDropped                    atomic.Uint64
 	banHits, banDropped                            atomic.Uint64
-	denylistFailures, banReportsDropped            atomic.Uint64
-	denylistEntries                                atomic.Int64
+	ipListFailures, banReportsDropped              atomic.Uint64
+	ipListEntries                                  atomic.Int64
 	valkeyErrors, valkeyBreakerOpen                atomic.Uint64
 
 	corsPreflight, corsPreflightDenied atomic.Uint64
@@ -145,8 +145,8 @@ func (m *metrics) writeTo(w io.Writer) {
 	p("# TYPE edge_ban_hits_total counter\nedge_ban_hits_total %d\n", m.banHits.Load())
 	p("# TYPE edge_ban_dropped_total counter\nedge_ban_dropped_total %d\n", m.banDropped.Load())
 	p("# TYPE edge_ban_reports_dropped_total counter\nedge_ban_reports_dropped_total %d\n", m.banReportsDropped.Load())
-	p("# TYPE edge_denylist_entries gauge\nedge_denylist_entries %d\n", m.denylistEntries.Load())
-	p("# TYPE edge_denylist_fetch_failures_total counter\nedge_denylist_fetch_failures_total %d\n", m.denylistFailures.Load())
+	p("# TYPE edge_ip_list_entries gauge\nedge_ip_list_entries %d\n", m.ipListEntries.Load())
+	p("# TYPE edge_ip_list_fetch_failures_total counter\nedge_ip_list_fetch_failures_total %d\n", m.ipListFailures.Load())
 	p("# TYPE edge_bans gauge\nedge_bans %d\n", m.bans.Len())
 	p("# TYPE edge_trace_export_errors_total counter\nedge_trace_export_errors_total %d\n", m.tracing.ExportErrors())
 	p("# TYPE edge_trace_capped_total counter\nedge_trace_capped_total %d\n", m.tracing.Capped())

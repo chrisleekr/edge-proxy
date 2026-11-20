@@ -182,6 +182,11 @@ type Settings struct {
 	// Ban refuses every later request from the client IP on this edge for
 	// this long. Only with block "block".
 	Ban *Duration `json:"ban,omitempty"`
+	// Allow lets a matching request through every block, ban, rate-limit
+	// rule and token requirement, whatever the rule order (a token it sends
+	// is still verified). Only on a rule whose expression requires the
+	// client IP, an IP list or a verified crawler range. Added in schema 12.
+	Allow bool `json:"allow,omitempty"`
 }
 
 // AuthSetting is a config rule's JWT requirement and the issuers it accepts.

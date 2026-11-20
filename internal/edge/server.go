@@ -35,7 +35,7 @@ type Server struct {
 	edge     *Edge
 	poller   *poller
 	reporter *reporter
-	denylist *denylistPoller
+	ipLists  *ipListPoller
 	alog     *accessLog
 	draining atomic.Bool
 }
@@ -67,7 +67,7 @@ func New(cfg *Config, log *slog.Logger, tp *tracing.Provider) *Server {
 	s.poller = &poller{cfg: cfg, dep: cfg.Deployment(), client: client, store: st, reg: reg, keys: keys, m: m, log: log, now: time.Now}
 	if cfg.AdminURL != nil {
 		s.edge.banReports = make(chan BanReport, MaxBanReports)
-		s.denylist = &denylistPoller{p: s.poller, edge: s.edge, every: denylistInterval}
+		s.ipLists = &ipListPoller{p: s.poller, edge: s.edge, every: ipListInterval}
 		s.reporter = &reporter{
 			url: cfg.AdminURL.JoinPath("v1", "edge", "report").String(), token: cfg.ServiceToken, instance: cfg.Instance, deployment: cfg.Deployment().Fingerprint(), upstream: cfg.Upstream.String(),
 			interval: cfg.StatsInterval, client: client, reg: reg, store: st, m: m, log: log, bans: s.edge.banReports,
@@ -121,8 +121,8 @@ func (s *Server) Run(ctx context.Context, public, internal net.Listener) error {
 	s.poller.loadInitial(ctx)
 	wg.Go(func() { s.poller.run(bg) })
 	wg.Go(func() { s.poller.keys.run(bg) })
-	if s.denylist != nil {
-		wg.Go(func() { s.denylist.run(bg) })
+	if s.ipLists != nil {
+		wg.Go(func() { s.ipLists.run(bg) })
 	}
 	if s.reporter != nil {
 		wg.Go(func() { s.reporter.run(bg) })

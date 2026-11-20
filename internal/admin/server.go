@@ -71,8 +71,8 @@ type Server struct {
 	mux    *http.ServeMux
 	// tracing is nil when tracing is off.
 	tracing *tracing.Provider
-	// denylistResponse is the one encoded edge denylist response held.
-	denylistResponse denylistCache
+	// ipListsResponse is the one encoded edge IP lists response held.
+	ipListsResponse ipListsCache
 
 	// Login throttles.
 	pairLimit, userLimit, ipLimit, overflow *ratelimit.Local[string]
@@ -130,7 +130,7 @@ func NewServer(cfg *Config, db *pgxpool.Pool, log *slog.Logger) *Server {
 		overflow: ratelimit.NewLocalStore(64), known: &knownPeers{m: map[string]time.Time{}}, changeLimit: ratelimit.NewLocalStore(100_000),
 		// The start time keeps a restarted replica's rows apart from its
 		// previous run's for the same minute; readers sum replicas.
-		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil), lists: jwks.NewClient(cfg.JWKSAllowedHosts, denylistFetchTimeout, nil),
+		replica: cfg.Replica + "-" + strconv.FormatInt(time.Now().UnixNano(), 36), agg: &aggregator{m: map[aggKey]*minuteAgg{}}, jwks: jwks.NewClient(cfg.JWKSAllowedHosts, 5*time.Second, nil), lists: jwks.NewClient(cfg.JWKSAllowedHosts, ipListFetchTimeout, nil),
 		ingest: make(chan struct{}, ingestSlots), routeAgg: newRouteAggregator(), trafficAgg: newTrafficAggregator(), alertClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	s.tools = configuredTools(cfg)

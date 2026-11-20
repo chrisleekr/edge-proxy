@@ -511,7 +511,7 @@ test('an access rule set to block saves, and the block kill switch saves with it
   const config = page.getByRole('list', { name: 'Access rules' }).locator('..');
   await config.getByRole('button', { name: 'Add access rule' }).click();
   await page.getByLabel('Rule ID').fill('block-tools');
-  await page.getByLabel(/^Block/).selectOption('block');
+  await page.getByLabel(/^Action/).selectOption('block');
   await page.getByRole('button', { name: 'Apply to draft' }).click();
   const rule = page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'block-tools', exact: true }) });
   await expect(rule).toContainText('blocks with 403');
@@ -1586,6 +1586,7 @@ test('an IP list is added and fetched, and a banned IP is lifted after a confirm
   await nav('IP lists');
   await expect(page.getByRole('heading', { name: 'IP lists', exact: true })).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('smoke-list');
+  await page.getByLabel('Download from a URL').check();
   await page.getByLabel('List address').fill(process.env.SMOKE_LIST_URL!);
   await page.getByRole('button', { name: 'Add list' }).click();
   const row = page.getByRole('row').filter({ hasText: process.env.SMOKE_LIST_URL! });
@@ -1610,14 +1611,88 @@ test('an IP list is added and fetched, and a banned IP is lifted after a confirm
   await expect(ban.getByText('lifted, reaching the edges')).toBeVisible();
   await nav('Audit log');
   await expect(page.getByRole('cell', { name: 'ban.lifted' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'denylist.source_added' })).toBeVisible();
-  // The rule builder names the lists that are on and downloaded.
+  await expect(page.getByRole('cell', { name: 'ip_list.added' })).toBeVisible();
+  // The rule builder offers every IP list to pick, with whether it is on.
   await nav('Rules');
   const limits = page.getByRole('list', { name: 'Rate limit rules' }).locator('..');
   await limits.getByRole('button', { name: 'Add rate limit rule' }).click();
   await page.locator('.ruleGroup-addRule').first().click();
   await page.locator('.rule').first().locator('.rule-fields').selectOption('client.ip_lists');
-  await expect(page.getByText('Lists that are on: smoke-list.')).toBeVisible();
+  // The value is picked from the lists, searchable; the field's operator may take one name or many.
+  await expect(page.getByText('smoke-list (on)')).toBeVisible();
+  await page.getByLabel('Find a list').fill('zzz-no-such');
+  await expect(page.getByText('No list matches.')).toBeVisible();
+  await page.getByLabel('Find a list').fill('');
+  // The default operator takes one name, so the lists are radios.
+  await expect(page.getByLabel('smoke-list (on)')).toHaveAttribute('type', 'radio');
+  await page.getByLabel('smoke-list (on)').check();
+  await expect(page.getByTestId('preview-text')).toContainText('client.ip_lists eq "smoke-list"');
+  // "in" takes many names, so the lists become checkboxes.
+  await page.locator('.rule').first().locator('.rule-operators').selectOption('in');
+  await expect(page.getByLabel('smoke-list (on)')).toHaveAttribute('type', 'checkbox');
+  await page.getByLabel('smoke-list (on)').check();
+  await expect(page.getByTestId('preview-text')).toContainText('client.ip_lists in {"smoke-list"}');
+  // A typed name that is not a list stays picked and is named as missing.
+  await page.getByRole('button', { name: 'Edit expression' }).click();
+  await page.getByLabel('Expression', { exact: true }).click();
+  await page.keyboard.press('ControlOrMeta+a');
+  // insertText, not type: CodeMirror closes brackets and quotes typed one key at a time.
+  await page.keyboard.insertText('client.ip_lists in {"smoke-lst"}');
+  await page.getByRole('button', { name: 'Use builder' }).click();
+  await expect(page.getByLabel('smoke-lst (no such list)')).toBeChecked();
+});
+
+// The flows below leave the draft unsaved and discard it, so revision numbers
+// in the tests around them do not move.
+async function discardDraft() {
+  await page.getByRole('button', { name: 'Discard' }).click();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+}
+
+async function newAccessRule(id: string) {
+  await nav('Rules');
+  const config = page.getByRole('list', { name: 'Access rules' }).locator('..');
+  await config.getByRole('button', { name: 'Add access rule' }).click();
+  await page.getByLabel('Rule ID').fill(id);
+  await page.locator('.ruleGroup-addRule').first().click();
+  return page.locator('.rule').first();
+}
+
+test('an always-allow rule asks for an IP list, adds it in one click and shows the Allow badge', async () => {
+  // The IP list test above leaves an unapplied rule open, whose leave guard would hold a link.
+  await page.goto('/rules');
+  const cond = await newAccessRule('allow-office');
+  await cond.getByLabel('Value').fill('/office');
+  await page.getByLabel(/^Action/).selectOption('allow');
+  await expect(page.getByText('an always-allow rule must require').first()).toBeVisible();
+  await page.getByLabel('IP list', { exact: true }).selectOption('smoke-list');
+  await page.getByRole('button', { name: 'Add condition: client is on IP list' }).click();
+  await expect(page.getByTestId('preview-text')).toContainText('client.ip_lists');
+  await expect(page.getByText('an always-allow rule must require')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Apply to draft' }).click();
+  const rule = page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'allow-office', exact: true }) });
+  await expect(rule).toContainText('always allow');
+  await discardDraft();
+});
+
+test('a typed IP list is added, edited, and a bad address is named by its line', async () => {
+  await nav('IP lists');
+  await page.getByLabel('Name', { exact: true }).fill('office-ips');
+  await page.getByLabel('Addresses, one per line').fill('203.0.113.10\n198.51.100.0/24');
+  await page.getByRole('button', { name: 'Add list' }).click();
+  const row = page.getByRole('row').filter({ hasText: 'office-ips' });
+  await expect(row).toContainText('Typed in admin');
+  await expect(row.getByRole('button', { name: 'Refresh now' })).toHaveCount(0);
+  await row.getByRole('button', { name: 'Edit' }).click();
+  const edit = page.locator('form').filter({ hasText: 'Saved changes reach every edge' });
+  await edit.getByLabel('Addresses, one per line').fill('203.0.113.10\n198.51.100.7/24');
+  await edit.getByRole('button', { name: 'Save' }).click();
+  await expect(edit).toContainText('line 2:');
+  await expect(edit).toContainText('host bits');
+  await edit.getByLabel('Addresses, one per line').fill('203.0.113.10\n198.51.100.0/24\n192.0.2.1');
+  await edit.getByRole('button', { name: 'Save' }).click();
+  await expect(edit).toHaveCount(0);
+  await expect(row.getByRole('cell', { name: '3', exact: true })).toBeVisible();
 });
 
 test('when admin stops answering the screen says traffic is unaffected, and Try again recovers', async () => {

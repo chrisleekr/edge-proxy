@@ -59,6 +59,8 @@ type accessRecord struct {
 	ver   *version
 	rlIdx [maxRateLimitCalls + maxCountRules]int
 	nRL   int
+	// lifted: an allow cleared a block, so the line is always written.
+	lifted bool
 }
 
 // loggedHeader is a request header an access line carries, as attr.
@@ -122,8 +124,9 @@ func decisionOf(st *reqState) string {
 }
 
 func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, decision string) {
-	// Allowed requests are sampled; rejections and 5xx are always logged.
-	if decision == "allow" && st.sw.status < 500 && logDraw() >= a.sample {
+	// Allowed requests are sampled; rejections, 5xx and a block an allow
+	// lifted (a refusal that did not happen) are always logged.
+	if decision == "allow" && st.set.lifted == "" && st.sw.status < 500 && logDraw() >= a.sample {
 		return
 	}
 	rec := accessRecord{
@@ -166,6 +169,7 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 		rec.hdr[i], _ = first(r.Header[h.key])
 	}
 	rec.referer, _ = first(r.Header["Referer"])
+	rec.lifted = st.set.lifted != ""
 	rec.ver, rec.rlIdx, rec.nRL = st.ver, st.rlIdx, st.nRL
 	rec.ban, rec.banDropped = st.ban, st.banDropped
 	if st.ver != nil {
@@ -324,8 +328,9 @@ func (a *accessLog) emit(rec accessRecord) {
 	if rec.banDropped {
 		attrs = append(attrs, slog.Bool("edge.ban.dropped", true))
 	}
-	// A sampled line stands for 1/rate requests; readers scale by it.
-	if a.sample < 1 && rec.decision == "allow" && rec.status < 500 {
+	// A sampled line stands for 1/rate requests; readers scale by it. Lines
+	// that are always written stand for one.
+	if a.sample < 1 && rec.decision == "allow" && rec.status < 500 && !rec.lifted {
 		attrs = append(attrs, slog.Float64("edge.sample_rate", a.sample))
 	}
 	if rec.client.IsValid() {

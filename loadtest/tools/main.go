@@ -296,6 +296,14 @@ func seed(ctx context.Context) error {
 	if err := json.Unmarshal(src, &p); err != nil {
 		return err
 	}
+	// The demo's always-allow rule names this typed list. Admin state, not
+	// policy, so it is added through its own API before the draft names it.
+	if os.Getenv("SEED_POLICY") == "demo" {
+		office := map[string]any{"name": "office", "entries": "198.51.100.0/28\n2001:db8:a::/48"}
+		if _, err := call("POST", "/api/ip-lists", office, http.StatusCreated); err != nil {
+			return err
+		}
+	}
 	if _, err := call("PUT", "/api/draft", p, 200, "If-Match", `"0"`); err != nil {
 		return err
 	}

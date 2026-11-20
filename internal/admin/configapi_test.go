@@ -999,6 +999,33 @@ func TestSimulateShowsATrustedClient(t *testing.T) {
 	}
 }
 
+// A simulation of a request an always-allow rule matches names that rule
+// and is not blocked by a later blocking rule; another client is blocked.
+func TestSimulateShowsAnAlwaysAllowRule(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	c := testConfig()
+	c.ConfigRules = append(c.ConfigRules,
+		snapshot.ConfigRule{ID: "office", Expression: mustParse(`ip.src in {"203.0.113.64/27"}`), Settings: snapshot.Settings{Allow: true}},
+		snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent contains "curl"`), Settings: snapshot.Settings{Block: new("block")}})
+	status(t, ed.save(`"0"`, c, adminTest), 200)
+
+	for _, tc := range []struct {
+		name, ip, rejected, allowRule string
+	}{
+		{"office client", "203.0.113.70", "", "office"},
+		{"other client", "203.0.113.96", "blocked", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sim := decode[SimView](t, ed.do("POST", "/api/simulate", map[string]any{"request": TestRequest{Host: "api.example.com", Path: "/", IP: tc.ip, Headers: map[string]string{"User-Agent": "curl/8.5.0"}}}))
+			if sim.AllowRule != tc.allowRule || sim.Rejected != tc.rejected {
+				t.Fatalf("allow rule %q rejected %q", sim.AllowRule, sim.Rejected)
+			}
+		})
+	}
+}
+
 // Config tests state what a trusted client meets: no block, and no token
 // needed on a route that requires one. Another client meets both.
 func TestConfigTestsRunForATrustedClient(t *testing.T) {

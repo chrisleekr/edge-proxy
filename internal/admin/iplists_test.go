@@ -31,7 +31,7 @@ func (h *harness) trustLists(fs ...*fakeRanges) {
 // listActions are the audit actions about lists and bans, with their targets.
 func (h *harness) listActions() []string {
 	h.t.Helper()
-	return slices.DeleteFunc(h.actions(), func(a string) bool { return !strings.HasPrefix(a, "denylist.") && !strings.HasPrefix(a, "ban.") })
+	return slices.DeleteFunc(h.actions(), func(a string) bool { return !strings.HasPrefix(a, "ip_list.") && !strings.HasPrefix(a, "ban.") })
 }
 
 // sampleList has comments, CRLF endings, a repeat, a range wider than lists
@@ -54,7 +54,7 @@ func listHarness(t *testing.T) (*harness, *client, *client, *fakeRanges) {
 	return h, pub, e, f
 }
 
-type denylistBody struct {
+type ipListsBody struct {
 	Lists []struct {
 		Name     string   `json:"name"`
 		Prefixes []string `json:"prefixes"`
@@ -66,16 +66,16 @@ type denylistBody struct {
 	DroppedLists []string `json:"dropped_lists"`
 }
 
-func edgeDenylist(t *testing.T, e *client) denylistBody {
+func edgeIPLists(t *testing.T, e *client) ipListsBody {
 	t.Helper()
-	return decode[denylistBody](t, e.do("GET", "/v1/denylist", nil))
+	return decode[ipListsBody](t, e.do("GET", "/v1/ip-lists", nil))
 }
 
 // prefixes is every prefix the edge response carries, list by list.
 func prefixes(t *testing.T, e *client) []string {
 	t.Helper()
 	out := []string{}
-	for _, l := range edgeDenylist(t, e).Lists {
+	for _, l := range edgeIPLists(t, e).Lists {
 		out = append(out, l.Prefixes...)
 	}
 	return out
@@ -84,8 +84,8 @@ func prefixes(t *testing.T, e *client) []string {
 // listName is the name addList gives the fake source.
 const listName = "test-list"
 
-// src is the list named n in GET /api/denylists.
-func src(t *testing.T, c *client, n string) denylistSource {
+// src is the list named n in GET /api/ip-lists.
+func src(t *testing.T, c *client, n string) ipListView {
 	t.Helper()
 	for _, s := range sources(t, c) {
 		if s.Name == n {
@@ -93,19 +93,19 @@ func src(t *testing.T, c *client, n string) denylistSource {
 		}
 	}
 	t.Fatalf("no list named %q", n)
-	return denylistSource{}
+	return ipListView{}
 }
 
 // listPath is the route of the list named n, with an optional suffix.
 func listPath(t *testing.T, c *client, n, suffix string) string {
 	t.Helper()
-	return fmt.Sprintf("/api/denylists/%d%s", src(t, c, n).ID, suffix)
+	return fmt.Sprintf("/api/ip-lists/%d%s", src(t, c, n).ID, suffix)
 }
 
-// sources is GET /api/denylists.
-func sources(t *testing.T, c *client) []denylistSource {
+// sources is GET /api/ip-lists.
+func sources(t *testing.T, c *client) []ipListView {
 	t.Helper()
-	return decode[[]denylistSource](t, c.do("GET", "/api/denylists", nil))
+	return decode[[]ipListView](t, c.do("GET", "/api/ip-lists", nil))
 }
 
 // addList adds the fake source as pub, on and not wide, and returns its URL.
@@ -118,21 +118,21 @@ func addList(t *testing.T, pub *client, f *fakeRanges) string {
 func addNamed(t *testing.T, pub *client, f *fakeRanges, name, path string, wide bool) string {
 	t.Helper()
 	url := f.srv.URL + path
-	status(t, pub.do("POST", "/api/denylists", map[string]any{"name": name, "url": url, "wide": wide}), http.StatusCreated)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]any{"name": name, "url": url, "wide": wide}), http.StatusCreated)
 	return url
 }
 
 // An added list is audited, fetched by the leader within a tick through the
 // SSRF guard, normalized, and served to edges apart from the snapshot, with
 // the first fetch audited as an automated event.
-func TestDenylistSourceIsAuditedFetchedAndServed(t *testing.T) {
+func TestIPListSourceIsAuditedFetchedAndServed(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	url := addList(t, pub, f)
-	if got := h.listActions(); !slices.Equal(got, []string{"denylist.source_added " + url}) {
+	if got := h.listActions(); !slices.Equal(got, []string{"ip_list.added " + url}) {
 		t.Fatalf("audit %v", got)
 	}
 	var details map[string]any
-	if err := h.db.QueryRow(t.Context(), "SELECT details FROM audit_events WHERE action = 'denylist.source_added'").Scan(&details); err != nil || details["name"] != listName || details["wide"] != false {
+	if err := h.db.QueryRow(t.Context(), "SELECT details FROM audit_events WHERE action = 'ip_list.added'").Scan(&details); err != nil || details["name"] != listName || details["wide"] != false {
 		t.Fatalf("audit details %v, %v", details, err)
 	}
 	// The status row is written after the set, so wait for it: stopping the
@@ -141,10 +141,10 @@ func TestDenylistSourceIsAuditedFetchedAndServed(t *testing.T) {
 	if got := prefixes(t, e); !slices.Equal(got, samplePrefixes) {
 		t.Fatalf("prefixes %v", got)
 	}
-	if got := h.auditActors("denylist.changed"); !slices.Equal(got, []string{"system:denylist"}) {
+	if got := h.auditActors("ip_list.changed"); !slices.Equal(got, []string{"system:ip_list"}) {
 		t.Fatalf("changes audited by %v", got)
 	}
-	if got := edgeDenylist(t, e); len(got.Lists) != 1 || got.Lists[0].Name != listName {
+	if got := edgeIPLists(t, e); len(got.Lists) != 1 || got.Lists[0].Name != listName {
 		t.Fatalf("lists %+v", got.Lists)
 	}
 	if s := src(t, pub, listName); s.Entries != 3 || s.Skipped != 2 || s.Failures != 0 || s.LastSuccessAt == nil || !s.Enabled || s.Wide {
@@ -153,23 +153,23 @@ func TestDenylistSourceIsAuditedFetchedAndServed(t *testing.T) {
 }
 
 // Only people who can publish change lists; a viewer reads them.
-func TestDenylistChangesNeedThePermission(t *testing.T) {
+func TestIPListChangesNeedThePermission(t *testing.T) {
 	h, pub, _, f := listHarness(t)
 	addList(t, pub, f)
 	h.user("view", "viewer")
 	v := h.signedIn("view")
-	status(t, v.do("POST", "/api/denylists", map[string]string{"name": "a", "url": "https://example.com/a.txt"}), http.StatusForbidden)
+	status(t, v.do("POST", "/api/ip-lists", map[string]string{"name": "a", "url": "https://example.com/a.txt"}), http.StatusForbidden)
 	status(t, v.do("PATCH", listPath(t, pub, listName, ""), map[string]bool{"enabled": false}), http.StatusForbidden)
 	status(t, v.do("DELETE", listPath(t, pub, listName, ""), nil), http.StatusForbidden)
 	status(t, v.do("POST", listPath(t, pub, listName, "/refresh"), nil), http.StatusForbidden)
 	status(t, v.do("POST", "/api/bans/lift", map[string]string{"ip": "1.2.3.4"}), http.StatusForbidden)
-	status(t, v.do("GET", "/api/denylists", nil), http.StatusOK)
+	status(t, v.do("GET", "/api/ip-lists", nil), http.StatusOK)
 	status(t, v.do("GET", "/api/bans", nil), http.StatusOK)
 }
 
 // A list URL that could leak a secret, or reach a plain-text or local
 // target, is refused with a message.
-func TestDenylistSourceURLsAreChecked(t *testing.T) {
+func TestIPListSourceURLsAreChecked(t *testing.T) {
 	_, pub, _, _ := listHarness(t)
 	for _, tc := range []struct{ name, url string }{
 		{"plain http", "http://example.com/a.txt"},
@@ -181,14 +181,14 @@ func TestDenylistSourceURLsAreChecked(t *testing.T) {
 		{"empty", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status(t, pub.do("POST", "/api/denylists", map[string]string{"name": "x", "url": tc.url}), http.StatusUnprocessableEntity)
+			status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": "x", "url": tc.url}), http.StatusUnprocessableEntity)
 		})
 	}
 }
 
 // A name rules could not write, or that another list has, is refused: 422 for
 // the form, 409 for a repeat, whether the name or the address repeats.
-func TestDenylistNamesAreCheckedAndUnique(t *testing.T) {
+func TestIPListNamesAreCheckedAndUnique(t *testing.T) {
 	_, pub, _, _ := listHarness(t)
 	for _, tc := range []struct{ name, list string }{
 		{"empty", ""},
@@ -199,29 +199,29 @@ func TestDenylistNamesAreCheckedAndUnique(t *testing.T) {
 		{"64 characters", strings.Repeat("a", 64)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status(t, pub.do("POST", "/api/denylists", map[string]string{"name": tc.list, "url": "https://example.com/n.txt"}), http.StatusUnprocessableEntity)
+			status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": tc.list, "url": "https://example.com/n.txt"}), http.StatusUnprocessableEntity)
 		})
 	}
-	status(t, pub.do("POST", "/api/denylists", map[string]string{"name": strings.Repeat("a", 63), "url": "https://example.com/n.txt"}), http.StatusCreated)
-	status(t, pub.do("POST", "/api/denylists", map[string]string{"name": "mine", "url": "https://example.com/m.txt"}), http.StatusCreated)
-	status(t, pub.do("POST", "/api/denylists", map[string]string{"name": "mine", "url": "https://example.com/other.txt"}), http.StatusConflict)
-	status(t, pub.do("POST", "/api/denylists", map[string]string{"name": "other", "url": "https://example.com/m.txt"}), http.StatusConflict)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": strings.Repeat("a", 63), "url": "https://example.com/n.txt"}), http.StatusCreated)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": "mine", "url": "https://example.com/m.txt"}), http.StatusCreated)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": "mine", "url": "https://example.com/other.txt"}), http.StatusConflict)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": "other", "url": "https://example.com/m.txt"}), http.StatusConflict)
 	// A default's name is taken too.
-	status(t, pub.do("POST", "/api/denylists", map[string]string{"name": "aws", "url": "https://example.com/aws.txt"}), http.StatusConflict)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": "aws", "url": "https://example.com/aws.txt"}), http.StatusConflict)
 }
 
 // The defaults count toward the limit of 128 lists; the one after it is refused.
-func TestDenylistCapsTheLists(t *testing.T) {
+func TestIPListCapsTheLists(t *testing.T) {
 	_, pub, _, _ := listHarness(t)
-	for i := len(sources(t, pub)); i < maxDenylistSources; i++ {
-		status(t, pub.do("POST", "/api/denylists", map[string]string{"name": fmt.Sprintf("l%d", i), "url": fmt.Sprintf("https://example.com/%d.txt", i)}), http.StatusCreated)
+	for i := len(sources(t, pub)); i < maxIPLists; i++ {
+		status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": fmt.Sprintf("l%d", i), "url": fmt.Sprintf("https://example.com/%d.txt", i)}), http.StatusCreated)
 	}
-	status(t, pub.do("POST", "/api/denylists", map[string]string{"name": "extra", "url": "https://example.com/extra.txt"}), http.StatusUnprocessableEntity)
+	status(t, pub.do("POST", "/api/ip-lists", map[string]string{"name": "extra", "url": "https://example.com/extra.txt"}), http.StatusUnprocessableEntity)
 }
 
 // A fresh database has the 73 default lists, every one off, each with a name
 // rules can write, and edges are served no list.
-func TestDenylistDefaultsAreSeededOff(t *testing.T) {
+func TestIPListDefaultsAreSeededOff(t *testing.T) {
 	_, pub, e, _ := listHarness(t)
 	got := sources(t, pub)
 	if len(got) != 73 {
@@ -250,7 +250,7 @@ func TestDenylistDefaultsAreSeededOff(t *testing.T) {
 		}
 	}
 	// Empty arrays, never null, so an edge reads them as lists.
-	resp := e.do("GET", "/v1/denylist", nil)
+	resp := e.do("GET", "/v1/ip-lists", nil)
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if want := `{"lists":[],"lifts":[],"dropped_lists":[]}`; strings.TrimSpace(string(raw)) != want {
@@ -260,28 +260,28 @@ func TestDenylistDefaultsAreSeededOff(t *testing.T) {
 
 // Turning a default on is audited and makes the leader fetch it, by its
 // name. aws is a wide default, so it keeps the sample's /8.
-func TestDenylistTurningADefaultOnFetchesIt(t *testing.T) {
+func TestIPListTurningADefaultOnFetchesIt(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	url := f.srv.URL + "/aws.txt"
-	if _, err := h.db.Exec(t.Context(), "UPDATE denylist_sources SET url = $1 WHERE name = 'aws'", url); err != nil {
+	if _, err := h.db.Exec(t.Context(), "UPDATE ip_lists SET url = $1 WHERE name = 'aws'", url); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.s.refreshDenylists(t.Context()); err != nil || src(t, pub, "aws").LastAttemptAt != nil {
+	if err := h.s.refreshIPLists(t.Context()); err != nil || src(t, pub, "aws").LastAttemptAt != nil {
 		t.Fatalf("a list that is off was fetched: %v", err)
 	}
 	status(t, pub.do("PATCH", listPath(t, pub, "aws", ""), map[string]bool{"enabled": true}), http.StatusNoContent)
-	if got := h.listActions(); !slices.Equal(got, []string{"denylist.source_enabled " + url}) {
+	if got := h.listActions(); !slices.Equal(got, []string{"ip_list.enabled " + url}) {
 		t.Fatalf("audit %v", got)
 	}
 	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
-	if got := edgeDenylist(t, e); len(got.Lists) != 1 || got.Lists[0].Name != "aws" || !slices.Equal(got.Lists[0].Prefixes, []string{"1.2.3.4/32", "10.0.0.0/8", "2001:db8::1/128", "5.6.7.0/24"}) {
+	if got := edgeIPLists(t, e); len(got.Lists) != 1 || got.Lists[0].Name != "aws" || !slices.Equal(got.Lists[0].Prefixes, []string{"1.2.3.4/32", "10.0.0.0/8", "2001:db8::1/128", "5.6.7.0/24"}) {
 		t.Fatalf("lists %+v", got.Lists)
 	}
 }
 
 // A wide list keeps a /10, as a cloud provider owns, and a plain list skips
 // it; neither keeps a /7.
-func TestDenylistWideListKeepsWideRanges(t *testing.T) {
+func TestIPListWideListKeepsWideRanges(t *testing.T) {
 	h, pub, e, _ := listHarness(t)
 	f := newFakeRanges(t, "100.64.0.0/10\n8.0.0.0/7\n1.2.3.4\n")
 	h.trustLists(f)
@@ -291,7 +291,7 @@ func TestDenylistWideListKeepsWideRanges(t *testing.T) {
 		return src(t, pub, "plain").LastSuccessAt != nil && src(t, pub, "broad").LastSuccessAt != nil
 	})
 	got := map[string][]string{}
-	for _, l := range edgeDenylist(t, e).Lists {
+	for _, l := range edgeIPLists(t, e).Lists {
 		got[l.Name] = l.Prefixes
 	}
 	if !slices.Equal(got["plain"], []string{"1.2.3.4/32"}) || !slices.Equal(got["broad"], []string{"1.2.3.4/32", "100.64.0.0/10"}) {
@@ -306,28 +306,28 @@ func TestDenylistWideListKeepsWideRanges(t *testing.T) {
 }
 
 // storeEntries stores n distinct /32 lines for a list, counted as stored, as
-// storeDenylist does, starting at the address base.
+// storeIPList does, starting at the address base.
 func storeEntries(t *testing.T, h *harness, name string, n int, base string) {
 	t.Helper()
-	if _, err := h.db.Exec(t.Context(), `INSERT INTO denylist_sets (source_id, fetched_at, entries, prefixes)
+	if _, err := h.db.Exec(t.Context(), `INSERT INTO ip_list_sets (source_id, fetched_at, entries, prefixes)
 		SELECT id, now(), $2::int, (SELECT string_agg(host($3::inet + g) || '/32', E'\n' ORDER BY g) FROM generate_series(0, $2::int - 1) g)
-		FROM denylist_sources WHERE name = $1`, name, n, base); err != nil {
+		FROM ip_lists WHERE name = $1`, name, n, base); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // Past the edge's cap a list is left out whole, never cut, and named; a later
 // smaller list after it that still fits is served.
-func TestDenylistCutsWholeListsAtTheCap(t *testing.T) {
+func TestIPListCutsWholeListsAtTheCap(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	for i, l := range []struct {
 		name string
 		n    int
-	}{{"first", edge.MaxDenylistPrefixes / 2}, {"second", edge.MaxDenylistPrefixes/2 + 1}, {"third", 10}} {
+	}{{"first", edge.MaxIPListPrefixes / 2}, {"second", edge.MaxIPListPrefixes/2 + 1}, {"third", 10}} {
 		addNamed(t, pub, f, l.name, fmt.Sprintf("/%d.txt", i), false)
 		storeEntries(t, h, l.name, l.n, fmt.Sprintf("%d.0.0.0", i+1))
 	}
-	got := edgeDenylist(t, e)
+	got := edgeIPLists(t, e)
 	var names []string
 	for _, l := range got.Lists {
 		names = append(names, l.Name)
@@ -335,7 +335,7 @@ func TestDenylistCutsWholeListsAtTheCap(t *testing.T) {
 	if !slices.Equal(names, []string{"first", "third"}) || !slices.Equal(got.DroppedLists, []string{"second"}) {
 		t.Fatalf("served %v, dropped %v", names, got.DroppedLists)
 	}
-	if n := len(got.Lists[0].Prefixes); n != edge.MaxDenylistPrefixes/2 || got.Lists[0].Prefixes[0] != "1.0.0.0/32" {
+	if n := len(got.Lists[0].Prefixes); n != edge.MaxIPListPrefixes/2 || got.Lists[0].Prefixes[0] != "1.0.0.0/32" {
 		t.Fatalf("the first list was cut: %d prefixes, from %s", n, got.Lists[0].Prefixes[0])
 	}
 	if n := len(got.Lists[1].Prefixes); n != 10 || got.Lists[1].Prefixes[9] != "3.0.0.9/32" {
@@ -346,39 +346,39 @@ func TestDenylistCutsWholeListsAtTheCap(t *testing.T) {
 // A refresh that finds the same list writes nothing: no audit row, and the
 // edges' ETag stays. A list that changed is audited with what it added and
 // removed, compared in the order the lists are stored in.
-func TestDenylistChangeIsAuditedAndUnchangedIsNot(t *testing.T) {
+func TestIPListChangeIsAuditedAndUnchangedIsNot(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	addList(t, pub, f)
 	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
-	tag := e.do("GET", "/v1/denylist", nil).Header.Get("ETag")
+	tag := e.do("GET", "/v1/ip-lists", nil).Header.Get("ETag")
 
 	status(t, pub.do("POST", listPath(t, pub, listName, "/refresh"), nil), http.StatusNoContent)
 	leadBriefly(t, h, func() bool { return src(t, pub, listName).LastAttemptAt != nil })
 	if s := src(t, pub, listName); s.Failures != 0 || s.LastError != "" {
 		t.Fatalf("unchanged refresh failed: %+v", s)
 	}
-	if got := h.auditActors("denylist.changed"); len(got) != 1 {
+	if got := h.auditActors("ip_list.changed"); len(got) != 1 {
 		t.Fatalf("changes audited by %v", got)
 	}
-	status(t, e.do("GET", "/v1/denylist", nil, "If-None-Match", tag), http.StatusNotModified)
+	status(t, e.do("GET", "/v1/ip-lists", nil, "If-None-Match", tag), http.StatusNotModified)
 
 	// 1.2.3.10 sorts before 1.2.3.4 as text, not as an address.
 	f.set(sampleList + "1.2.3.10\n")
 	status(t, pub.do("POST", listPath(t, pub, listName, "/refresh"), nil), http.StatusNoContent)
-	leadBriefly(t, h, func() bool { return len(h.auditActors("denylist.changed")) == 2 })
+	leadBriefly(t, h, func() bool { return len(h.auditActors("ip_list.changed")) == 2 })
 	var details map[string]any
-	if err := h.db.QueryRow(t.Context(), "SELECT details FROM audit_events WHERE action = 'denylist.changed' ORDER BY seq DESC LIMIT 1").Scan(&details); err != nil {
+	if err := h.db.QueryRow(t.Context(), "SELECT details FROM audit_events WHERE action = 'ip_list.changed' ORDER BY seq DESC LIMIT 1").Scan(&details); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(details["added"]) != "[1.2.3.10/32]" || fmt.Sprint(details["removed"]) != "[]" || details["entries"] != 4.0 {
 		t.Fatalf("audit details %v", details)
 	}
-	status(t, e.do("GET", "/v1/denylist", nil, "If-None-Match", tag), http.StatusOK)
+	status(t, e.do("GET", "/v1/ip-lists", nil, "If-None-Match", tag), http.StatusOK)
 }
 
 // A source that answers 200 with a page, or is down, keeps the last good set
 // and shows why in its status, in words and without an audit row.
-func TestDenylistFetchFailureKeepsTheLastGoodSet(t *testing.T) {
+func TestIPListFetchFailureKeepsTheLastGoodSet(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	addList(t, pub, f)
 	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
@@ -398,7 +398,7 @@ func TestDenylistFetchFailureKeepsTheLastGoodSet(t *testing.T) {
 			if got := prefixes(t, e); !slices.Equal(got, samplePrefixes) {
 				t.Fatalf("prefixes %v", got)
 			}
-			if got := h.auditActors("denylist.changed"); len(got) != 1 {
+			if got := h.auditActors("ip_list.changed"); len(got) != 1 {
 				t.Fatalf("changes audited by %v", got)
 			}
 		})
@@ -406,13 +406,13 @@ func TestDenylistFetchFailureKeepsTheLastGoodSet(t *testing.T) {
 }
 
 // A source is fetched when due: not again within the hour, and again after.
-func TestDenylistSourceIsFetchedOnceAnHour(t *testing.T) {
+func TestIPListSourceIsFetchedOnceAnHour(t *testing.T) {
 	h, pub, _, f := listHarness(t)
 	addList(t, pub, f)
 	leadBriefly(t, h, func() bool { return src(t, pub, listName).LastSuccessAt != nil })
 	first := *src(t, pub, listName).LastAttemptAt
 	h.advance(30 * time.Minute)
-	if err := h.s.refreshDenylists(t.Context()); err != nil {
+	if err := h.s.refreshIPLists(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	pub = h.signedIn("pub") // the session idled out
@@ -420,7 +420,7 @@ func TestDenylistSourceIsFetchedOnceAnHour(t *testing.T) {
 		t.Fatalf("fetched again after 30 minutes: %v then %v", first, got)
 	}
 	h.advance(31 * time.Minute)
-	if err := h.s.refreshDenylists(t.Context()); err != nil {
+	if err := h.s.refreshIPLists(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	pub = h.signedIn("pub")
@@ -431,7 +431,7 @@ func TestDenylistSourceIsFetchedOnceAnHour(t *testing.T) {
 
 // A disabled or removed list leaves what edges get, each audited, and a
 // repeat of the same change writes no second row.
-func TestDenylistDisableAndRemoveDropTheEntries(t *testing.T) {
+func TestIPListDisableAndRemoveDropTheEntries(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	url := addList(t, pub, f)
 	path := listPath(t, pub, listName, "")
@@ -453,21 +453,21 @@ func TestDenylistDisableAndRemoveDropTheEntries(t *testing.T) {
 	status(t, pub.do("DELETE", path, nil), http.StatusNotFound)
 	status(t, pub.do("PATCH", path, map[string]bool{"enabled": true}), http.StatusNotFound)
 	status(t, pub.do("POST", path+"/refresh", nil), http.StatusNotFound)
-	want := []string{"denylist.source_added " + url, "denylist.changed " + url, "denylist.source_disabled " + url, "denylist.source_enabled " + url, "denylist.source_removed " + url}
+	want := []string{"ip_list.added " + url, "ip_list.changed " + url, "ip_list.disabled " + url, "ip_list.enabled " + url, "ip_list.removed " + url}
 	if got := h.listActions(); !slices.Equal(got, want) {
 		t.Fatalf("audit %v, want %v", got, want)
 	}
 }
 
 // Each enabled list is served whole under its name, in the order added.
-func TestDenylistServesEachListByName(t *testing.T) {
+func TestIPListServesEachListByName(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	g := newFakeRanges(t, "5.6.7.0/24\n9.9.9.9\n")
 	h.trustLists(f, g)
 	addList(t, pub, f)
 	addNamed(t, pub, g, "other-list", "/b.txt", false)
 	leadBriefly(t, h, func() bool { return src(t, pub, listName).Entries > 0 && src(t, pub, "other-list").Entries > 0 })
-	got := edgeDenylist(t, e)
+	got := edgeIPLists(t, e)
 	if len(got.Lists) != 2 || got.Lists[0].Name != listName || got.Lists[1].Name != "other-list" ||
 		!slices.Equal(got.Lists[0].Prefixes, samplePrefixes) || !slices.Equal(got.Lists[1].Prefixes, []string{"5.6.7.0/24", "9.9.9.9/32"}) {
 		t.Fatalf("lists %+v", got.Lists)
@@ -476,20 +476,20 @@ func TestDenylistServesEachListByName(t *testing.T) {
 
 // The response has one ETag over lists and lifts: a 304 while nothing
 // changed, a new one when a list is turned on, and only an edge token reads it.
-func TestDenylistETagFollowsListsAndLifts(t *testing.T) {
+func TestIPListETagFollowsListsAndLifts(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	addList(t, pub, f)
 	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
-	tag := e.do("GET", "/v1/denylist", nil).Header.Get("ETag")
-	status(t, e.do("GET", "/v1/denylist", nil, "If-None-Match", tag), http.StatusNotModified)
+	tag := e.do("GET", "/v1/ip-lists", nil).Header.Get("ETag")
+	status(t, e.do("GET", "/v1/ip-lists", nil, "If-None-Match", tag), http.StatusNotModified)
 	status(t, pub.do("PATCH", listPath(t, pub, listName, ""), map[string]bool{"enabled": false}), http.StatusNoContent)
-	status(t, e.do("GET", "/v1/denylist", nil, "If-None-Match", tag), http.StatusOK)
-	status(t, pub.do("GET", "/v1/denylist", nil), http.StatusForbidden)
+	status(t, e.do("GET", "/v1/ip-lists", nil, "If-None-Match", tag), http.StatusOK)
+	status(t, pub.do("GET", "/v1/ip-lists", nil), http.StatusForbidden)
 }
 
 // Edges that miss the same ETag get the same body, and a lift makes a new tag
 // and a body that carries it.
-func TestDenylistEdgesMissingTheSameTagGetTheSameBody(t *testing.T) {
+func TestIPListEdgesMissingTheSameTagGetTheSameBody(t *testing.T) {
 	h, pub, e, f := listHarness(t)
 	addList(t, pub, f)
 	leadBriefly(t, h, func() bool { return len(prefixes(t, e)) > 0 })
@@ -497,7 +497,7 @@ func TestDenylistEdgesMissingTheSameTagGetTheSameBody(t *testing.T) {
 	e2.token = e.token
 	fetch := func(c *client) (tag, body string) {
 		t.Helper()
-		resp := c.do("GET", "/v1/denylist", nil, "If-None-Match", `"stale"`)
+		resp := c.do("GET", "/v1/ip-lists", nil, "If-None-Match", `"stale"`)
 		b, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil || resp.StatusCode != http.StatusOK {
@@ -601,7 +601,7 @@ func TestBanReportsAreValidated(t *testing.T) {
 }
 
 // Lifting a ban is audited with the edge's ban key (an IPv6 address lifts
-// its /64), reaches edges in the denylist response, and shows as pending on
+// its /64), reaches edges in the IP lists response, and shows as pending on
 // the list until edges have applied it. A ban that starts again after the
 // lift is listed as running.
 func TestLiftingABanIsAuditedAndServedToEdges(t *testing.T) {
@@ -613,7 +613,7 @@ func TestLiftingABanIsAuditedAndServedToEdges(t *testing.T) {
 	if got := h.listActions(); !slices.Equal(got, []string{"ban.lifted 2001:db8:1:2::"}) {
 		t.Fatalf("audit %v", got)
 	}
-	got := edgeDenylist(t, e)
+	got := edgeIPLists(t, e)
 	if len(got.Lifts) != 1 || got.Lifts[0].IP != "2001:db8:1:2::" || got.Lifts[0].At != (now.UnixMicro()+999)/1000 {
 		t.Fatalf("lifts %+v", got.Lifts)
 	}
@@ -722,7 +722,7 @@ func TestLiftTimeAgreesWithAdminAtMillisecondPrecision(t *testing.T) {
 	status(t, pub.do("POST", "/api/bans/lift", map[string]string{"ip": "203.0.113.5"}), http.StatusNoContent)
 	later := edge.StatsReport{Instance: "edge-b", Bans: []edge.BanReport{ban("203.0.113.5", t0.Add(time.Millisecond), time.Hour)}}
 	status(t, e.do("POST", "/v1/edge/report", later), http.StatusOK)
-	lifts := edgeDenylist(t, e).Lifts
+	lifts := edgeIPLists(t, e).Lifts
 	if len(lifts) != 1 {
 		t.Fatalf("lifts %+v", lifts)
 	}
@@ -740,19 +740,19 @@ func TestLiftTimeAgreesWithAdminAtMillisecondPrecision(t *testing.T) {
 }
 
 // The lookup says which enabled lists hold an address, by name and range.
-func TestDenylistLookup(t *testing.T) {
+func TestIPListLookup(t *testing.T) {
 	h, pub, _, f := listHarness(t)
 	addList(t, pub, f)
 	leadBriefly(t, h, func() bool { return src(t, pub, listName).Entries > 0 })
 	type hit struct{ Name, Prefix string }
 	for ip, want := range map[string]int{"5.6.7.200": 1, "::ffff:1.2.3.4": 1, "9.9.9.9": 0} {
-		if got := decode[[]hit](t, pub.do("GET", "/api/denylists/lookup?ip="+ip, nil)); len(got) != want || want == 1 && got[0].Name != listName {
+		if got := decode[[]hit](t, pub.do("GET", "/api/ip-lists/lookup?ip="+ip, nil)); len(got) != want || want == 1 && got[0].Name != listName {
 			t.Fatalf("%s: %+v", ip, got)
 		}
 	}
-	status(t, pub.do("GET", "/api/denylists/lookup?ip=nope", nil), http.StatusUnprocessableEntity)
+	status(t, pub.do("GET", "/api/ip-lists/lookup?ip=nope", nil), http.StatusUnprocessableEntity)
 	status(t, pub.do("PATCH", listPath(t, pub, listName, ""), map[string]bool{"enabled": false}), http.StatusNoContent)
-	if got := decode[[]hit](t, pub.do("GET", "/api/denylists/lookup?ip=5.6.7.200", nil)); len(got) != 0 {
+	if got := decode[[]hit](t, pub.do("GET", "/api/ip-lists/lookup?ip=5.6.7.200", nil)); len(got) != 0 {
 		t.Fatalf("disabled list matched: %+v", got)
 	}
 }
@@ -886,15 +886,16 @@ func TestRuleReadingDenylistedAlwaysWarns(t *testing.T) {
 	}
 }
 
-// Lists are taken in the order added and one that would pass the entry cap is
-// left out of the edge response, so a rule naming it is warned that it matches
-// no one, even though the list is on and downloaded.
+// Typed lists are taken first, then downloaded ones in the order added, and
+// one that would pass the entry cap is left out of the edge response, so a rule
+// naming it is warned that it matches no one, even though the list is on and
+// downloaded. A typed list added after them is still served.
 func TestRuleNamingALeftOutListWarns(t *testing.T) {
 	h, pub, _, f := listHarness(t)
 	for i, l := range []struct {
 		name string
 		n    int
-	}{{"first", edge.MaxDenylistPrefixes / 2}, {"second", edge.MaxDenylistPrefixes/2 + 1}} {
+	}{{"first", edge.MaxIPListPrefixes / 2}, {"second", edge.MaxIPListPrefixes/2 + 1}} {
 		addNamed(t, pub, f, l.name, fmt.Sprintf("/%d.txt", i), false)
 		storeEntries(t, h, l.name, l.n, fmt.Sprintf("%d.0.0.0", i+1))
 	}
@@ -906,6 +907,54 @@ func TestRuleNamingALeftOutListWarns(t *testing.T) {
 	}](t, pub.do("POST", "/api/draft/check", map[string]any{"config": c}))
 	const want = `names IP list "second", which is on but left out because the lists that are on pass 500,000 entries, so it matches no one.`
 	if len(out.Errors) != 0 || len(out.Warnings) != 1 || out.Warnings[0]["message"] != want {
+		t.Fatalf("errors %v, warnings %v, want one: %s", out.Errors, out.Warnings, want)
+	}
+}
+
+// A typed list added after the downloaded ones is ahead of them at the cap: it
+// is not warned about, and the downloaded list past the cap is.
+func TestRuleNamingATypedListAddedLastWarnsOnlyForTheDownloadedLeftOut(t *testing.T) {
+	h, pub, _, f := listHarness(t)
+	for i, l := range []struct {
+		name string
+		n    int
+	}{{"first", edge.MaxIPListPrefixes - 1}, {"second", 1}} {
+		addNamed(t, pub, f, l.name, fmt.Sprintf("/%d.txt", i), false)
+		storeEntries(t, h, l.name, l.n, fmt.Sprintf("%d.0.0.0", i+1))
+	}
+	status(t, addTyped(pub, "office", "203.0.113.10\n", false), http.StatusCreated)
+	c := testConfig()
+	c.Schema = snapshot.IPListsSchema
+	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "listed", Expression: mustParse(`client.ip_lists in {"office" "second"}`), Settings: snapshot.Settings{CORSPolicy: new("")}})
+	out := decode[struct {
+		Errors, Warnings []map[string]any
+	}](t, pub.do("POST", "/api/draft/check", map[string]any{"config": c}))
+	const want = `names IP list "second", which is on but left out because the lists that are on pass 500,000 entries, so it matches no one.`
+	if len(out.Errors) != 0 || len(out.Warnings) != 1 || out.Warnings[0]["message"] != want {
+		t.Fatalf("errors %v, warnings %v, want one: %s", out.Errors, out.Warnings, want)
+	}
+}
+
+// An always-allow rule that names a downloaded list is warned, since whoever
+// controls the URL then decides who skips enforcement; a typed list and a
+// rule that does not allow are not.
+func TestAlwaysAllowRuleNamingADownloadedListWarns(t *testing.T) {
+	h, pub, _, f := listHarness(t)
+	addList(t, pub, f)
+	leadBriefly(t, h, func() bool { return src(t, pub, listName).Entries > 0 })
+	status(t, addTyped(pub, "office", "203.0.113.10\n", false), http.StatusCreated)
+	c := testConfig()
+	c.Schema = snapshot.AllowSchema
+	c.ConfigRules = append(c.ConfigRules,
+		snapshot.ConfigRule{ID: "allow-dl", Expression: mustParse(`client.ip_lists in {"test-list"}`), Settings: snapshot.Settings{Allow: true}},
+		snapshot.ConfigRule{ID: "allow-typed", Expression: mustParse(`client.ip_lists in {"office"}`), Settings: snapshot.Settings{Allow: true}},
+		snapshot.ConfigRule{ID: "log-dl", Expression: mustParse(`client.ip_lists in {"test-list"}`), Settings: snapshot.Settings{CORSPolicy: new("")}},
+		snapshot.ConfigRule{ID: "allow-narrowed", Expression: mustParse(`client.ip_lists in {"office"} and not client.ip_lists in {"test-list"}`), Settings: snapshot.Settings{Allow: true}})
+	out := decode[struct {
+		Errors, Warnings []map[string]any
+	}](t, pub.do("POST", "/api/draft/check", map[string]any{"config": c}))
+	const want = `always-allow rule allow-dl names "test-list", a downloaded list: whoever publishes its address decides who skips blocks, bans and rate limits. Type the addresses in a list instead.`
+	if len(out.Errors) != 0 || len(out.Warnings) != 1 || out.Warnings[0]["message"] != want || !strings.HasSuffix(fmt.Sprint(out.Warnings[0]["path"]), fmt.Sprintf("config_rules[%d].expression", len(c.ConfigRules)-4)) {
 		t.Fatalf("errors %v, warnings %v, want one: %s", out.Errors, out.Warnings, want)
 	}
 }
@@ -959,6 +1008,19 @@ func TestParseList(t *testing.T) {
 		{"a /10 and an IPv6 /20 are skipped on a plain list", "100.64.0.0/10\n2001:db8::/20\n1.2.3.4\n", false, []string{"1.2.3.4/32"}, 2, false},
 		{"a /10 and an IPv6 /20 are kept on a wide list", "100.64.0.0/10\n2001:db8::/20\n1.2.3.4\n", true, []string{"1.2.3.4/32", "100.64.0.0/10", "2001::/20"}, 0, false},
 		{"a /7 and an IPv6 /15 are skipped even on a wide list", "8.0.0.0/7\n2000::/15\n1.2.3.4\n", true, []string{"1.2.3.4/32"}, 2, false},
+		{"a JSON range file such as a crawler list", `{"creationTime":"2026-10-20T00:00:00Z","prefixes":[{"ipv4Prefix":"216.73.216.0/22"},{"ipv4Prefix":"34.162.230.222/32"},{"ipv6Prefix":"2001:db8::/48"}]}`, false, []string{"2001:db8::/48", "216.73.216.0/22", "34.162.230.222/32"}, 0, false},
+		{"AWS ip-ranges shape", `{"syncToken":"1","prefixes":[{"ip_prefix":"3.5.140.0/22","region":"ap-northeast-2","service":"AMAZON"}],"ipv6_prefixes":[{"ipv6_prefix":"2600:1f00::/40","region":"us-east-1"}]}`, false, []string{"2600:1f00::/40", "3.5.140.0/22"}, 0, false},
+		{"a JSON array of addresses", "\xef\xbb\xbf [\"1.2.3.4\", \"5.6.7.0/24\"]", false, []string{"1.2.3.4/32", "5.6.7.0/24"}, 0, false},
+		{"a wide range in JSON is skipped and counted", `{"prefixes":[{"ipv4Prefix":"10.0.0.0/8"},{"ipv4Prefix":"1.2.3.0/24"}]}`, false, []string{"1.2.3.0/24"}, 1, false},
+		{"JSON with no address fails", `{"name":"x","prefixes":[]}`, false, nil, 0, true},
+		{"truncated JSON fails", `{"prefixes":[{"ipv4Prefix":"1.2.3.0/24"},`, false, nil, 0, true},
+		{"an address used as a JSON key does not count", `{"1.2.3.4":"5.6.7.0/24","9.9.9.0/24":{"x":"8.8.8.0/24"}}`, false, []string{"5.6.7.0/24", "8.8.8.0/24"}, 0, false},
+		{"a JSON number too big for a float is ignored", `{"n":1e400,"p":["1.2.3.0/24"]}`, false, []string{"1.2.3.0/24"}, 0, false},
+		{"a byte order mark before a text list keeps its first line", "\xef\xbb\xbf1.2.3.4\n5.6.7.0/24\n", false, []string{"1.2.3.4/32", "5.6.7.0/24"}, 0, false},
+		{"a 4-in-6 address in JSON is skipped and counted", `["::ffff:1.2.3.4","1.2.3.4"]`, false, []string{"1.2.3.4/32"}, 1, false},
+		{"JSON followed by other text fails", `["1.2.3.4"]<html>`, false, nil, 0, true},
+		{"two JSON values fail", `["1.2.3.4"]["5.6.7.0/24"]`, false, nil, 0, true},
+		{"a CSV first column", "1.2.3.0/24,US,x\n", false, []string{"1.2.3.0/24"}, 0, false},
 		{"an HTML page", "<html><body>x</body></html>", false, nil, 1, true},
 		{"empty", "", false, nil, 0, true},
 		{"only comments", "# nothing\n", false, nil, 0, true},

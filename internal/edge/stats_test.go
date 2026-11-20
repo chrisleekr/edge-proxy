@@ -423,3 +423,42 @@ func TestCountSignalsAllocatesNothing(t *testing.T) {
 		t.Fatalf("%v allocations per request, want 0", n)
 	}
 }
+
+// A request a block rule would have stopped but an allow let through counts
+// as lifted on that rule, not as blocked or would_block. Both an always-allow
+// rule and the client allowlist lift; a client neither covers is blocked.
+func TestLiftedOutcomesReported(t *testing.T) {
+	allowRule := snapshot.ConfigRule{ID: "office", Expression: mustParse("ip.src in {" + trustedRange + "}"), Settings: snapshot.Settings{Allow: true}}
+	cases := []struct {
+		name                string
+		config              func() *snapshot.Config
+		client              string
+		status              int
+		blocked, wouldBlock float64
+		lifted              float64
+	}{
+		{"always-allow rule lifts a block", func() *snapshot.Config {
+			c := allowlistConfig(1)
+			c.ConfigRules = append(c.ConfigRules, allowRule)
+			return c
+		}, "198.51.100.7:1", 200, 0, 0, 1},
+		{"client allowlist lifts a block", func() *snapshot.Config { return allowlistConfig(1, trustedRange) }, "198.51.100.7:1", 200, 0, 0, 1},
+		{"unlisted client is blocked, not lifted", func() *snapshot.Config { return allowlistConfig(1, trustedRange) }, otherClient, 403, 1, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			h.load(envelope(tc.config()))
+			h.do("GET", "/", nil, "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", tc.client).Body.Close()
+			var got RuleOutcome
+			for _, r := range h.srv.poller.reg.deltas()[0].Rules {
+				if r.ID == "tools" {
+					got = r
+				}
+			}
+			if got.Blocked != uint64(tc.blocked) || got.WouldBlock != uint64(tc.wouldBlock) || got.Lifted != uint64(tc.lifted) {
+				t.Fatalf("blocked %d would_block %d lifted %d, want %v %v %v", got.Blocked, got.WouldBlock, got.Lifted, tc.blocked, tc.wouldBlock, tc.lifted)
+			}
+		})
+	}
+}

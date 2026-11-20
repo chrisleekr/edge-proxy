@@ -55,6 +55,9 @@ type SimResult struct {
 	// block and rate-limit rules are then skipped, and a required token
 	// becomes optional.
 	Allowlist string
+	// AllowRule is the ID of the always-allow rule that matched, or "". It
+	// skips the same checks as the allowlist.
+	AllowRule string `json:"allow_rule,omitempty"`
 	// UpstreamHeaders are the request's headers after the header phase
 	// (step 9): forward filter, header rules and the locale header. The
 	// forwarding headers the edge always sets (X-Forwarded-*,
@@ -151,7 +154,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	for _, i := range matched {
 		res.ConfigRules = append(res.ConfigRules, c.Config.ConfigRules[i].ID)
 	}
-	res.Allowlist = set.allowlist
+	res.Allowlist, res.AllowRule = set.allowlist, set.allowRule
 	res.Settings = SimSettings{
 		AuthMode: set.authMode, Accepted: set.accepted, CORSPolicy: set.cors, Locale: set.locale,
 		Responses: map[string]string{}, BodyLimit: set.bodyLimit,
@@ -182,7 +185,7 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 		f.claims = req.JWTClaims
 	}
 	// A trusted client skips step 8 but still gets the header phase.
-	if set.allowlist == "" {
+	if !set.allowed() {
 		checks, capped, reject := st.planChecks(&version{c: c, rules: ratelimit.Compile(c.Config.RateLimitRules)}, nil)
 		for _, ch := range checks {
 			res.RateLimitRules = append(res.RateLimitRules, ch.rule.ID)

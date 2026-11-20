@@ -115,7 +115,7 @@ func (s *Server) runJobs(ctx context.Context) {
 	// Apart from the loop below: a list may take a minute to download.
 	var lists sync.WaitGroup
 	defer lists.Wait()
-	lists.Go(func() { s.denylistLoop(ctx, job) })
+	lists.Go(func() { s.ipListLoop(ctx, job) })
 	job(jobJWKS, s.refreshKeys)
 	job(jobVerifiedBots, s.refreshBots)
 	job(jobAudit, s.verifyAudit)

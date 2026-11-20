@@ -24,7 +24,7 @@ The admin UI calls the `config` phase **Access rules**, and it stores them as `c
 
 | Phase | Use it to | Action |
 |---|---|---|
-| `config` | Choose per-route settings | `settings`: any of `auth` (`none`, `optional`, `required`, plus accepted issuers), `cors_policy`, `locale`, `upstream_timeout`, `body_limit`, `responses`, `ratelimit_headers`, `block`, `ban`. Later matching rules override earlier ones, setting by setting |
+| `config` | Choose per-route settings | `settings`: any of `auth` (`none`, `optional`, `required`, plus accepted issuers), `cors_policy`, `locale`, `upstream_timeout`, `body_limit`, `responses`, `ratelimit_headers`, `block`, `ban`, `allow`. Later matching rules override earlier ones, setting by setting; [`allow`](#always-allow) wins whatever the order |
 | `rate_limit` | Limit request rates | Algorithm, limit, period and key. See [Rate limiting](rate-limiting.md) |
 | `request_headers` | Shape what the upstream receives | Ops: `set`, `append`, `remove`, `copy`, `rename`, `forward` (all, allowlist or denylist) |
 
@@ -68,7 +68,7 @@ A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of se
 
 A matched request skips:
 
-- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block, and any ban
+- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block (the rule whose setting it lifted counts it under **Lifted by an allow** on **Stats**), and any ban
 - every rate-limit rule, including [autopilot rules](publishing.md#autopilot-rules), count rules, penalties already running and `on_missing_key: reject`. No Valkey call is made and no counter or quota changes
 
 On a route that requires a JWT, a trusted client is treated as `optional`: it needs no token, but a token it sends is still verified. A bad one is refused with 401, and a valid one gives claims and `X-Edge-Auth-*` headers as usual. Claims and those headers come only from a verified token. The kill switch still turns JWT checks off entirely. `ratelimit_headers` is reported false for a trusted client, since no rate-limit rule runs.
@@ -89,6 +89,18 @@ ip.src.country in {"AU" "SG"}
 with `198.51.100.0/24` and `2001:db8:f00::/48` on the allowlist. Clients in those networks reach the upstream even when the viewer country is `AU` or `SG`.
 
 To test it, set `ip` in a [policy test](#policy-tests) and assert `rejected` is `""` and, on a route that requires a JWT, `settings.auth_mode` is `optional`: a trusted client's simulated request skips the block and needs no token. The [Tests and simulate page](dashboard.md#tests-and-simulate) shows a **Trusted client** row with the entry it matched.
+
+### Always allow
+
+An access rule with `"allow": true` lets the requests it matches through every other access rule's `block` (or `log`), any ban, every rate-limit rule and a required JWT, whatever the rule order: it does for one rule what the [allowlist](#trusted-clients) does for the whole policy, with the same exemptions and the same checks kept. The admin UI calls it **Always allow**. Its other settings, and the CORS policy, locale, limits and templates other matching rules set, still apply.
+
+```json
+{ "id": "cfg-office", "expression": "client.ip_lists in {\"office\"}", "settings": { "allow": true } }
+```
+
+Because anyone can send a header, cookie, path or user agent, an allow rule must require something the client can't forge, as a condition of its own joined with `and` at the top level: the client IP (`ip.src eq` or `in`), an [IP list](bots.md#ip-lists) (`client.ip_lists eq` or `in`) or a verified crawler (`client.verified_bot`). A client IP condition counts only when every range is no wider than /24 for IPv4 or /48 for IPv6, as the allowlist does; wider networks go in an IP list. A condition in parentheses or in an `and` subgroup counts, but one inside an `or` or a negated group does not. Other conditions may narrow it further, such as a host or path. A rule that matches on anything else alone, or that joins the client IP with another condition by `or`, is refused at save, and so is `allow` with `block` in the same rule. A typed IP list such as `office` changes within about a minute with no publish, while the rule itself is published. It needs schema 12 edges.
+
+A request this rule lets through past a block is always logged, not sampled, with the rule listed in `edge.config_rules` and `edge.decision` `allow`, so a lifted block can be seen in the [access log](../operate/monitoring.md#logs). **Simulate** (`POST /api/simulate`) reports the rule as `allow_rule`, and a [policy test](#policy-tests) checks its effect with `rejected` and `config_rules`.
 
 ## Expressions
 

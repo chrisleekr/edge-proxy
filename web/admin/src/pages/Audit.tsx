@@ -85,6 +85,12 @@ export const said: Record<string, string> = {
   'denylist.source_disabled': 'turned off the IP list',
   'denylist.source_removed': 'removed the IP list',
   'denylist.changed': 'saw a changed IP list at',
+  'ip_list.added': 'added the IP list',
+  'ip_list.enabled': 'turned on the IP list',
+  'ip_list.disabled': 'turned off the IP list',
+  'ip_list.removed': 'removed the IP list',
+  'ip_list.updated': 'changed the IP list',
+  'ip_list.changed': 'saw a changed IP list at',
   'ban.lifted': 'lifted the ban on',
 };
 
@@ -98,7 +104,7 @@ const categories: [string, string[]][] = [
   ['Sign-ins', ['auth.login.success', 'auth.login.failure', 'auth.logout']],
   ['Routes', ['route.delete', 'route.delete_all', 'route_pattern.create', 'route_pattern.delete']],
   ['Keys and crawlers', ['jwks.keys_changed', 'verified_bots.changed', 'verified_bots.removed']],
-  ['IP lists and bans', ['denylist.source_added', 'denylist.source_enabled', 'denylist.source_disabled', 'denylist.source_removed', 'denylist.changed', 'ban.lifted']],
+  ['IP lists and bans', ['denylist.source_added', 'denylist.source_enabled', 'denylist.source_disabled', 'denylist.source_removed', 'denylist.changed', 'ip_list.added', 'ip_list.enabled', 'ip_list.disabled', 'ip_list.removed', 'ip_list.updated', 'ip_list.changed', 'ban.lifted']],
   ['Audit log', ['audit.verify', 'audit.export']],
 ];
 

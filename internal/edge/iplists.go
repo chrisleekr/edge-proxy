@@ -18,24 +18,24 @@ const (
 	// MaxBanReports bounds the bans one stats report carries and the queue
 	// that feeds it. Admin refuses a report with more.
 	MaxBanReports = 200
-	// MaxDenylistPrefixes bounds the prefixes of one denylist response. Admin
+	// MaxIPListPrefixes bounds the prefixes of one IP list response. Admin
 	// cuts its list here, and an edge refuses a response with more.
-	MaxDenylistPrefixes = 500_000
-	// maxDenylistBytes bounds the body read: 500,000 prefixes of IPv6 CIDR
+	MaxIPListPrefixes = 500_000
+	// maxIPListBytes bounds the body read: 500,000 prefixes of IPv6 CIDR
 	// text fit well inside it.
-	maxDenylistBytes = 64 << 20
-	denylistInterval = time.Minute
+	maxIPListBytes = 64 << 20
+	ipListInterval = time.Minute
 )
 
 // newIPLists is a variable so a test can inject the refusal, which no valid
 // response or simulation reaches below the real cap.
 var newIPLists = expr.NewIPLists
 
-// DenylistResponse is admin's GET /v1/denylist body.
-type DenylistResponse struct {
+// IPListsResponse is admin's GET /v1/ip-lists body.
+type IPListsResponse struct {
 	Lists []IPList  `json:"lists"`
 	Lifts []BanLift `json:"lifts"`
-	// Dropped names the lists admin left out whole at MaxDenylistPrefixes. Older
+	// Dropped names the lists admin left out whole at MaxIPListPrefixes. Older
 	// edges decode "dropped" as an int, so a new name keeps both versions
 	// decoding the rest of the body, ban lifts included.
 	Dropped []string `json:"dropped_lists"`
@@ -80,16 +80,16 @@ func (e *Edge) reportBan(ip netip.Addr, b ratelimit.Ban) bool {
 	}
 }
 
-// denylistPoller keeps the edge's IP list set and ban lifts current from
+// ipListPoller keeps the edge's IP list set and ban lifts current from
 // admin. Admin down, or a bad answer, keeps the current set.
-type denylistPoller struct {
+type ipListPoller struct {
 	p     *poller
 	edge  *Edge
 	every time.Duration
 	etag  string
 }
 
-func (d *denylistPoller) run(ctx context.Context) {
+func (d *ipListPoller) run(ctx context.Context) {
 	wait := time.Duration(0) // first poll right after start
 	for {
 		t := time.NewTimer(wait)
@@ -99,22 +99,22 @@ func (d *denylistPoller) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		guard(d.p.m, d.p.log, "denylist poller", func() { d.poll(ctx) })
+		guard(d.p.m, d.p.log, "ip list poller", func() { d.poll(ctx) })
 		wait = jitter(d.every)
 	}
 }
 
 // poll fetches once and counts and logs a failure.
-func (d *denylistPoller) poll(ctx context.Context) {
+func (d *ipListPoller) poll(ctx context.Context) {
 	if err := d.fetch(ctx); err != nil {
-		d.p.m.denylistFailures.Add(1)
-		d.p.log.Warn("denylist fetch failed; keeping current set", "error", err.Error())
+		d.p.m.ipListFailures.Add(1)
+		d.p.log.Warn("ip list fetch failed; keeping current set", "error", err.Error())
 	}
 }
 
-func (d *denylistPoller) fetch(ctx context.Context) error {
+func (d *ipListPoller) fetch(ctx context.Context) error {
 	// AdminURL was validated at startup, so the request can't fail to build.
-	u := d.p.cfg.AdminURL.JoinPath("v1", "denylist")
+	u := d.p.cfg.AdminURL.JoinPath("v1", "ip-lists")
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+d.p.cfg.ServiceToken)
 	if d.etag != "" {
@@ -132,12 +132,12 @@ func (d *denylistPoller) fetch(ctx context.Context) error {
 	default:
 		return fmt.Errorf("admin answered %d", resp.StatusCode)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxDenylistBytes+1))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxIPListBytes+1))
 	if err != nil {
 		return err
 	}
-	if len(b) > maxDenylistBytes {
-		return fmt.Errorf("denylist is over %d bytes", maxDenylistBytes)
+	if len(b) > maxIPListBytes {
+		return fmt.Errorf("IP list response is over %d bytes", maxIPListBytes)
 	}
 	if err := d.apply(b); err != nil {
 		return err
@@ -149,13 +149,13 @@ func (d *denylistPoller) fetch(ctx context.Context) error {
 // apply activates one response body, or changes nothing: an edge never
 // activates a list it can't fully read. Unknown fields are ignored so a
 // newer admin can add some.
-func (d *denylistPoller) apply(body []byte) error {
-	var r DenylistResponse
+func (d *ipListPoller) apply(body []byte) error {
+	var r IPListsResponse
 	if err := json.Unmarshal(body, &r); err != nil {
 		return err
 	}
 	if len(r.Lists) > expr.MaxIPLists {
-		return fmt.Errorf("denylist has %d lists, limit %d", len(r.Lists), expr.MaxIPLists)
+		return fmt.Errorf("IP list response has %d lists, limit %d", len(r.Lists), expr.MaxIPLists)
 	}
 	names := make([]string, len(r.Lists))
 	ps := make([][]netip.Prefix, len(r.Lists))
@@ -164,8 +164,8 @@ func (d *denylistPoller) apply(body []byte) error {
 		if !expr.ValidListName(l.Name) || slices.Contains(names[:i], l.Name) {
 			return fmt.Errorf("list %d: bad or repeated name %q", i, l.Name)
 		}
-		if total += len(l.Prefixes); total > MaxDenylistPrefixes {
-			return fmt.Errorf("denylist has over %d prefixes", MaxDenylistPrefixes)
+		if total += len(l.Prefixes); total > MaxIPListPrefixes {
+			return fmt.Errorf("IP list response has over %d prefixes", MaxIPListPrefixes)
 		}
 		names[i], ps[i] = l.Name, make([]netip.Prefix, len(l.Prefixes))
 		for j, s := range l.Prefixes {
@@ -198,6 +198,6 @@ func (d *denylistPoller) apply(body []byte) error {
 		}
 	}
 	d.edge.lists.Store(set)
-	d.p.m.denylistEntries.Store(int64(total))
+	d.p.m.ipListEntries.Store(int64(total))
 	return nil
 }

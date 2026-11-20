@@ -7,6 +7,7 @@ import { phaseOf, phases, ruleLink, rulesOf } from '../phases';
 import { Link, navigate, useLeaveGuard } from '../router';
 import { RuleBuilder, toAST, usePreview } from '../RuleBuilder';
 import { Errors, RuleForm } from '../RuleForms';
+import { ipListsQuery } from './IPLists';
 import { Button, CanWrite, Card, CodeEditor, ConfirmButton, Editable, ErrorBox, Hint, Input, Issues, JsonEditor, NotFound, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
 import { Investigate } from './Autopilot';
 import { RuleHistory } from './Versions';
@@ -44,6 +45,26 @@ function LiveCard({ id }: { id: string }) {
         )}
       </div>
     </Card>
+  );
+}
+
+// AllowFix adds the condition an always-allow rule lacks, as an AST node.
+function AllowFix({ onAdd }: { onAdd: (list: string) => void }) {
+  const canRead = useCan()('stats.read');
+  const lists = useQuery({ ...ipListsQuery, enabled: canRead });
+  const [pick, setPick] = useState('');
+  const names = (lists.data ?? []).map((l) => l.name);
+  const list = pick || names[0] || '';
+  if (!list) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <Button onClick={() => onAdd(list)}>Add condition: client is on IP list</Button>
+      <select aria-label="IP list" value={list} onChange={(e) => setPick(e.target.value)}>
+        {names.map((n) => (
+          <option key={n}>{n}</option>
+        ))}
+      </select>
+    </div>
   );
 }
 
@@ -281,6 +302,14 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
         </div>
         {/* Every problem is listed here too, so none hides under a closed section. */}
         <Issues issues={errors.map((i) => ({ ...i, path: i.path || 'rule' }))} />
+        {/* The fix follows the problem it fixes. */}
+        {errors.some((i) => i.path === 'expression' && i.message.startsWith('an always-allow rule must require')) && (
+          <AllowFix onAdd={(name) => setQuery((cur) => {
+              const row = { field: 'client.ip_lists', operator: 'in', value: [name] };
+              // An "or" or negated group must stay whole, so the new row joins it from outside.
+              return cur.combinator === 'and' && !cur.not ? { ...cur, rules: [...cur.rules, row] } : { combinator: 'and', rules: [cur, row] };
+            })} />
+        )}
         <Issues issues={warnings.map((i) => ({ ...i, path: i.path || 'rule' }))} tone="amber" />
         <Card
           title="When incoming requests match"

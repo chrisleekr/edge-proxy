@@ -88,6 +88,21 @@ func FuzzDecodeAndCompile(f *testing.F) {
 		f.Fatal("ban seed lost the trap rule's 24h ban")
 	}
 	f.Add(trb)
+	// An always-allow rule.
+	withAllow := validEnvelope()
+	addAllow(withAllow.Active, `client.ip_lists in {"office"}`, nil)
+	ab, err := json.Marshal(withAllow)
+	if err != nil {
+		f.Fatal(err)
+	}
+	ae, err := Decode(bytes.NewReader(ab))
+	if err != nil {
+		f.Fatalf("allow seed doesn't decode: %v", err)
+	}
+	if _, errs := CompileEnvelope(ae, testDeployment); errs != nil {
+		f.Fatalf("allow seed doesn't compile: %v", expr.Issues(errs))
+	}
+	f.Add(ab)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e, err := Decode(bytes.NewReader(data))
 		if err != nil {

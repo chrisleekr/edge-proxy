@@ -2,7 +2,7 @@ import * as DndKit from '@dnd-kit/core';
 import { QueryBuilderDnD } from '@react-querybuilder/dnd';
 import { createDndKitAdapter } from '@react-querybuilder/dnd/dnd-kit';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useId, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useId, useMemo, useState } from 'react';
 import {
   type FieldSelectorProps,
   QueryBuilder,
@@ -14,7 +14,8 @@ import {
   useValueSelector,
 } from 'react-querybuilder';
 import 'react-querybuilder/dist/query-builder.css';
-import { denylistsQuery } from './pages/IPLists';
+import { ipListsQuery } from './pages/IPLists';
+import { Link } from './router';
 import { api, type Json, type Phase, type Rendered, type Schema, useCan } from './api';
 
 const dnd = createDndKitAdapter(DndKit);
@@ -110,30 +111,67 @@ function setKey(q: RuleGroupType, path: number[], key: string): RuleGroupType {
 function ValueEditor(props: ValueEditorProps) {
   const { schema } = props.context as Ctx;
   const canReadLists = useCan()('stats.read');
-  // Only the IP list field reads the lists; a role that cannot read them gets no hint.
-  const lists = useQuery({ ...denylistsQuery, enabled: props.field === 'client.ip_lists' && canReadLists });
+  const mode = useId();
+  const [find, setFind] = useState('');
+  // Only the IP list field reads the lists; a role that cannot read them types the names.
+  const lists = useQuery({ ...ipListsQuery, enabled: props.field === 'client.ip_lists' && canReadLists });
   const op = schema.operators.find((o) => o.name === props.operator);
   if (!op || op.no_value) return null;
   let text: string | undefined;
+  let picker: ReactNode;
   if (props.field === 'client.signals') {
     text = `Signal names: ${schema.rules.signals.map((s) => s.name).join(', ')}.`;
   } else if (props.field === 'client.ip_lists' && canReadLists && lists.data) {
-    const on = lists.data.filter((l) => l.enabled).map((l) => (l.entries > 0 ? l.name : `${l.name} (not downloaded yet)`));
-    text = `${on.length > 0 ? `Lists that are on: ${on.join(', ')}.` : 'No list is on.'} A list that is off matches no one until you turn it on in IP lists.`;
+    text = 'A list that is off matches no one until you turn it on in IP lists.';
+    // Picking from the lists avoids mistyped names; a role that cannot read them types.
+    const picked = op.list ? (Array.isArray(props.value) ? (props.value as string[]) : []) : typeof props.value === 'string' && props.value ? [props.value] : [];
+    const known = new Set(lists.data.map((l) => l.name));
+    const options = [
+      ...lists.data.map((l) => ({ name: l.name, state: !l.enabled ? 'off' : l.entries > 0 ? 'on' : 'on, not downloaded yet' })),
+      ...[...new Set(picked)].filter((n) => !known.has(n)).map((n) => ({ name: n, state: 'no such list' })),
+    ].filter((o) => o.name.toLowerCase().includes(find.toLowerCase()));
+    picker = (
+      <div className="flex min-w-0 basis-full flex-col gap-2">
+        <input type="search" aria-label="Find a list" placeholder="Find a list" value={find} onChange={(e) => setFind(e.target.value)} />
+        <div className="flex max-h-48 flex-col gap-1 overflow-y-auto rounded border border-line p-2">
+          {lists.data.length === 0 && picked.length === 0 && (
+            <span className="text-sm text-body">
+              There are no IP lists yet. Add one in{' '}
+              <Link to="/ip-lists" className="font-medium text-heading underline">
+                IP lists
+              </Link>
+              .
+            </span>
+          )}
+          {lists.data.length + picked.length > 0 && options.length === 0 && <span className="text-sm text-body">No list matches.</span>}
+          {options.map((o) => (
+            <label key={o.name} className="inline-flex min-w-0 items-center gap-2 break-all text-sm text-heading">
+              <input
+                type={op.list ? 'checkbox' : 'radio'}
+                name={`${mode}-pick`}
+                checked={picked.includes(o.name)}
+                onChange={(e) => props.handleOnChange(op.list ? (e.target.checked ? [...picked, o.name] : picked.filter((n) => n !== o.name)) : o.name)}
+              />
+              {o.name} ({o.state})
+            </label>
+          ))}
+        </div>
+      </div>
+    );
   }
   const hint = text && <span className="order-last basis-full text-sm text-body">{text}</span>;
   if (op.list) {
     const items = Array.isArray(props.value) ? (props.value as string[]) : [];
     return (
       <>
-      <textarea
+      {picker ?? <textarea
         aria-label="Values"
         rows={Math.max(2, items.length)}
         // An IP list also takes ranges; a single IP value does not.
         placeholder={`One per line, such as\n${props.field === 'ip.src' ? '203.0.113.0/24\n198.51.100.7' : (valueExample[props.field] ?? 'value')}`}
         value={items.join('\n')}
         onChange={(e) => props.handleOnChange(e.target.value === '' ? [] : e.target.value.split('\n'))}
-      />
+      />}
       {hint}
       </>
     );
@@ -142,17 +180,11 @@ function ValueEditor(props: ValueEditorProps) {
   const example = wildcard || valueExample[props.field];
   const input = <input aria-label="Value" placeholder={example && `such as ${example}`} value={typeof props.value === 'string' ? props.value : ''} onChange={(e) => props.handleOnChange(e.target.value)} />;
   const how = wildcardHow[props.operator];
-  if (hint) return (
-    <>
-      {input}
-      {hint}
-    </>
-  );
-  if (!how) return input;
   return (
     <>
-      {input}
-      <span className="order-last basis-full text-sm text-body">{how}</span>
+      {picker ?? input}
+      {hint}
+      {!hint && how && <span className="order-last basis-full text-sm text-body">{how}</span>}
     </>
   );
 }

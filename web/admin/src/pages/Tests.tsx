@@ -1,14 +1,15 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { type ReactNode, useState } from 'react';
-import { api, type Issue, type Json, type JsonObject, Problem, type Schema, type TestResult } from '../api';
+import { api, type Issue, type Json, type JsonObject, Problem, type Schema, type TestResult, useCan } from '../api';
 import { useDraft } from '../draft';
 import { Choice, Count, Errors, Labeled, say, setField } from '../RuleForms';
 import { Badge, Button, Card, Check, ErrorBox, type Field, Hint, JsonEditor, Page, Reference } from '../ui';
+import { ipListsQuery } from './IPLists';
 import { useVersions } from './Publish';
 
 const testFields: Field[] = [
   ['name', 'What the test checks, shown in results.'],
-  ['request', 'The request to send. Same fields as Simulate above: method, host, path, ip, headers, country, asn, ssl, http_version, ja4, ja3, verified_bot, jwt_claims.'],
+  ['request', 'The request to send. Same fields as Simulate above: method, host, path, ip, headers, country, asn, ssl, http_version, ja4, ja3, verified_bot, ip_lists, jwt_claims.'],
   ['expect.rejected', 'The check that stops the request, such as auth or rate_limit_key.'],
   ['expect.preflight', 'true when the edge answers it as a CORS preflight.'],
   ['expect.config_rules, rate_limit_rules', 'Exactly the IDs of the rules that match, in order. [] means none.'],
@@ -20,6 +21,7 @@ const testFields: Field[] = [
 interface Sim {
   rejected?: string;
   allowlist?: string;
+  allow_rule?: string;
   config_rules: string[];
   rate_limit_rules: string[];
   rate_limit_capped: boolean;
@@ -85,6 +87,12 @@ function RequestForm({ value, onChange, methods, issues }: { value: JsonObject; 
     </Labeled>
   );
   const token = value.jwt_claims !== undefined;
+  // The simulator does not look the IP up in the lists, so the lists a rule
+  // names are offered here: without them an always-allow rule can't be tried.
+  const canRead = useCan()('stats.read');
+  const lists = useQuery({ ...ipListsQuery, enabled: canRead });
+  const named = (lists.data ?? []).filter((l) => l.used_by.length > 0).map((l) => l.name);
+  const on = Array.isArray(value.ip_lists) ? (value.ip_lists as string[]) : [];
   return (
     <div className="flex flex-col gap-4">
       <Labeled label="Method" issues={at('method')}>
@@ -102,6 +110,24 @@ function RequestForm({ value, onChange, methods, issues }: { value: JsonObject; 
       {text('ja4', 'JA4 fingerprint', 'The TLS fingerprint the CDN reports. With an HTTPS source configured, applies only with Sent over HTTPS checked. Leave empty for unknown.', 't13d1516h2_8daaf6152771_02713d6af862')}
       {text('ja3', 'JA3 fingerprint', 'The older TLS fingerprint, 32 hex characters. With an HTTPS source configured, applies only with Sent over HTTPS checked. Leave empty for unknown.')}
       <Check label="From a verified crawler" checked={value.verified_bot === true} onChange={(e) => set('verified_bot', e.target.checked || undefined)} />
+      {named.length > 0 && (
+        <fieldset className="flex flex-col gap-1 text-sm">
+          <legend className="font-medium text-heading">On IP lists</legend>
+          {named.map((n) => (
+            <Check
+              key={n}
+              label={n}
+              checked={on.includes(n)}
+              onChange={(e) => {
+                const next = e.target.checked ? [...on, n] : on.filter((x) => x !== n);
+                set('ip_lists', next.length ? next : undefined);
+              }}
+            />
+          ))}
+          <Hint>The lists rules name. The client IP is not looked up in them.</Hint>
+          <Errors issues={at('ip_lists')} />
+        </fieldset>
+      )}
       <Pairs label="Headers" noun="Header" value={value.headers} onChange={(h) => set('headers', h)} hint="Headers the client sends." example={['user-agent', 'curl/8.7.1']} />
       <div className="flex flex-col gap-2">
         <Check label="Has a token that verified" checked={token} onChange={(e) => set('jwt_claims', e.target.checked ? { sub: 'user-123' } : undefined)} />
@@ -126,6 +152,7 @@ function RequestForm({ value, onChange, methods, issues }: { value: JsonObject; 
 function SimResult({ r }: { r: Sim }) {
   const s = r.settings;
   const headers = r.upstream_headers && Object.entries(r.upstream_headers);
+  const trusted = r.allowlist || r.allow_rule;
   return (
     <div className="mt-3 flex flex-col gap-3 text-sm">
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
@@ -145,18 +172,24 @@ function SimResult({ r }: { r: Sim }) {
             <dd>Yes, matches {r.allowlist} on the allowlist</dd>
           </>
         )}
+        {r.allow_rule && (
+          <>
+            <dt className="text-body">Always allow</dt>
+            <dd>Yes, rule {r.allow_rule}</dd>
+          </>
+        )}
         <dt className="text-body">Access rules</dt>
         <dd className="font-mono">{ids(r.config_rules)}</dd>
         <dt className="text-body">Rate limit rules</dt>
-        <dd className={r.allowlist ? undefined : 'font-mono'}>
-          {r.allowlist ? 'Skipped, trusted client' : ids(r.rate_limit_rules)}
+        <dd className={trusted ? undefined : 'font-mono'}>
+          {trusted ? 'Skipped, trusted client' : ids(r.rate_limit_rules)}
           {r.rate_limit_capped && <span className="font-sans text-warning"> (more rules matched than the edge counts per request; the rest were skipped)</span>}
         </dd>
         <dt className="text-body">Auth</dt>
         <dd>
           {say[s.auth_mode] ?? s.auth_mode}
           {s.auth_mode !== 'none' && `, from ${ids(s.accepted)}`}
-          {r.allowlist && s.auth_mode === 'optional' && ' (a trusted client needs no token)'}
+          {trusted && s.auth_mode === 'optional' && ' (a trusted client needs no token)'}
         </dd>
         <dt className="text-body">Upstream timeout</dt>
         <dd>{s.upstream_timeout}</dd>

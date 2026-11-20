@@ -72,7 +72,16 @@ type settings struct {
 	blockRule int
 	// allowlist is the client allowlist entry that matched, "" if none.
 	allowlist string
+	// allowRule is the ID of the first matching always-allow rule, "" if none.
+	allowRule string
+	// lifted is the block value an allow cleared, "" if none, so the access
+	// log can name the rule whose block was lifted (blockRule).
+	lifted string
 }
+
+// allowed reports a client that skips blocks, bans, rate-limit rules and a
+// required token: on the allowlist or matched by an always-allow rule.
+func (s *settings) allowed() bool { return s.allowlist != "" || s.allowRule != "" }
 
 // defaults are the settings before any config rule matches. They depend
 // only on the config, so a version builds them once.
@@ -89,9 +98,9 @@ func defaults(c *snapshot.Compiled) settings {
 // resolve runs the config phase: s holds the defaults, then every matching
 // rule applies in order, a later rule overwriting what an earlier one set.
 // matched receives the indexes of matching rules. A client on the allowlist
-// ends up with no block and no required token (a token it sends is still
-// verified), and serve and Simulate both skip its rate limits, so one place
-// decides what trusted means.
+// or matched by an always-allow rule ends up with no block and no required
+// token (a token it sends is still verified), and serve and Simulate both
+// skip its rate limits, so one place decides what trusted means.
 func resolve(c *snapshot.Compiled, s settings, req expr.Request, ip netip.Addr, matched []int) (settings, []int) {
 	cfg := c.Config
 	for i, m := range c.ConfigRules {
@@ -127,6 +136,9 @@ func resolve(c *snapshot.Compiled, s settings, req expr.Request, ip netip.Addr, 
 		if r.Block != nil {
 			s.block, s.blockRule = *r.Block, i
 		}
+		if r.Allow && s.allowRule == "" {
+			s.allowRule = cfg.ConfigRules[i].ID
+		}
 	}
 	if cfg.KillSwitch.Auth {
 		s.authMode = "none"
@@ -135,9 +147,10 @@ func resolve(c *snapshot.Compiled, s settings, req expr.Request, ip netip.Addr, 
 	if cfg.KillSwitch.Block && s.block == "block" {
 		s.block = "log"
 	}
-	if s.allowlist = c.AllowedClient(ip); s.allowlist != "" {
+	s.allowlist = c.AllowedClient(ip)
+	if s.allowed() {
 		// Step 8 is skipped, so no RateLimit headers are sent either.
-		s.block, s.rateLimitHeaders = "", false
+		s.lifted, s.block, s.rateLimitHeaders = s.block, "", false
 		if s.authMode == "required" {
 			s.authMode = "optional"
 		}
@@ -335,7 +348,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	}
 	// Allowlist and kill switch override bans as they override block. A
 	// version without ban rules skips the shard lookup.
-	if len(st.ver.banRules) > 0 && st.set.allowlist == "" && !st.ver.c.Config.KillSwitch.Block {
+	if len(st.ver.banRules) > 0 && !st.set.allowed() && !st.ver.c.Config.KillSwitch.Block {
 		if b, ok := e.bans.Get(cl.ip, st.start.UnixMilli()); ok && st.ver.banRules[b.Rule] {
 			st.ban = b
 			e.m.banHits.Add(1)
@@ -362,7 +375,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 
 	// Step 8: shared rate limits, one Valkey round trip at most. A trusted
 	// client uses no quota and no Valkey call.
-	if st.set.allowlist == "" && !e.rateLimit(st) {
+	if !st.set.allowed() && !e.rateLimit(st) {
 		return
 	}
 
@@ -561,6 +574,9 @@ func (e *Edge) finish(st *reqState, r *http.Request) {
 		}
 		if st.resolved && st.set.block != "" {
 			st.ver.stats.block(st.set.blockRule, st.reason == reasonBlocked)
+		}
+		if st.resolved && st.set.lifted != "" {
+			st.ver.stats.lift(st.set.blockRule)
 		}
 	}
 	decision := decisionOf(st)
