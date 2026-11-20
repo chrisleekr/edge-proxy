@@ -234,3 +234,46 @@ func TestLoadConfigRejectsBootstrap(t *testing.T) {
 		})
 	}
 }
+
+// Notification overrides saved under rule_would_block keep applying as
+// rule_logged after admin starts. The rename is a settings change, so it
+// writes one audit row; a restart finds nothing to rename and writes none.
+func TestStartRenamesSavedNotificationSignals(t *testing.T) {
+	e, db := bootstrapEnv(t)
+	ctx := t.Context()
+	owner, err := pgx.Connect(ctx, db.Owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.Close(context.Background()) }() //nolint:usetesting // closed after the test context ends
+	if _, err := owner.Exec(ctx, `INSERT INTO settings (key, value, updated_at) VALUES ('notifications', $1, now())`, `{
+		"signals": {"rule_would_block": {"mode": "notify", "severity": "critical", "min_requests": 7}},
+		"rules": {"login": {"rule_would_block": {"mode": "off"}, "rule_fail_mode": {"mode": "off"}}, "search": {"rule_fail_mode": {"mode": "off"}}}}`); err != nil {
+		t.Fatal(err)
+	}
+	audits := func() int {
+		return count(t, db.Owner, "SELECT count(*) FROM audit_events WHERE action = 'settings.renamed' AND actor = 'system:migrate' AND target = 'notifications' AND details::jsonb = '{\"from\":\"rule_would_block\",\"to\":\"rule_logged\"}'")
+	}
+	for start := range 2 {
+		serveOnce(t, e, func(string) {})
+		n, err := loadNotify(ctx, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := n.Signals["rule_logged"]; got.Mode != "notify" || got.Severity != "critical" || got.MinRequests != 7 {
+			t.Fatalf("start %d: rule_logged default = %+v", start, got)
+		}
+		if got := n.signalFor("login", "rule_logged"); got.Mode != "off" {
+			t.Fatalf("start %d: login override = %+v", start, got)
+		}
+		if got := n.signalFor("login", "rule_fail_mode"); got.Mode != "off" || len(n.Rules["search"]) != 1 {
+			t.Fatalf("start %d: other overrides changed: %+v", start, n.Rules)
+		}
+		if got := count(t, db.Owner, "SELECT count(*) FROM settings WHERE value::text LIKE '%rule_would_block%'"); got != 0 {
+			t.Fatalf("start %d: old name remains", start)
+		}
+		if got := audits(); got != 1 {
+			t.Fatalf("start %d: %d rename audit rows, want 1", start, got)
+		}
+	}
+}

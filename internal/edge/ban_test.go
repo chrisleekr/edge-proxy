@@ -48,11 +48,11 @@ func TestTrapBansTheClientOnEveryHost(t *testing.T) {
 	}
 
 	trap, banned := accessLine(t, h, 0), accessLine(t, h, 1)
-	if trap["edge.decision"] != "blocked" || trap["edge.ban.until"] == nil || trap["edge.ban.rule"] != nil || trap["edge.ban.dropped"] != nil {
+	if trap["edge.action"] != "blocked" || trap["edge.decided_by"] != "trap" || trap["edge.ban.until"] == nil || trap["edge.ban.rule"] != nil || trap["edge.ban.dropped"] != nil {
 		t.Fatalf("trap line: %v", trap)
 	}
 	until, since := trap["edge.ban.until"], banned["edge.ban.since"]
-	if banned["edge.decision"] != "banned" || banned["edge.ban.rule"] != "trap" || banned["edge.ban.host"] != "a.example.com" || banned["edge.ban.path"] != "/wp-login.php" || banned["edge.ban.until"] != until || since == nil || since == until {
+	if banned["edge.action"] != "banned" || banned["edge.decided_by"] != "trap" || banned["edge.ban.rule"] != "trap" || banned["edge.ban.host"] != "a.example.com" || banned["edge.ban.path"] != "/wp-login.php" || banned["edge.ban.until"] != until || since == nil || since == until {
 		t.Fatalf("banned line: %v", banned)
 	}
 	if got := banned["url.path"]; got != "/v1/items" {
@@ -237,7 +237,7 @@ func TestShorterBanDoesNotCutALongerOne(t *testing.T) {
 	edgeError(t, h.do("GET", "/xmlrpc.php", nil), 403, "forbidden")
 	clock.Store(now.Add(2 * time.Minute).UnixMilli())
 	edgeError(t, h.do("GET", "/", nil), 403, "forbidden")
-	if line := accessLine(t, h, 2); line["edge.decision"] != "banned" || line["edge.ban.rule"] != "day" || line["edge.ban.path"] != "/wp-login.php" {
+	if line := accessLine(t, h, 2); line["edge.action"] != "banned" || line["edge.ban.rule"] != "day" || line["edge.ban.path"] != "/wp-login.php" {
 		t.Fatalf("banned line: %v", line)
 	}
 }

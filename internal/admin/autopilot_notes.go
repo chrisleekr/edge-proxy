@@ -1123,7 +1123,7 @@ func (s *Server) openAblations(ctx context.Context, tx pgx.Tx) error {
 
 // rising reports whether a scope's volume over the 4 hours before hour
 // rose every hour, to at least twice the first and 1,000: requests for the
-// fleet and routes, limited and would-limit requests for a rule.
+// fleet and routes, limited and logged requests for a rule.
 func (s *Server) rising(ctx context.Context, q querier, sc noteScope, hour time.Time) (bool, error) {
 	var rows pgx.Rows
 	var err error
@@ -1134,7 +1134,7 @@ func (s *Server) rising(ctx context.Context, q querier, sc noteScope, hour time.
 			GROUP BY i ORDER BY i DESC`, hour, sc.Host, sc.Method, sc.Template)
 	} else {
 		rows, err = q.Query(ctx, `SELECT coalesce(sum(CASE WHEN $2 = '' THEN m.requests
-				ELSE coalesce((e->>'limited')::bigint, 0) + coalesce((e->>'would_limit')::bigint, 0) END), 0)::bigint
+				ELSE coalesce((e->>'limited')::bigint, 0) + coalesce((e->>'logged')::bigint, 0) END), 0)::bigint
 			FROM generate_series(1, 4) i
 			LEFT JOIN edge_stats_minute m ON m.minute >= $1::timestamptz - i * interval '1 hour' AND m.minute < $1::timestamptz - (i - 1) * interval '1 hour'
 			LEFT JOIN LATERAL (SELECT x FROM jsonb_array_elements(m.rate_limit) x WHERE x->>'id' = $2 LIMIT 1) r(e) ON true

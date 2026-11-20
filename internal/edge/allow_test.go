@@ -34,11 +34,17 @@ func TestAlwaysAllowBeatsBlocksWhateverTheRuleOrder(t *testing.T) {
 	edgeError(t, h.do("GET", "/", nil, "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", otherClient), 403, "forbidden")
 
 	office, other := accessLine(t, h, 0), accessLine(t, h, 1)
-	if office["edge.decision"] != "allow" || office["edge.allowlist"] != nil || fmt.Sprint(office["edge.config_rules"]) != "[tools-early office tools-late]" {
+	if office["edge.action"] != "allow" || office["edge.decided_by"] != "office" || office["edge.allowlist"] != nil {
 		t.Fatalf("office line: %v", office)
 	}
-	if other["edge.decision"] != "blocked" || fmt.Sprint(other["edge.config_rules"]) != "[tools-early tools-late]" {
+	if other["edge.action"] != "blocked" || other["edge.decided_by"] != "tools-late" {
 		t.Fatalf("other client's line: %v", other)
+	}
+	if got, want := ruleResults(other), "tools-early=overridden tools-late=blocked"; got != want {
+		t.Fatalf("other client's matched rules: %s, want %s", got, want)
+	}
+	if got, want := ruleResults(office), "tools-early=overridden office=allowed tools-late=overridden"; got != want {
+		t.Fatalf("office client's matched rules: %s, want %s", got, want)
 	}
 	m := h.metrics()
 	if m[`edge_rejected_total{reason="blocked"}`] != 1 || m["edge_allowlisted_total"] != 0 {
@@ -46,10 +52,9 @@ func TestAlwaysAllowBeatsBlocksWhateverTheRuleOrder(t *testing.T) {
 	}
 }
 
-// The access line lists the config rules that matched, also when the winning
-// block only logs, and for an allowlisted client the rule whose block it was
-// spared.
-func TestAccessLineListsTheMatchedRules(t *testing.T) {
+// The access line shows the rule whose block won, also when it only logs, and
+// the one an allowlisted client was spared.
+func TestAccessLineNamesTheDecidingBlockRule(t *testing.T) {
 	t.Run("a log-only rule that wins the merge is logged", func(t *testing.T) {
 		h := newHarness(t, map[string]string{"LOG_SAMPLE_RATE": "1"})
 		c := allowConfig(1)
@@ -57,7 +62,7 @@ func TestAccessLineListsTheMatchedRules(t *testing.T) {
 		h.load(envelope(c))
 		readBody(t, h.do("GET", "/", nil, "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", otherClient))
 		line := accessLine(t, h, 0)
-		if line["edge.decision"] != "would_block" || fmt.Sprint(line["edge.config_rules"]) != "[tools-early tools-late]" {
+		if got, want := ruleResults(line), "tools-early=overridden tools-late=logged"; line["edge.action"] != "allow" || line["edge.decided_by"] != nil || got != want || fmt.Sprint(line["edge.logged_rules"]) != "[tools-late]" {
 			t.Fatalf("line: %v", line)
 		}
 	})
@@ -66,16 +71,25 @@ func TestAccessLineListsTheMatchedRules(t *testing.T) {
 		h.load(envelope(allowlistConfig(1, trustedRange)))
 		readBody(t, h.do("GET", "/", nil, "User-Agent", "curl/8.5.0"))
 		line := accessLine(t, h, 0)
-		if line["edge.decision"] != "allow" || line["edge.allowlist"] != trustedRange || fmt.Sprint(line["edge.config_rules"]) != "[tools]" {
+		if got, want := ruleResults(line), "tools=overridden"; line["edge.action"] != "allow" || line["edge.allowlist"] != trustedRange || got != want || line["edge.decided_by"] != nil {
 			t.Fatalf("line: %v", line)
 		}
 	})
-	t.Run("an allow rule alone lists only itself", func(t *testing.T) {
+	t.Run("a request no block rule matched has no deciding rule and no matched rules", func(t *testing.T) {
+		h := newHarness(t, map[string]string{"LOG_SAMPLE_RATE": "1"})
+		h.load(envelope(allowConfig(1)))
+		readBody(t, h.do("GET", "/", nil, "CloudFront-Viewer-Address", otherClient))
+		line := accessLine(t, h, 0)
+		if line["edge.decided_by"] != nil || line["edge.matched_rules"] != nil {
+			t.Fatalf("line: %v", line)
+		}
+	})
+	t.Run("an allow rule alone decides and lists only itself", func(t *testing.T) {
 		h := newHarness(t, map[string]string{"LOG_SAMPLE_RATE": "1"})
 		h.load(envelope(allowConfig(1)))
 		readBody(t, h.do("GET", "/", nil))
 		line := accessLine(t, h, 0)
-		if line["edge.decision"] != "allow" || fmt.Sprint(line["edge.config_rules"]) != "[office]" {
+		if got, want := ruleResults(line), "office=allowed"; line["edge.decided_by"] != "office" || got != want {
 			t.Fatalf("line: %v", line)
 		}
 	})
@@ -93,7 +107,7 @@ func TestALiftedBlockIsAlwaysLogged(t *testing.T) {
 	readBody(t, h.do("GET", "/", nil))
 	readBody(t, h.do("GET", "/", nil, "User-Agent", "curl/8.5.0"))
 	line := accessLine(t, h, 0)
-	if line["edge.decision"] != "allow" || fmt.Sprint(line["edge.config_rules"]) != "[tools-early office tools-late]" || line["edge.sample_rate"] != nil {
+	if got, want := ruleResults(line), "tools-early=overridden office=allowed tools-late=overridden"; line["edge.decided_by"] != "office" || got != want || line["edge.sample_rate"] != nil {
 		t.Fatalf("line: %v", line)
 	}
 	if n := len(h.logs.lines("access")); n != 1 {

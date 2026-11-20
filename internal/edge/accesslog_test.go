@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestAccessLog(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	lines := h.logs.lines("access")
-	if len(lines) != 1 || lines[0]["edge.decision"] != "path" || lines[0]["http.response.status_code"] != 400.0 || lines[0]["client.address"] != "198.51.100.7" {
+	if len(lines) != 1 || lines[0]["edge.action"] != "path" || lines[0]["http.response.status_code"] != 400.0 || lines[0]["client.address"] != "198.51.100.7" {
 		t.Fatalf("access lines = %v", lines)
 	}
 	if strings.Contains(h.logs.String(), "secret") {
@@ -50,10 +51,10 @@ func TestAccessLogSampleRate(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	lines := h.logs.lines("access")
-	if len(lines) != 2 || lines[0]["edge.decision"] != "allow" || lines[0]["edge.sample_rate"] != 0.25 {
+	if len(lines) != 2 || lines[0]["edge.action"] != "allow" || lines[0]["edge.sample_rate"] != 0.25 {
 		t.Fatalf("access lines = %v", lines)
 	}
-	if _, ok := lines[1]["edge.sample_rate"]; ok || lines[1]["edge.decision"] != "path" {
+	if _, ok := lines[1]["edge.sample_rate"]; ok || lines[1]["edge.action"] != "path" {
 		t.Fatalf("rejection line = %v", lines[1])
 	}
 }
@@ -172,7 +173,7 @@ func TestAccessLogCutsALongUserAgent(t *testing.T) {
 	}
 }
 
-// An access line says whether the upstream answered, which the decision
+// An access line says whether the upstream answered, which the action
 // alone can't: a CORS preflight the edge answers itself is allowed too.
 func TestAccessLogSaysWhetherTheUpstreamAnswered(t *testing.T) {
 	h := newHarness(t, nil)
@@ -180,7 +181,7 @@ func TestAccessLogSaysWhetherTheUpstreamAnswered(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, path string
 		headers            []string
-		decision           string
+		action             string
 		answered           bool
 	}{
 		{"a proxied request was answered by the upstream", "GET", "/v1/ok", nil, "allow", true},
@@ -192,8 +193,8 @@ func TestAccessLogSaysWhetherTheUpstreamAnswered(t *testing.T) {
 			h.do(tc.method, tc.path, nil, tc.headers...).Body.Close()
 			waitFor(t, func() bool { return len(h.logs.lines("access")) == before+1 })
 			line := h.logs.lines("access")[before]
-			if line["edge.decision"] != tc.decision || line["edge.upstream_answered"] != tc.answered {
-				t.Fatalf("access line %v, want decision %s and upstream_answered %v", line, tc.decision, tc.answered)
+			if line["edge.action"] != tc.action || line["edge.upstream_answered"] != tc.answered {
+				t.Fatalf("access line %v, want action %s and upstream_answered %v", line, tc.action, tc.answered)
 			}
 		})
 	}
@@ -206,11 +207,11 @@ func (h *harness) accessLines(n int) []map[string]any {
 	return h.logs.lines("access")
 }
 
-// A log-only rate-limit rule over its limit is written as would_limit and
-// names the rule, even when allowed requests are not logged at all. The
+// A log-only rate-limit rule over its limit is written with a logged entry
+// and in logged_rules, even when allowed requests are not logged at all. The
 // request is still forwarded. A count rule over its limit does the same
 // once the response has counted.
-func TestAccessLogWouldLimit(t *testing.T) {
+func TestAccessLogLogged(t *testing.T) {
 	h := newHarness(t, map[string]string{"LOG_SAMPLE_RATE": "0"})
 	c := testConfig(1)
 	logOnly := rlRule("login-watch", `http.request.uri.path eq "/login"`, "sliding_window", 1, "ip")
@@ -235,7 +236,7 @@ func TestAccessLogWouldLimit(t *testing.T) {
 			}
 			lines := h.accessLines(before + 1)
 			line := lines[before]
-			if len(lines) != before+1 || line["edge.decision"] != "would_limit" || line["edge.rate_limit_rule"] != tc.rule || fmt.Sprint(line["edge.rate_limit_rules"]) != "["+tc.rule+"]" {
+			if len(lines) != before+1 || line["edge.action"] != "allow" || line["edge.decided_by"] != nil || ruleResults(line) != tc.rule+"=logged" || fmt.Sprint(line["edge.logged_rules"]) != "["+tc.rule+"]" {
 				t.Fatalf("access lines = %v", lines[before:])
 			}
 			if _, ok := line["edge.sample_rate"]; ok {
@@ -246,7 +247,7 @@ func TestAccessLogWouldLimit(t *testing.T) {
 }
 
 // Every rate-limit rule the request matched is listed in evaluation order, and
-// a 429 line still names the rule that answered it.
+// a 429 line names the rule that answered it as decided_by.
 func TestAccessLogListsMatchedRateLimitRules(t *testing.T) {
 	h := newHarness(t, nil)
 	c := testConfig(1)
@@ -258,13 +259,13 @@ func TestAccessLogListsMatchedRateLimitRules(t *testing.T) {
 	h.statuses(1, "GET", "/other")
 	h.statuses(2, "GET", "/login")
 	lines := h.accessLines(3)
-	for i, want := range []struct{ rules, answered string }{{"[everyone]", ""}, {"[everyone login-cap]", ""}, {"[everyone login-cap]", "login-cap"}} {
-		got, _ := lines[i]["edge.rate_limit_rule"].(string)
-		if fmt.Sprint(lines[i]["edge.rate_limit_rules"]) != want.rules || got != want.answered {
-			t.Fatalf("line %d: rules %v, answered %q, want %s and %q", i, lines[i]["edge.rate_limit_rules"], got, want.rules, want.answered)
+	for i, want := range []struct{ rules, answered string }{{"everyone=under", ""}, {"everyone=under login-cap=under", ""}, {"everyone=under login-cap=blocked", "login-cap"}} {
+		got, _ := lines[i]["edge.decided_by"].(string)
+		if ruleResults(lines[i]) != want.rules || got != want.answered {
+			t.Fatalf("line %d: rules %s, answered %q, want %s and %q", i, ruleResults(lines[i]), got, want.rules, want.answered)
 		}
 	}
-	if lines[2]["edge.decision"] != "rate_limited" {
+	if lines[2]["edge.action"] != "rate_limited" {
 		t.Fatalf("third line = %v", lines[2])
 	}
 }
@@ -419,12 +420,12 @@ func TestAccessLogBodySizes(t *testing.T) {
 	})
 }
 
-// An access rule in log mode keeps its would_block decision when a log-only
-// rate-limit rule is over its limit too, and a rejection outranks both.
-func TestAccessLogWouldBlockOutranksWouldLimit(t *testing.T) {
-	for _, tc := range []struct{ name, path, decision, rule string }{
-		{"a log-only access rule matched too", "/both", "would_block", ""},
-		{"a blocking rate-limit rule is over its limit too", "/hard", "rate_limited", "hard"},
+// An access rule in log mode and a log-only rate-limit rule over its limit
+// are both listed as logged, and a refusal by another rule is the action.
+func TestAccessLogListsEveryLoggedRule(t *testing.T) {
+	for _, tc := range []struct{ name, path, action, rule, results, logged string }{
+		{"a log-only access rule matched too", "/both", "allow", "", "tools=logged watch=logged", "[tools watch]"},
+		{"a blocking rate-limit rule is over its limit too", "/hard", "rate_limited", "hard", "watch=logged hard=blocked", "[watch]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, nil)
@@ -439,8 +440,8 @@ func TestAccessLogWouldBlockOutranksWouldLimit(t *testing.T) {
 			// The second request is over the log-only rule's limit of 1 per client.
 			h.statuses(2, "GET", tc.path)
 			line := h.accessLines(2)[1]
-			if got, _ := line["edge.rate_limit_rule"].(string); line["edge.decision"] != tc.decision || got != tc.rule {
-				t.Fatalf("decision %v, rule %q", line["edge.decision"], got)
+			if got, _ := line["edge.decided_by"].(string); line["edge.action"] != tc.action || got != tc.rule || ruleResults(line) != tc.results || fmt.Sprint(line["edge.logged_rules"]) != tc.logged {
+				t.Fatalf("action %v, decided by %q, rules %s, logged %v", line["edge.action"], got, ruleResults(line), line["edge.logged_rules"])
 			}
 		})
 	}
@@ -572,5 +573,204 @@ func TestCDNTorNeedsTheCountrySource(t *testing.T) {
 	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
 	if got := fmt.Sprint(h.logs.lines("access")[0]["client.signals"]); got != "[crawler_impersonated]" {
 		t.Fatalf("client.signals = %s, want [crawler_impersonated]", got)
+	}
+}
+
+// ruleResults lists a line's matched_rules as "rule=result", in order.
+func ruleResults(line map[string]any) string {
+	var out []string
+	entries, _ := line["edge.matched_rules"].([]any)
+	for _, e := range entries {
+		m := e.(map[string]any)
+		out = append(out, fmt.Sprintf("%v=%v", m["rule"], m["result"]))
+	}
+	return strings.Join(out, " ")
+}
+
+// ruleNumbers lists the numbers on a line's rate-limit entries: left as a
+// value, retry_after and blocked_until (which move with the clock) only as
+// present.
+func ruleNumbers(line map[string]any) string {
+	var out []string
+	entries, _ := line["edge.matched_rules"].([]any)
+	for _, e := range entries {
+		m := e.(map[string]any)
+		if m["type"] != "rate_limit" {
+			continue
+		}
+		s := fmt.Sprint(m["rule"])
+		if v, ok := m["left"]; ok {
+			s += fmt.Sprintf(" left=%v", v)
+		}
+		if _, ok := m["retry_after"]; ok {
+			s += " retry_after"
+		}
+		if _, ok := m["blocked_until"]; ok {
+			s += " blocked_until"
+		}
+		out = append(out, s)
+	}
+	return strings.Join(out, ", ")
+}
+
+// Each access line says what the edge did, which rule decided it and what
+// every matched rule did. There is no Valkey here, so a rule that does not
+// fail local has no count.
+func TestAccessLogMatchedRules(t *testing.T) {
+	const curl = "curl/8.7.1"
+	type send struct {
+		path    string
+		headers []string
+		home    bool // from the office range, where the default client is
+	}
+	req := func(path string, headers ...string) send { return send{path: path, headers: headers} }
+	local := func(id, src string, limit int64) snapshot.RateLimitRule {
+		r := rlRule(id, src, "sliding_window", limit, "ip")
+		r.FailMode = "local"
+		return r
+	}
+	count404 := func(id string, limit int64) snapshot.RateLimitRule {
+		r := local(id, "true", limit)
+		r.CountStatuses = []string{"404"}
+		return r
+	}
+	with := func(r snapshot.RateLimitRule, f func(*snapshot.RateLimitRule)) snapshot.RateLimitRule {
+		f(&r)
+		return r
+	}
+	logOnly := func(r *snapshot.RateLimitRule) { r.Action = "log" }
+	penalty := func(r *snapshot.RateLimitRule) { r.Penalty = dur(5 * time.Minute) }
+	failClosed := func(r *snapshot.RateLimitRule) { r.FailMode = "closed" }
+	access := func(id, src string, s snapshot.Settings) snapshot.ConfigRule {
+		return snapshot.ConfigRule{ID: id, Expression: mustParse(src), Settings: s}
+	}
+	blockCurl := access("block-curl", `http.user_agent contains "curl"`, snapshot.Settings{Block: new("block")})
+	blockProbe := access("block-probe", `starts_with(http.request.uri.path, "/.")`, snapshot.Settings{Block: new("block")})
+	home := access("allow-home", "ip.src in {"+trustedRange+"}", snapshot.Settings{Allow: true})
+	tools := access("unblock-tools", `http.user_agent contains "Tool"`, snapshot.Settings{Block: new("log")})
+	notFound := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	perIP := func() snapshot.RateLimitRule { return local("per-ip", "true", 100) }
+	for _, tc := range []struct {
+		name    string
+		access  []snapshot.ConfigRule
+		limits  []snapshot.RateLimitRule
+		headers []snapshot.HeaderRule
+		kill    snapshot.KillSwitch
+		// appHandler answers upstream requests; appDown closes the upstream.
+		appHandler http.HandlerFunc
+		appDown    bool
+		sends      []send
+		// The last line's action, deciding rule, rules, numbers and logged_rules.
+		action, by, rules, numbers, logged string
+	}{
+		{name: "a page the 4xx rule did not count", limits: []snapshot.RateLimitRule{perIP(), count404("four-xx", 20)},
+			sends: []send{req("/")}, action: "allow", rules: "per-ip=under four-xx=not_counted", numbers: "per-ip left=99, four-xx"},
+		{name: "a 404 the 4xx rule counted", limits: []snapshot.RateLimitRule{perIP(), count404("four-xx", 20)}, appHandler: notFound,
+			sends: []send{req("/")}, action: "allow", rules: "per-ip=under four-xx=under", numbers: "per-ip left=99, four-xx left=19"},
+		{name: "a request over its limit is refused with a penalty", limits: []snapshot.RateLimitRule{with(local("per-ip", "true", 1), penalty), count404("four-xx", 20)},
+			sends: []send{req("/"), req("/")}, action: "rate_limited", by: "per-ip", rules: "per-ip=blocked four-xx=not_counted", numbers: "per-ip left=0 retry_after blocked_until, four-xx"},
+		{name: "a client whose penalty is running is refused by the rule that set it", limits: []snapshot.RateLimitRule{with(local("per-ip", "true", 1), penalty)},
+			sends: []send{req("/"), req("/"), req("/")}, action: "rate_limited", by: "per-ip", rules: "per-ip=blocked", numbers: "per-ip left=0 retry_after blocked_until"},
+		{name: "the response that takes a count rule over its limit is allowed", limits: []snapshot.RateLimitRule{with(count404("four-xx", 1), penalty)}, appHandler: notFound,
+			sends: []send{req("/"), req("/")}, action: "allow", rules: "four-xx=over", numbers: "four-xx left=0 blocked_until"},
+		{name: "a blocked request lists only the access rules", access: []snapshot.ConfigRule{blockCurl}, limits: []snapshot.RateLimitRule{perIP()},
+			sends: []send{req("/", "User-Agent", curl)}, action: "blocked", by: "block-curl", rules: "block-curl=blocked"},
+		{name: "the later block rule wins and the earlier one is overridden", access: []snapshot.ConfigRule{blockCurl, blockProbe},
+			sends: []send{req("/.env", "User-Agent", curl)}, action: "blocked", by: "block-probe", rules: "block-curl=overridden block-probe=blocked"},
+		{name: "an always-allow rule decides and skips rate limits", access: []snapshot.ConfigRule{blockCurl, home}, limits: []snapshot.RateLimitRule{perIP()},
+			sends: []send{{path: "/", headers: []string{"User-Agent", curl}, home: true}}, action: "allow", by: "allow-home", rules: "block-curl=overridden allow-home=allowed"},
+		{name: "a log-only rule after a block logs and the block is overridden", access: []snapshot.ConfigRule{blockCurl, tools}, limits: []snapshot.RateLimitRule{perIP()},
+			sends: []send{req("/", "User-Agent", curl+" Tool")}, action: "allow", rules: "block-curl=overridden unblock-tools=logged per-ip=under", numbers: "per-ip left=99", logged: "[unblock-tools]"},
+		{name: "a log-only rule logs a request nothing else would block", access: []snapshot.ConfigRule{blockCurl, tools},
+			sends: []send{req("/", "User-Agent", "Tool/1")}, action: "allow", rules: "unblock-tools=logged", logged: "[unblock-tools]"},
+		{name: "a block rule after a log-only rule blocks and the log-only one is overridden", access: []snapshot.ConfigRule{blockCurl, tools, blockProbe},
+			sends: []send{req("/.git/config", "User-Agent", curl+" Tool")}, action: "blocked", by: "block-probe", rules: "block-curl=overridden unblock-tools=overridden block-probe=blocked"},
+		{name: "a log-only rate limit over its limit is listed as logged", limits: []snapshot.RateLimitRule{perIP(), with(local("search", "true", 1), logOnly)},
+			sends: []send{req("/"), req("/")}, action: "allow", rules: "per-ip=under search=logged", numbers: "per-ip left=98, search left=0 retry_after", logged: "[search]"},
+		{name: "a log-only access rule and a 429 are both listed", access: []snapshot.ConfigRule{tools}, limits: []snapshot.RateLimitRule{with(local("per-ip", "true", 1), penalty)},
+			sends: []send{req("/", "User-Agent", "Tool/1"), req("/", "User-Agent", "Tool/1")}, action: "rate_limited", by: "per-ip", rules: "unblock-tools=logged per-ip=blocked", numbers: "per-ip left=0 retry_after blocked_until", logged: "[unblock-tools]"},
+		{name: "the block kill switch turns the winning block into logged", access: []snapshot.ConfigRule{blockCurl}, limits: []snapshot.RateLimitRule{perIP()}, kill: snapshot.KillSwitch{Block: true},
+			sends: []send{req("/", "User-Agent", curl)}, action: "allow", rules: "block-curl=logged per-ip=under", numbers: "per-ip left=99", logged: "[block-curl]"},
+		{name: "the rate-limit kill switch turns a limit into logged", limits: []snapshot.RateLimitRule{local("per-ip", "true", 1)}, kill: snapshot.KillSwitch{RateLimit: true},
+			sends: []send{req("/"), req("/")}, action: "allow", rules: "per-ip=logged", numbers: "per-ip left=0 retry_after", logged: "[per-ip]"},
+		{name: "a rule that fails open has an error and no count", limits: []snapshot.RateLimitRule{rlRule("per-ip", "true", "sliding_window", 100, "ip")},
+			sends: []send{req("/")}, action: "allow", rules: "per-ip=error", numbers: "per-ip"},
+		{name: "a rule that fails closed refuses and names itself", limits: []snapshot.RateLimitRule{with(rlRule("partner-per-key", "true", "sliding_window", 100, "ip"), failClosed)},
+			sends: []send{req("/")}, action: "rate_limit_unavailable", by: "partner-per-key", rules: "partner-per-key=error", numbers: "partner-per-key"},
+		{name: "the first rule that fails closed is the one named", limits: []snapshot.RateLimitRule{
+			with(rlRule("closed-a", "true", "sliding_window", 100, "ip"), failClosed), with(rlRule("closed-b", "true", "sliding_window", 100, "ip"), failClosed)},
+			sends: []send{req("/")}, action: "rate_limit_unavailable", by: "closed-a", rules: "closed-a=error closed-b=error", numbers: "closed-a, closed-b"},
+		{name: "a log-only rule that fails closed refuses nothing", limits: []snapshot.RateLimitRule{with(with(rlRule("watch", "true", "sliding_window", 100, "ip"), failClosed), logOnly)},
+			sends: []send{req("/")}, action: "allow", rules: "watch=error", numbers: "watch"},
+		{name: "a rule that rejects a missing key refuses with 400 and names itself", limits: []snapshot.RateLimitRule{with(rlRule("per-key", "true", "sliding_window", 100, "ip", "header:x-api-key"), func(r *snapshot.RateLimitRule) { r.OnMissingKey = "reject" })},
+			sends: []send{req("/")}, action: "rate_limit_key", by: "per-key"},
+		{name: "a request header rule is listed after the others", limits: []snapshot.RateLimitRule{perIP()}, headers: []snapshot.HeaderRule{marker("add-locale", "true", "X-Locale", "en")},
+			sends: []send{req("/")}, action: "allow", rules: "per-ip=under add-locale=matched", numbers: "per-ip left=99"},
+		{name: "an upstream failure lists the rules and decides nothing", limits: []snapshot.RateLimitRule{perIP(), count404("four-xx", 20)}, headers: []snapshot.HeaderRule{marker("add-locale", "true", "X-Locale", "en")}, appDown: true,
+			sends: []send{req("/")}, action: "upstream_error", rules: "per-ip=under four-xx=not_counted add-locale=matched", numbers: "per-ip left=99, four-xx"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, map[string]string{"LOG_SAMPLE_RATE": "1"})
+			c := testConfig(1)
+			c.ConfigRules = append(c.ConfigRules, tc.access...)
+			c.RateLimitRules, c.RequestHeaderRules, c.KillSwitch = tc.limits, tc.headers, tc.kill
+			h.load(envelope(c))
+			if tc.appHandler != nil {
+				h.appHandler = tc.appHandler
+			}
+			if tc.appDown {
+				h.app.Close()
+			}
+			for _, s := range tc.sends {
+				headers := s.headers
+				if !s.home {
+					headers = append(slices.Clone(headers), "CloudFront-Viewer-Address", otherClient)
+				}
+				h.do("GET", s.path, nil, headers...).Body.Close()
+			}
+			line := h.accessLines(len(tc.sends))[len(tc.sends)-1]
+			if got, _ := line["edge.decided_by"].(string); line["edge.action"] != tc.action || got != tc.by {
+				t.Fatalf("action %v decided by %q, want %s and %q: %v", line["edge.action"], got, tc.action, tc.by, line)
+			}
+			if got := ruleResults(line); got != tc.rules {
+				t.Fatalf("matched_rules %q, want %q", got, tc.rules)
+			}
+			if got := ruleNumbers(line); got != tc.numbers && tc.numbers != "" {
+				t.Fatalf("numbers %q, want %q", got, tc.numbers)
+			}
+			if got := fmt.Sprint(line["edge.logged_rules"]); tc.logged == "" && line["edge.logged_rules"] != nil || tc.logged != "" && got != tc.logged {
+				t.Fatalf("logged_rules %v, want %q", line["edge.logged_rules"], tc.logged)
+			}
+		})
+	}
+}
+
+// A rate-limit rule's numbers come from Valkey when it answers: left counts
+// down, and a request over the limit carries the penalty end.
+func TestAccessLogRateLimitNumbersFromValkey(t *testing.T) {
+	h := valkeyHarness(t, nil)
+	c := testConfig(1)
+	r := rlRule(uniq("per-ip"), "true", "sliding_window", 2, "ip")
+	r.Penalty = dur(5 * time.Minute)
+	c.RateLimitRules = []snapshot.RateLimitRule{r}
+	h.load(envelope(c))
+	h.statuses(3, "GET", "/")
+	lines := h.accessLines(3)
+	for i, want := range []struct{ results, numbers string }{
+		{r.ID + "=under", r.ID + " left=1"},
+		{r.ID + "=under", r.ID + " left=0"},
+		{r.ID + "=blocked", r.ID + " left=0 retry_after blocked_until"},
+	} {
+		if ruleResults(lines[i]) != want.results || ruleNumbers(lines[i]) != want.numbers {
+			t.Fatalf("line %d: %s (%s), want %s (%s)", i, ruleResults(lines[i]), ruleNumbers(lines[i]), want.results, want.numbers)
+		}
+	}
+	if lines[2]["edge.action"] != "rate_limited" || lines[2]["edge.decided_by"] != r.ID {
+		t.Fatalf("third line = %v", lines[2])
+	}
+	entries := lines[2]["edge.matched_rules"].([]any)
+	until, err := time.Parse(time.RFC3339, entries[0].(map[string]any)["blocked_until"].(string))
+	if err != nil || time.Until(until) < 4*time.Minute || time.Until(until) > 6*time.Minute {
+		t.Fatalf("blocked_until %v (%v), want about 5 minutes ahead", entries[0], err)
 	}
 }

@@ -127,7 +127,7 @@ func TestTraceJoinsTrustedCaller(t *testing.T) {
 	span := col.Spans(t, traceID, 1)[0]
 	want := map[string]string{
 		"http.request.method": "GET", "http.response.status_code": "200", "url.path": "/v1/items",
-		"server.address": "api.example.com", "client.address": "198.51.100.7", "edge.decision": "allow",
+		"server.address": "api.example.com", "client.address": "198.51.100.7", "edge.action": "allow",
 		"edge.config_version": "1", "edge.cohort": "active", "request_id": h.lastApp.Header.Get("X-Request-Id"),
 	}
 	for k, v := range want {
@@ -245,7 +245,7 @@ func TestShedRequestHasNoSpan(t *testing.T) {
 	<-done
 	waitFor(t, func() bool { return len(h.logs.lines("access")) == 2 })
 	for _, line := range h.logs.lines("access") {
-		if _, traced := line["trace_id"]; traced == (line["edge.decision"] == "overloaded") {
+		if _, traced := line["trace_id"]; traced == (line["edge.action"] == "overloaded") {
 			t.Fatalf("access line %v", line)
 		}
 	}
@@ -259,8 +259,8 @@ func TestServerSpanOutcome(t *testing.T) {
 		wantStatus           int
 		wantAttrs            map[string]string
 	}{
-		{"upstream 503 is a span error", "GET", "/", 503, "GET", 2, map[string]string{"http.response.status_code": "503", "edge.decision": "allow"}},
-		{"edge-rejected path is the client's error, not the span's", "GET", "/a%5Cb", 200, "GET", 0, map[string]string{"http.response.status_code": "400", "edge.decision": "path"}},
+		{"upstream 503 is a span error", "GET", "/", 503, "GET", 2, map[string]string{"http.response.status_code": "503", "edge.action": "allow"}},
+		{"edge-rejected path is the client's error, not the span's", "GET", "/a%5Cb", 200, "GET", 0, map[string]string{"http.response.status_code": "400", "edge.action": "path"}},
 		{"unknown method doesn't name the span", "FOOBAR", "/", 200, "HTTP", 0, map[string]string{"http.request.method": "_OTHER", "http.request.method_original": "FOOBAR"}},
 		{"long path is cut to the attribute limit", "GET", "/" + strings.Repeat("a", 2000), 200, "GET", 0, map[string]string{"url.path": "/" + strings.Repeat("a", 511)}},
 	}
@@ -442,7 +442,7 @@ func TestTracedRequestAllocations(t *testing.T) {
 	}
 }
 
-// A 429 names the rule that answered it; it is the client's error, not
+// A 429 names the rule that answered it as decided_by; it is the client's error, not
 // the span's.
 func TestRateLimitedSpanNamesTheRule(t *testing.T) {
 	h, col := tracedHarness(t, nil)
@@ -456,7 +456,7 @@ func TestRateLimitedSpanNamesTheRule(t *testing.T) {
 	readBody(t, h.do("GET", "/", nil, "Traceparent", tp))
 	h.flush()
 	span := col.Spans(t, traceID, 1)[0]
-	if span.Attrs["http.response.status_code"] != "429" || span.Attrs["edge.decision"] != "rate_limited" || span.Attrs["edge.rate_limit_rule"] != "per-ip" || span.Status != 0 {
+	if span.Attrs["http.response.status_code"] != "429" || span.Attrs["edge.action"] != "rate_limited" || span.Attrs["edge.decided_by"] != "per-ip" || span.Status != 0 {
 		t.Fatalf("span %+v", span)
 	}
 }

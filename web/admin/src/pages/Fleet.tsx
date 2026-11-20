@@ -211,9 +211,9 @@ export interface Row {
   edge_5xx: number;
   upstream_5xx: number;
   auth_failures: number;
-  rate_limit_rules: { id: string; evaluated: number; limited: number; would_limit: number; failed: number }[] | null;
-  top_limited: { rule: string; key: string; display: string; limited: number; would_limit?: number }[] | null;
-  rules: { phase: string; id: string; matched: number; blocked: number; would_block: number; lifted: number }[] | null;
+  rate_limit_rules: { id: string; evaluated: number; limited: number; logged: number; failed: number }[] | null;
+  top_limited: { rule: string; key: string; display: string; limited: number; logged?: number }[] | null;
+  rules: { phase: string; id: string; matched: number; blocked: number; logged: number; lifted: number }[] | null;
   // Requests by status code, apart by who answered; codes with none are left out.
   status_codes: { edge?: Record<string, number>; upstream?: Record<string, number> };
   // The edge's upstream failures by cause; causes with none are left out.
@@ -618,24 +618,24 @@ export function Stats() {
   const versions = [...new Set(rows.filter((x) => x.requests > 0).map((x) => x.version))];
   const rules = new Map<string, NonNullable<Row['rate_limit_rules']>[number]>();
   const top = new Map<string, NonNullable<Row['top_limited']>[number]>();
-  const blocks = new Map<string, { id: string; matched: number; blocked: number; would_block: number; lifted: number }>();
+  const blocks = new Map<string, { id: string; matched: number; blocked: number; logged: number; lifted: number }>();
   for (const x of rows) {
     // Only access rules with a block setting decide blocks; the rest would be rows of zeros.
     for (const o of x.rules ?? []) {
-      if (o.phase !== 'config' || o.blocked + o.would_block + o.lifted === 0) continue;
-      const t = blocks.get(o.id) ?? { id: o.id, matched: 0, blocked: 0, would_block: 0, lifted: 0 };
-      for (const k of ['matched', 'blocked', 'would_block', 'lifted'] as const) t[k] += o[k];
+      if (o.phase !== 'config' || o.blocked + o.logged + o.lifted === 0) continue;
+      const t = blocks.get(o.id) ?? { id: o.id, matched: 0, blocked: 0, logged: 0, lifted: 0 };
+      for (const k of ['matched', 'blocked', 'logged', 'lifted'] as const) t[k] += o[k];
       blocks.set(o.id, t);
     }
     for (const c of x.rate_limit_rules ?? []) {
-      const t = rules.get(c.id) ?? { id: c.id, evaluated: 0, limited: 0, would_limit: 0, failed: 0 };
-      for (const k of ['evaluated', 'limited', 'would_limit', 'failed'] as const) t[k] += c[k];
+      const t = rules.get(c.id) ?? { id: c.id, evaluated: 0, limited: 0, logged: 0, failed: 0 };
+      for (const k of ['evaluated', 'limited', 'logged', 'failed'] as const) t[k] += c[k];
       rules.set(c.id, t);
     }
     for (const t of x.top_limited ?? []) {
-      const e = top.get(t.rule + t.key) ?? { ...t, limited: 0, would_limit: 0 };
+      const e = top.get(t.rule + t.key) ?? { ...t, limited: 0, logged: 0 };
       e.limited += t.limited;
-      e.would_limit = (e.would_limit ?? 0) + (t.would_limit ?? 0);
+      e.logged = (e.logged ?? 0) + (t.logged ?? 0);
       top.set(t.rule + t.key, e);
     }
   }
@@ -729,34 +729,34 @@ export function Stats() {
       </Table>
       <Title
         className="-mb-2"
-        info="Every request is counted, not sampled; only a report an edge could not deliver is missing. Checked: requests the rule matched. Blocked: requests it answered with 429. Over limit, log only: requests a log only rule found over its limit and let through. Valkey down: checks Valkey did not answer, which the rule's fail mode then handled."
+        info="Every request is counted, not sampled; only a report an edge could not deliver is missing. Checked: requests the rule matched. Blocked: requests it answered with 429. Logged instead of limited: requests a log only rule found over its limit and let through. Valkey down: checks Valkey did not answer, which the rule's fail mode then handled."
       >
         Rate limit rules
       </Title>
-      <Table head={['Rule', 'Checked', 'Blocked', 'Over limit, log only', 'Valkey down']} num={[1, 2, 3, 4]} empty={q.data && `No rate limit rule ran ${r.phrase}.`}>
+      <Table head={['Rule', 'Checked', 'Blocked', 'Logged instead of limited', 'Valkey down']} num={[1, 2, 3, 4]} empty={q.data && `No rate limit rule ran ${r.phrase}.`}>
         {[...rules.values()].map((x) => (
           <tr key={x.id}>
             <td className="font-mono">{x.id}</td>
             <Cell text={count(x.evaluated)} />
             <Cell text={count(x.limited)} />
-            <Cell text={count(x.would_limit)} />
+            <Cell text={count(x.logged)} />
             <Cell text={count(x.failed)} />
           </tr>
         ))}
       </Table>
       <Title
         className="-mb-2"
-        info="Access rules with a block setting. Matched: requests the rule matched. Blocked: requests it answered with 403. Would block, log only: requests a log only rule matched and let through, or that the block kill switch let through. Lifted by an allow: requests this rule would have blocked or logged that an always-allow rule or the client allowlist let through."
+        info="Access rules with a block setting. Matched: requests the rule matched. Blocked: requests it answered with 403. Logged instead of blocked: requests a log only rule matched and let through, or that the block kill switch let through. Lifted by an allow: requests this rule would have blocked or logged that an always-allow rule or the client allowlist let through."
       >
         Blocking access rules
       </Title>
-      <Table head={['Rule', 'Matched', 'Blocked', 'Would block, log only', 'Lifted by an allow']} num={[1, 2, 3, 4]} empty={q.data && `No access rule blocked a request ${r.phrase}.`}>
+      <Table head={['Rule', 'Matched', 'Blocked', 'Logged instead of blocked', 'Lifted by an allow']} num={[1, 2, 3, 4]} empty={q.data && `No access rule blocked a request ${r.phrase}.`}>
         {[...blocks.values()].map((x) => (
           <tr key={x.id}>
             <td className="font-mono">{x.id}</td>
             <Cell text={count(x.matched)} />
             <Cell text={count(x.blocked)} />
-            <Cell text={count(x.would_block)} />
+            <Cell text={count(x.logged)} />
             <Cell text={count(x.lifted)} />
           </tr>
         ))}
@@ -774,10 +774,10 @@ export function Stats() {
           ))}
         </select>
       </div>
-      <Table head={['Key', 'Rule', 'Blocked (estimate)', 'Over limit, log only (estimate)']} num={[2, 3]} empty={q.data && `Nothing was limited ${r.phrase}.`}>
+      <Table head={['Key', 'Rule', 'Blocked (estimate)', 'Logged instead of limited (estimate)']} num={[2, 3]} empty={q.data && `Nothing was limited ${r.phrase}.`}>
         {[...top.values()]
           .filter((t) => !only || t.rule === only)
-          .sort((a, b) => b.limited + (b.would_limit ?? 0) - a.limited - (a.would_limit ?? 0))
+          .sort((a, b) => b.limited + (b.logged ?? 0) - a.limited - (a.logged ?? 0))
           .slice(0, 20)
           .map((t) => (
             <tr key={t.rule + t.key}>
@@ -788,11 +788,11 @@ export function Stats() {
               </td>
               <td className="font-mono">{t.rule}</td>
               <Cell text={count(t.limited)} />
-              <Cell text={count(t.would_limit ?? 0)} />
+              <Cell text={count(t.logged ?? 0)} />
             </tr>
           ))}
       </Table>
-      <Unranked ids={[...rules.values()].filter((x) => x.limited + x.would_limit > 0 && ![...top.values()].some((t) => t.rule === x.id)).map((x) => x.id)} />
+      <Unranked ids={[...rules.values()].filter((x) => x.limited + x.logged > 0 && ![...top.values()].some((t) => t.rule === x.id)).map((x) => x.id)} />
     </Page>
   );
 }
@@ -938,19 +938,19 @@ export function Spark({ rows, from, to, value }: { rows: Row[]; from: number; to
 // 429s and log only overs, or a config or header rule's matches and blocks.
 // IDs are unique across phases, so one rule is in one list.
 export function ruleCounts(rows: Row[], id: string) {
-  const c = { matched: 0, limited: 0, would_limit: 0, blocked: 0, would_block: 0, lifted: 0 };
+  const c = { matched: 0, limited: 0, limitLogged: 0, blocked: 0, blockLogged: 0, lifted: 0 };
   for (const r of rows) {
     for (const x of r.rate_limit_rules ?? [])
       if (x.id === id) {
         c.matched += x.evaluated;
         c.limited += x.limited;
-        c.would_limit += x.would_limit;
+        c.limitLogged += x.logged;
       }
     for (const x of r.rules ?? [])
       if (x.id === id) {
         c.matched += x.matched;
         c.blocked += x.blocked;
-        c.would_block += x.would_block;
+        c.blockLogged += x.logged;
         c.lifted += x.lifted;
       }
   }
@@ -963,9 +963,9 @@ export const countWords = (c: ReturnType<typeof ruleCounts>) =>
   [
     `${count(c.matched)} matched`,
     c.limited > 0 && `${count(c.limited)} blocked with 429`,
-    c.would_limit > 0 && `${count(c.would_limit)} over limit, log only`,
+    c.limitLogged > 0 && `${count(c.limitLogged)} logged instead of limited`,
     c.blocked > 0 && `${count(c.blocked)} blocked with 403`,
-    c.would_block > 0 && `${count(c.would_block)} would block, log only`,
+    c.blockLogged > 0 && `${count(c.blockLogged)} logged instead of blocked`,
     c.lifted > 0 && `${count(c.lifted)} let through by an allow`,
   ]
     .filter(Boolean)

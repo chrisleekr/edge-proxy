@@ -67,7 +67,7 @@ With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** 
 | `rule_upstream_5xx_ratio` | config, request headers | 5xx from the upstream are over 2 times their baseline share of the rule's requests, over 2 times their share of all requests, and over 5%, with at least 10 of them | warning |
 | `rule_auth_failure_ratio` | config | Failed token checks are over 2 times their baseline share of the rule's requests, over 2 times their share of all requests, and over 10%, with at least 10 of them | warning |
 | `rule_block_spike` | rate limit, config | The rule blocks over 3 times its baseline share of the requests it checks, and over 1%. An access rule checks every request, and blocks with its `block` setting | warning |
-| `rule_would_block` | rate limit, config | A rule that isn't blocking (set to log only, or under the rate-limit or block kill switch) would have refused at least one request | info |
+| `rule_logged` | rate limit, config | A rule that isn't blocking (set to log only, or under the rate-limit or block kill switch) would have refused at least one request | info |
 | `rule_fail_mode` | rate limit | Shown as **Valkey down**: at least `min_requests` requests took the rule's `fail_mode` because Valkey did not answer | critical |
 | `rule_subject_dominates` | rate limit | One client got over half of the rule's blocks, with at least 100 blocks: a targeted flood, or one client misbehaving. Never for a rule whose key has no per-client part (no `ip`, `jwt_claim`, `header`, `cookie` or `query`), since its bucket holds many clients | warning |
 
@@ -96,7 +96,7 @@ A request matched by a config or request-header rule counts toward that rule's o
 
 Each rule can replace a signal's settings: turn it off, change its severity, or set its own thresholds. A rule's setting replaces the default for that rule and signal only; fleet signals have no per-rule setting, and neither does `verified_bots_stale`. Settings for a rule ID no longer in the policy stay saved and are shown as unused.
 
-Notification settings are saved on their own, apart from the draft, like the rollback guard's, and carry an **Applies when saved** badge: changing them needs `settings.manage`, needs no publish, and takes effect at the next check. Every change is audited (`settings.notifications`).
+Notification settings are saved on their own, apart from the draft, like the rollback guard's, and carry an **Applies when saved** badge: changing them needs `settings.manage`, needs no publish, and takes effect at the next check. Every change is audited (`settings.notifications`). On start, admin renames saved overrides for the old signal `rule_would_block` to `rule_logged` and writes a `settings.renamed` audit row by `system:migrate`, only when something was renamed.
 
 ## Alerts
 
@@ -120,7 +120,7 @@ Admin can only notify while it runs and receives stats. Alert on admin itself fr
 
 While the [autopilot](../use/autopilot.md) is on and a runner was seen in the last 2 minutes, admin holds back an anomaly it hasn't sent yet in three cases, and **Notifications** says which:
 
-- **Its own rule:** a `rule_would_block` or `rule_subject_dominates` anomaly on an autopilot rule (`ap-`), sensor or enforce, other than a critical one, is the autopilot's input. It opens a case from it and notifies what it concludes: `autopilot_needs_person` for an unsure verdict, a failed case, or an attack with no enforce rule accepted, or with one waiting for a person's approval in `observe` mode. Its other anomalies, such as `rule_fail_mode`, are treated as any rule's, except `rule_block_spike` and `rule_stopped_matching`, which an autopilot rule trips by design when it starts blocking and when the attack ends: they are not checked on `ap-` rules, and `autopilot_enforced` and `autopilot_rolled_back` report those changes.
+- **Its own rule:** a `rule_logged` or `rule_subject_dominates` anomaly on an autopilot rule (`ap-`), sensor or enforce, other than a critical one, is the autopilot's input. It opens a case from it and notifies what it concludes: `autopilot_needs_person` for an unsure verdict, a failed case, or an attack with no enforce rule accepted, or with one waiting for a person's approval in `observe` mode. Its other anomalies, such as `rule_fail_mode`, are treated as any rule's, except `rule_block_spike` and `rule_stopped_matching`, which an autopilot rule trips by design when it starts blocking and when the attack ends: they are not checked on `ap-` rules, and `autopilot_enforced` and `autopilot_rolled_back` report those changes.
 - **Investigating:** an anomaly that opens a case, other than a critical one, waits up to 10 minutes after it fired for the case's verdict, and is then sent with "Autopilot case N: verdict." added to `description`. The case's summary is left out: the model writes it after reading traffic clients control.
 - **Benign:** an `info` anomaly whose case closed `benign` is not sent. A warning closed benign is still sent, with the verdict: traffic an attacker shapes could talk the model into a benign verdict, so the verdict only delays it.
 

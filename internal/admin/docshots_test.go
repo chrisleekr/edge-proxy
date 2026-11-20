@@ -234,7 +234,7 @@ func TestDocScreenshots(t *testing.T) {
 			// The login-stuffing rule, logging only, finds a few clients over its limit.
 			var autopilotRules []edge.RuleCounts
 			if m < 12 {
-				autopilotRules = []edge.RuleCounts{{ID: watched, Evaluated: n / 25, WouldLimit: n / 300}}
+				autopilotRules = []edge.RuleCounts{{ID: watched, Evaluated: n / 25, Logged: n / 300}}
 			}
 			latency := make([]uint64, len(edge.LatencyBoundsMS)+1)
 			latency[2], latency[3], latency[4], latency[5], latency[6] = n/10, n*3/10, n*4/10, n/10, n-n*9/10
@@ -264,7 +264,7 @@ func TestDocScreenshots(t *testing.T) {
 					RateLimit: append([]edge.RuleCounts{
 						{ID: "login-per-ip", Evaluated: n / 25, Limited: n / 90},
 						{ID: "api-burst", Evaluated: n / 2, Limited: n / 30, Failed: uint64(30 + m%5)},
-						{ID: "api-shadow", Evaluated: n / 2, WouldLimit: n / 5},
+						{ID: "api-shadow", Evaluated: n / 2, Logged: n / 5},
 						{ID: "pages-per-ip", Evaluated: n / 15},
 						{ID: "api-per-user", Evaluated: n / 3},
 						{ID: "partner-per-key", Evaluated: n / 12},
@@ -310,17 +310,17 @@ func TestDocScreenshots(t *testing.T) {
 		}
 	}
 	const sampled = 1.0 / 4096
-	add(46, "GET", "api.example.com", "/api/orders/1042", "edge.config_rules", []string{"api-defaults"}, "edge.sample_rate", sampled)
-	add(29, "POST", "api.example.com", "/login", "edge.config_rules", []string{"login-page"}, "edge.sample_rate", sampled)
-	add(5, "POST", "api.example.com", "/login", "edge.config_rules", []string{"login-page"}, "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login-per-ip")
-	add(35, "GET", "www.example.com", "/api/catalog/2210", "edge.config_rules", []string{"api-defaults", "public-catalog"}, "edge.query_keys", []string{"ref"}, "edge.sample_rate", sampled)
-	add(2, "GET", "www.example.com", "/api/catalog/2210", "edge.config_rules", []string{"api-defaults", "public-catalog"}, "http.response.status_code", 502, "edge.decision", "upstream_error",
+	add(46, "GET", "api.example.com", "/api/orders/1042", "edge.matched_rules", accessRules("api-defaults"), "edge.sample_rate", sampled)
+	add(29, "POST", "api.example.com", "/login", "edge.matched_rules", accessRules("login-page"), "edge.sample_rate", sampled)
+	add(5, "POST", "api.example.com", "/login", "edge.matched_rules", accessRules("login-page"), "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login-per-ip")
+	add(35, "GET", "www.example.com", "/api/catalog/2210", "edge.matched_rules", accessRules("api-defaults", "public-catalog"), "edge.query_keys", []string{"ref"}, "edge.sample_rate", sampled)
+	add(2, "GET", "www.example.com", "/api/catalog/2210", "edge.matched_rules", accessRules("api-defaults", "public-catalog"), "http.response.status_code", 502, "edge.action", "upstream_error",
 		"edge.upstream_error", "dial tcp 10.20.0.15:443: connect: connection refused", "edge.upstream_error_kind", "refused")
-	add(1, "GET", "www.example.com", "/api/catalog/2210", "edge.config_rules", []string{"api-defaults", "public-catalog"}, "http.response.status_code", 502, "edge.decision", "upstream_error",
+	add(1, "GET", "www.example.com", "/api/catalog/2210", "edge.matched_rules", accessRules("api-defaults", "public-catalog"), "http.response.status_code", 502, "edge.action", "upstream_error",
 		"edge.upstream_error", "dial tcp: lookup gateway.internal on 10.96.0.10:53: no such host", "edge.upstream_error_kind", "dns")
-	add(21, "PUT", "api.example.com", "/api/uploads/9f1c2b7e-4d3a-4f6e-9b1a-2c8d7e6f5a40", "edge.config_rules", []string{"api-defaults", "uploads"}, "edge.sample_rate", sampled)
-	add(14, "GET", "partner.example.com", "/api/partner/catalog", "edge.config_rules", []string{"api-defaults", "partner-api"}, "edge.query_keys", []string{"page", "size"}, "edge.sample_rate", sampled)
-	add(10, "GET", "www.example.com", "/pages/pricing", "edge.config_rules", []string{"pages"}, "edge.sample_rate", sampled)
+	add(21, "PUT", "api.example.com", "/api/uploads/9f1c2b7e-4d3a-4f6e-9b1a-2c8d7e6f5a40", "edge.matched_rules", accessRules("api-defaults", "uploads"), "edge.sample_rate", sampled)
+	add(14, "GET", "partner.example.com", "/api/partner/catalog", "edge.matched_rules", accessRules("api-defaults", "partner-api"), "edge.query_keys", []string{"page", "size"}, "edge.sample_rate", sampled)
+	add(10, "GET", "www.example.com", "/pages/pricing", "edge.matched_rules", accessRules("pages"), "edge.sample_rate", sampled)
 	// Two checks a minute apart fire what the stats above show: the
 	// log-only rule over its limit and Valkey misses.
 	h.s.cfg.AlertmanagerURL = newFakeAlertmanager(t).srv.URL

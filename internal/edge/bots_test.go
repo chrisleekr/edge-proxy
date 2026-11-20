@@ -411,7 +411,7 @@ func TestBlockRuleAnswers403BeforeAuthAndRateLimits(t *testing.T) {
 	waitFor(t, func() bool {
 		n := 0
 		for _, l := range h.logs.lines("access") {
-			if l["edge.decision"] == "blocked" && l["http.response.status_code"] == 403.0 {
+			if l["edge.action"] == "blocked" && l["http.response.status_code"] == 403.0 {
 				n++
 			}
 		}
@@ -419,10 +419,11 @@ func TestBlockRuleAnswers403BeforeAuthAndRateLimits(t *testing.T) {
 	})
 }
 
-// block: log forwards the request and logs it as would_block, even with
+// block: log forwards the request and logs the rule as logged, even with
 // allowed requests sampled out, so a new block rule can be watched in shadow
-// before it refuses anyone.
-func TestLogBlockRuleForwardsAsWouldBlock(t *testing.T) {
+// before it refuses anyone. The line stands for one request, so it carries
+// no sample rate.
+func TestLogBlockRuleForwardsAsLogged(t *testing.T) {
 	h := newHarness(t, map[string]string{"LOG_SAMPLE_RATE": "0"})
 	c := testConfig(1)
 	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent contains "curl"`)})
@@ -437,7 +438,7 @@ func TestLogBlockRuleForwardsAsWouldBlock(t *testing.T) {
 		return slices.ContainsFunc(h.logs.lines("access"), func(l map[string]any) bool { return l["user_agent.original"] == "curl/8.5.0" })
 	})
 	lines := h.logs.lines("access")
-	if len(lines) != 1 || lines[0]["edge.decision"] != "would_block" || lines[0]["http.response.status_code"] != 200.0 {
+	if len(lines) != 1 || lines[0]["edge.action"] != "allow" || ruleResults(lines[0]) != "tools=logged" || lines[0]["http.response.status_code"] != 200.0 || lines[0]["edge.sample_rate"] != nil {
 		t.Fatalf("access lines = %v", lines)
 	}
 }
@@ -458,7 +459,7 @@ func TestBlockKillSwitchTurnsBlocksIntoLogs(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		lines := h.logs.lines("access")
-		return len(lines) == 1 && lines[0]["edge.decision"] == "would_block"
+		return len(lines) == 1 && lines[0]["edge.action"] == "allow" && ruleResults(lines[0]) == "tools=logged"
 	})
 
 	c.Version = 2

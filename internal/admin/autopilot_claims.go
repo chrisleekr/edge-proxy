@@ -98,12 +98,12 @@ type claimMetric struct {
 }
 
 var claimMetrics = map[string]claimMetric{
-	"requests":         {fromFleet, []string{"global"}},
-	"auth_failures":    {fromFleet, []string{"global"}},
-	"upstream_5xx":     {fromFleet, []string{"global"}},
-	"rule_evaluated":   {fromRule, []string{"rule"}},
-	"rule_limited":     {fromRule, []string{"rule"}},
-	"rule_would_limit": {fromRule, []string{"rule"}},
+	"requests":       {fromFleet, []string{"global"}},
+	"auth_failures":  {fromFleet, []string{"global"}},
+	"upstream_5xx":   {fromFleet, []string{"global"}},
+	"rule_evaluated": {fromRule, []string{"rule"}},
+	"rule_limited":   {fromRule, []string{"rule"}},
+	"rule_logged":    {fromRule, []string{"rule"}},
 	// Top subjects are sampled and only those over a limit are kept, so
 	// they give lower bounds.
 	"rule_subjects":   {fromTop, []string{"rule"}},
@@ -265,7 +265,7 @@ func (s *Server) evalClaim(ctx context.Context, q querier, sc noteScope, c noteC
 	}
 	rows, err := q.Query(ctx, `SELECT k, count(m.minute), coalesce(sum(m.requests), 0)::bigint, coalesce(sum(m.auth_failures), 0)::bigint,
 		coalesce(sum(m.upstream_5xx), 0)::bigint, coalesce(sum((e->>'evaluated')::bigint), 0)::bigint, coalesce(sum((e->>'limited')::bigint), 0)::bigint,
-		coalesce(sum((e->>'would_limit')::bigint), 0)::bigint, count(DISTINCT m.minute)
+		coalesce(sum((e->>'logged')::bigint), 0)::bigint, count(DISTINCT m.minute)
 		FROM generate_series(0, $4::int) k
 		LEFT JOIN edge_stats_minute m ON m.minute >= $1::timestamptz - k * interval '24 hours' AND m.minute < $2::timestamptz - k * interval '24 hours'
 		LEFT JOIN LATERAL (SELECT x FROM jsonb_array_elements(m.rate_limit) x WHERE x->>'id' = $3 LIMIT 1) r(e) ON true
@@ -274,15 +274,15 @@ func (s *Server) evalClaim(ctx context.Context, q querier, sc noteScope, c noteC
 		return nil, err
 	}
 	var k int
-	var n, requests, auth, up5xx, evaluated, limited, would, minutes int64
-	if _, err := pgx.ForEachRow(rows, []any{&k, &n, &requests, &auth, &up5xx, &evaluated, &limited, &would, &minutes}, func() error {
+	var n, requests, auth, up5xx, evaluated, limited, logged, minutes int64
+	if _, err := pgx.ForEachRow(rows, []any{&k, &n, &requests, &auth, &up5xx, &evaluated, &limited, &logged, &minutes}, func() error {
 		d := claimDay{present: n > 0, requests: requests, minutes: minutes}
 		switch m.source {
 		case fromFleet:
 			d.value = float64(map[string]int64{"requests": requests, "auth_failures": auth, "upstream_5xx": up5xx}[c.Metric])
 		default:
 			d.requests = evaluated
-			d.value = float64(map[string]int64{"rule_evaluated": evaluated, "rule_limited": limited, "rule_would_limit": would}[c.Metric])
+			d.value = float64(map[string]int64{"rule_evaluated": evaluated, "rule_limited": limited, "rule_logged": logged}[c.Metric])
 		}
 		d.estimated = m.source == fromTop
 		out[k] = d
@@ -298,8 +298,8 @@ func (s *Server) evalClaim(ctx context.Context, q querier, sc noteScope, c noteC
 	// the planner from flattening the per-day subquery: flattened, it can
 	// expand the top subjects of every minute kept before filtering by
 	// day, which over 15 days of 1,000 subjects a row takes seconds.
-	rows, err = q.Query(ctx, `SELECT k, max(t->>'display'), sum((t->>'limited')::bigint + coalesce((t->>'would_limit')::bigint, 0)
-			- least(coalesce((t->>'err')::bigint, 0), (t->>'limited')::bigint + coalesce((t->>'would_limit')::bigint, 0)))::bigint
+	rows, err = q.Query(ctx, `SELECT k, max(t->>'display'), sum((t->>'limited')::bigint + coalesce((t->>'logged')::bigint, 0)
+			- least(coalesce((t->>'err')::bigint, 0), (t->>'limited')::bigint + coalesce((t->>'logged')::bigint, 0)))::bigint
 		FROM generate_series(0, $4::int) k
 		CROSS JOIN LATERAL (SELECT top_limited FROM edge_stats_minute
 			WHERE minute >= $1::timestamptz - k * interval '24 hours' AND minute < $2::timestamptz - k * interval '24 hours' OFFSET 0) m

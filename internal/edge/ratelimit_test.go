@@ -134,7 +134,7 @@ func TestRateLimitBlocks(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		for _, l := range h.logs.lines("access") {
-			if l["edge.rate_limit_rule"] == id {
+			if l["edge.decided_by"] == id {
 				return true
 			}
 		}
@@ -192,8 +192,8 @@ func TestShadowAndKillSwitch(t *testing.T) {
 	if got := h.statuses(3, "GET", "/s"); !eqInts(got, 200, 200, 200) {
 		t.Fatalf("shadow rule blocked: %v", got)
 	}
-	if h.ruleStats(0).wouldLimit.Load() != 2 {
-		t.Fatalf("would-limit %d", h.ruleStats(0).wouldLimit.Load())
+	if h.ruleStats(0).logged.Load() != 2 {
+		t.Fatalf("logged %d", h.ruleStats(0).logged.Load())
 	}
 
 	k := testConfig(2)
@@ -203,8 +203,8 @@ func TestShadowAndKillSwitch(t *testing.T) {
 	if got := h.statuses(3, "GET", "/b"); !eqInts(got, 200, 200, 200) {
 		t.Fatalf("kill switch blocked: %v", got)
 	}
-	if h.ruleStats(1).wouldLimit.Load() != 2 {
-		t.Fatalf("would-limit under kill switch %d", h.ruleStats(1).wouldLimit.Load())
+	if h.ruleStats(1).logged.Load() != 2 {
+		t.Fatalf("logged under kill switch %d", h.ruleStats(1).logged.Load())
 	}
 	if h.srv.edge.penalties.Len() != 0 {
 		t.Fatal("a penalty started under the kill switch")
@@ -790,11 +790,11 @@ func TestMetricsCountRateLimitRuleOutcomes(t *testing.T) {
 		want     map[string]float64
 	}{
 		{"a blocking rule over its limit counts evaluated and limited", true, "block", 3,
-			map[string]float64{"evaluated": 3, "limited": 2, "would_limit": 0, "failed": 0, "capped": 0}},
-		{"a log-only rule over its limit counts would_limit, not limited", true, "log", 3,
-			map[string]float64{"evaluated": 3, "limited": 0, "would_limit": 2, "failed": 0, "capped": 0}},
+			map[string]float64{"evaluated": 3, "limited": 2, "logged": 0, "failed": 0, "capped": 0}},
+		{"a log-only rule over its limit counts logged, not limited", true, "log", 3,
+			map[string]float64{"evaluated": 3, "limited": 0, "logged": 2, "failed": 0, "capped": 0}},
 		{"a fail_mode open rule with Valkey down counts failed", false, "block", 2,
-			map[string]float64{"evaluated": 2, "limited": 0, "would_limit": 0, "failed": 2, "capped": 0}},
+			map[string]float64{"evaluated": 2, "limited": 0, "logged": 0, "failed": 2, "capped": 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var h *harness
@@ -828,7 +828,7 @@ func TestMetricsCountRateLimitRuleOutcomes(t *testing.T) {
 		h.load(envelope(c))
 		h.statuses(2, "GET", "/")
 		m := h.metrics()
-		for outcome, want := range map[string]float64{"evaluated": 0, "limited": 0, "would_limit": 0, "failed": 0, "capped": 0, "expired": 2} {
+		for outcome, want := range map[string]float64{"evaluated": 0, "limited": 0, "logged": 0, "failed": 0, "capped": 0, "expired": 2} {
 			if n, ok := m[`edge_ratelimit_rule_total{rule="`+r.ID+`",outcome="`+outcome+`"}`]; !ok || n != want {
 				t.Errorf("%s %v (present %v), want %v", outcome, n, ok, want)
 			}
@@ -885,7 +885,7 @@ func TestRateLimitStatsReported(t *testing.T) {
 		t.Fatalf("second delta repeats counts: %+v", d[0].RateLimit)
 	}
 	b, _ := json.Marshal(d[0])
-	if !strings.Contains(string(b), `"rate_limit_rules":[{"id":"`+id+`","evaluated":1,"limited":1,"would_limit":0,"failed":0}]`) {
+	if !strings.Contains(string(b), `"rate_limit_rules":[{"id":"`+id+`","evaluated":1,"limited":1,"logged":0,"failed":0}]`) {
 		t.Fatalf("report JSON %s", b)
 	}
 }
@@ -1211,8 +1211,8 @@ func TestCountRuleOutcomes(t *testing.T) {
 			t.Fatalf("log-only count rule refused: %v", got)
 		}
 		top := h.srv.poller.reg.deltas()[0].TopLimited
-		if h.ruleStats(0).wouldLimit.Load() != 2 || len(top) != 1 || top[0].Display != "198.51.100.7" || top[0].WouldLimit != 2*TopSample {
-			t.Fatalf("would limit %d, top %+v", h.ruleStats(0).wouldLimit.Load(), top)
+		if h.ruleStats(0).logged.Load() != 2 || len(top) != 1 || top[0].Display != "198.51.100.7" || top[0].Logged != 2*TopSample {
+			t.Fatalf("logged %d, top %+v", h.ruleStats(0).logged.Load(), top)
 		}
 	})
 	t.Run("penalty", func(t *testing.T) {

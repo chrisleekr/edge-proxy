@@ -4,7 +4,7 @@
 // for DURATION (default 24h; stop it with Ctrl+C).
 //
 // Clients come from a small pool of IPs (IPS, default 300), so the per-IP
-// limits really bite: api-burst blocks, api-shadow would block, and
+// limits really bite: api-burst blocks, api-shadow only logs, and
 // login-per-ip blocks and holds its penalty.
 import http from 'k6/http';
 import { viewer } from './lib.js';
@@ -48,7 +48,7 @@ const upload = 'x'.repeat(2_000_000);
 // Each entry is [weight, what it shows, request]. Weights sum to 100.
 const mix = [
   [34, 'pages: locale, fixed window', () => http.get(`${edge}/pages/${pick(['home', 'pricing', 'docs'])}`, { headers: { ...client(), 'Accept-Language': pick(languages) } })],
-  [25, 'anonymous API: token bucket blocks, log only would block', () => http.get(`${edge}/api/items`, { headers: client() })],
+  [25, 'anonymous API: token bucket blocks, log-only rule logs', () => http.get(`${edge}/api/items`, { headers: client() })],
   [12, 'signed-in API: per-user leaky bucket', () => http.get(`${edge}/api/orders`, { headers: { ...client(), Authorization: `Bearer ${token('user')}` } })],
   [4, 'public catalog: open CORS', () => http.get(`${edge}/api/catalog/books`, { headers: { ...client(), Origin: 'https://shop.example.net' } })],
   [3, 'CORS preflight from the web app', () => http.options(`${edge}/api/items`, null, { headers: { ...client(), Origin: 'https://app.example.com', 'Access-Control-Request-Method': 'PUT' } })],

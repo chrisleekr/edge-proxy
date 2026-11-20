@@ -156,13 +156,13 @@ test('a rule gets its own notification setting, which outlives a reload', async 
   // Only signals that apply to a rate limit rule are offered.
   const signal = page.getByRole('combobox', { name: 'Signal', exact: true });
   await expect(signal.getByRole('option', { name: 'Upstream 5xx on a rule' })).toHaveCount(0);
-  await signal.selectOption({ label: 'Log-only rule would block' });
+  await signal.selectOption({ label: 'Log-only rule logged requests' });
   await page.getByRole('button', { name: 'Give this rule its own setting' }).click();
-  const own = page.getByRole('listitem').filter({ hasText: 'Log-only rule would block for rule login' });
-  await own.getByRole('combobox', { name: 'Log-only rule would block, Severity' }).selectOption('critical');
+  const own = page.getByRole('listitem').filter({ hasText: 'Log-only rule logged requests for rule login' });
+  await own.getByRole('combobox', { name: 'Log-only rule logged requests, Severity' }).selectOption('critical');
   await saveNotifications();
   await page.reload();
-  await expect(page.getByRole('listitem').filter({ hasText: 'Log-only rule would block for rule login' }).getByRole('combobox', { name: 'Log-only rule would block, Severity' })).toHaveValue('critical');
+  await expect(page.getByRole('listitem').filter({ hasText: 'Log-only rule logged requests for rule login' }).getByRole('combobox', { name: 'Log-only rule logged requests, Severity' })).toHaveValue('critical');
   // Back to the defaults, so later tests see none.
   await page.getByRole('button', { name: 'Use the default' }).click();
   await saveNotifications();
@@ -527,7 +527,7 @@ test('an access rule set to block saves, and the block kill switch saves with it
   await expect(page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'block-tools', exact: true }) })).toContainText('blocks with 403');
 });
 
-test('a route flow names the access rule that blocks or would block its sample, and a block ends the flow there', async () => {
+test('a route flow names the access rule that blocks or only logs for its sample, and a block ends the flow there', async () => {
   const flow = async () => {
     await nav('Routes');
     await page.locator('tbody tr').filter({ hasText: '/login' }).getByRole('link').click();
@@ -543,7 +543,10 @@ test('a route flow names the access rule that blocks or would block its sample, 
   };
   // The previous test left block-tools (matches every request) in the draft with the kill switch on.
   await flow();
-  await expect(blockStep).toContainText('Only logged as one access rule block-tools would block; it goes on to the next steps.');
+  await expect(blockStep).toContainText('Access rule block-tools only logs: the request goes on to the next steps.');
+  await expect(blockStep).toContainText(/3 requests \(.+\) were logged instead of blocked by block-tools/);
+  const accessStep = page.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Access rules choose the settings', exact: true }) });
+  await expect(accessStep).toContainText('3 requests logged instead of blocked');
   await expect(blockStep.getByRole('link', { name: 'block-tools', exact: true })).toHaveAttribute('href', '/rules/config/block-tools');
   await expect(page.getByRole('heading', { name: 'Upstream', exact: true })).toBeVisible();
   await killSwitch(); // off
@@ -851,7 +854,7 @@ test('log-only rules that were acknowledged do not take the three places a newer
   const ids = ['shadow-a', 'shadow-b', 'shadow-c', 'shadow-d'];
   const row = {
     minute: new Date().toISOString(), version: 2, requests: 1000, edge_5xx: 0, upstream_5xx: 0, auth_failures: 0,
-    rate_limit_rules: ids.map((id, i) => ({ id, evaluated: 1000, limited: 0, would_limit: 400 - i * 100, failed: 0 })),
+    rate_limit_rules: ids.map((id, i) => ({ id, evaluated: 1000, limited: 0, logged: 400 - i * 100, failed: 0 })),
     top_limited: [], rules: [], status_codes: {}, upstream_errors: {},
   };
   await page.route('**/api/stats?*', (r) => r.fulfill({ json: [row] }));
@@ -917,7 +920,7 @@ test('a rule page shows its live counts over the range and its published history
   await page.goto('/rules/rate_limit/login');
   const live = page.getByRole('region', { name: 'Traffic', exact: true });
   await expect(live).toContainText('3,500 matched');
-  await expect(live).toContainText('1,120 over limit, log only');
+  await expect(live).toContainText('1,120 logged instead of limited');
   await expect(page.getByRole('heading', { name: 'Published history' })).toBeVisible();
 });
 
@@ -934,7 +937,7 @@ test('the rule list shows each rule\'s live counts and marks a log only rule', a
   await page.goto('/rules');
   const row = (id: string) => page.getByRole('listitem').filter({ has: page.getByRole('link', { name: id, exact: true }) });
   await expect(row('login')).toContainText('3,500 matched');
-  await expect(row('login')).toContainText('1,120 over limit, log only');
+  await expect(row('login')).toContainText('1,120 logged instead of limited');
   // login was added with the default action, log only; block-tools blocks.
   await expect(row('login').getByText('log only', { exact: true })).toBeVisible();
   await expect(row('block-tools').getByText('log only', { exact: true })).toHaveCount(0);
@@ -1064,9 +1067,9 @@ test('Investigate from a rule opens a case that leads with its answer, and Find 
   await verdict.getByText('How it decided', { exact: true }).click();
   await expect(verdict.getByText(details)).toBeVisible();
   // Evidence, tool calls and passed checks are folded until opened.
-  await expect(card('Evidence').getByText('rule_would_block on login')).toBeHidden();
+  await expect(card('Evidence').getByText('rule_logged on login')).toBeHidden();
   await card('Evidence').getByText(/^Evidence for \d+ proposals?$/).click();
-  await expect(card('Evidence').getByText('rule_would_block on login')).toBeVisible();
+  await expect(card('Evidence').getByText('rule_logged on login')).toBeVisible();
   await card('Tool calls').getByText(/^\d+ tool calls?$/).click();
   await expect(page.getByText('get_case', { exact: true })).toBeVisible();
   await card('Policy checks').getByText(/^Passed all \d+ checks$/).first().click();
@@ -1146,7 +1149,7 @@ test("the Autopilot page shows spend by day and model, and a live rule's counts 
   // The rule Investigate made is logging only, until the next test retires it.
   await tab('Autopilot', 'Overview');
   const live = page.getByRole('list', { name: 'Live autopilot rules' }).getByRole('listitem').filter({ has: page.getByRole('link', { name: /^ap-login-stuffing-\d+$/ }) });
-  await expect(live).toContainText(/[\d,]+ while logging/);
+  await expect(live).toContainText(/[\d,]+ logged/);
   await expect(live).toContainText(/[\d,]+ blocking/);
 });
 

@@ -24,8 +24,9 @@ export interface RouteStats {
   errors_only: boolean;
   status: number[];
   latency_ms_buckets: number[];
-  decisions: Record<string, number>;
+  actions: Record<string, number>;
   config_rules: Record<string, number>;
+  logged_rules: Record<string, number>;
   rate_limit_rules: Record<string, number>;
   query_shapes: Record<string, number>;
   p50_ms: number;
@@ -61,7 +62,7 @@ interface RouteDetailData extends RouteStats {
     hour: string;
     requests: number;
     status: number[];
-    decisions: Record<string, number>;
+    actions: Record<string, number>;
   }[];
 }
 
@@ -106,14 +107,12 @@ interface Flow {
 // "*" is where the server sums keys past its caps.
 const OTHER = '*';
 
-// What each edge decision did to the request, in an operator's words.
-const decisionWords: Record<string, string> = {
+// What each edge action did to the request, in an operator's words.
+const actionWords: Record<string, string> = {
   allow: 'Forwarded to the upstream',
   rate_limited: 'Blocked by a rate limit rule',
   blocked: 'Blocked by an access rule',
   banned: 'Refused: the client IP is banned on this edge by an access rule that sets a ban',
-  would_block: 'Forwarded; a log only access rule would block it',
-  would_limit: 'Forwarded; a log only rate limit rule would limit it',
   backstop: 'Blocked by the per-edge backstop',
   method: 'Refused: the method is not in upper case',
   path: 'Refused: the path is malformed or has an ambiguous encoding such as %5C or a .. segment',
@@ -136,7 +135,7 @@ const decisionWords: Record<string, string> = {
   no_snapshot: 'Refused: the edge had no policy loaded',
   [OTHER]: 'Other',
 };
-const decisionName = (d: string) => decisionWords[d] ?? d;
+const actionName = (d: string) => actionWords[d] ?? d;
 
 // rate is a share for reading at a glance: one decimal below 10%, none above.
 const rate = (n: number, d: number) => {
@@ -149,15 +148,15 @@ const rate = (n: number, d: number) => {
 // once would make every filter keystroke slow.
 const page = 100;
 
-// Decisions that are not the edge refusing or shedding: the request was
+// Actions that are not the edge refusing or shedding: the request was
 // forwarded, also by a log only rule, or limited (its own column), or the
 // upstream or client failed it.
-const notRefused = new Set(['allow', 'would_block', 'would_limit', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
+const notRefused = new Set(['allow', 'rate_limited', 'upstream_timeout', 'upstream_error', 'upstream_tls', 'client_gone']);
 
 // Derived figures for one route, shared by the list and the detail page.
 function figures(r: RouteStats) {
-  const limited = r.decisions.rate_limited ?? 0;
-  const rejected = Object.entries(r.decisions).reduce((n, [d, c]) => (notRefused.has(d) ? n : n + c), 0);
+  const limited = r.actions.rate_limited ?? 0;
+  const rejected = Object.entries(r.actions).reduce((n, [d, c]) => (notRefused.has(d) ? n : n + c), 0);
   return {
     errors: r.status[5] ?? 0,
     limited,
@@ -226,7 +225,7 @@ const sortKeys: Record<number, string> = {
   4: 'last',
 };
 
-// Outcome is one bar of a route's requests by the edge's decision:
+// Outcome is one bar of a route's requests by the edge's action:
 // forwarded, rate limited, and refused or shed. A 5xx can come from any of
 // them (a 503 when shed, a 502 from the upstream), so the text gives its
 // share apart from the bar.
@@ -672,7 +671,7 @@ export function RouteDetail({ id, can }: { id: number; can: (p: string) => boole
   const f = figures(r);
   const phrase = phraseOf(range.label, hours, r.since);
   const shapes = Object.entries(r.query_shapes).sort((a, b) => b[1] - a[1]);
-  const decisions = Object.entries(r.decisions).sort((a, b) => b[1] - a[1]);
+  const actions = Object.entries(r.actions).sort((a, b) => b[1] - a[1]);
   const codes = Object.entries(r.status_codes).sort((a, b) => b[1] - a[1]);
   const failures = Object.entries(r.upstream_errors).sort((a, b) => b[1] - a[1]);
   const lines = (status: string | undefined) => logs({ from: Date.parse(r.since), to: q.dataUpdatedAt, status, host: r.host });
@@ -751,9 +750,9 @@ export function RouteDetail({ id, can }: { id: number; can: (p: string) => boole
         <div className="flex flex-col gap-2">
           <Title info="What the edge did with each request, from its access log.">Outcomes</Title>
           <Table head={['Outcome', 'Requests', 'Share']} num={[1, 2]} empty="No requests in this range.">
-            {decisions.map(([d, n]) => (
+            {actions.map(([d, n]) => (
               <tr key={d}>
-                <td>{decisionName(d)}</td>
+                <td>{actionName(d)}</td>
                 <td className="text-right tabular-nums">{count(n)}</td>
                 <td className="text-right tabular-nums">{rate(n, r.requests)}</td>
               </tr>
@@ -858,7 +857,7 @@ function HourBars({ r, hours, marks }: { r: RouteDetailData; hours: number; mark
     if (!b) continue;
     b.requests += p.requests;
     b.errors += p.status[5] ?? 0;
-    b.limited += p.decisions.rate_limited ?? 0;
+    b.limited += p.actions.rate_limited ?? 0;
   }
   const max = Math.max(1, ...bars.map((b) => b.requests));
   const label = (t: number) => new Date(t).toLocaleString([], per === 24 ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', hour: 'numeric' });
@@ -958,6 +957,8 @@ function Matches({
   observed,
   verb = 'matched',
   approx,
+  logged,
+  loggedVerb,
 }: {
   phase: string;
   matches: RuleMatch[];
@@ -966,6 +967,10 @@ function Matches({
   verb?: string;
   // approx marks counts that include estimates from sampled lines.
   approx?: boolean;
+  // logged counts requests a log-only rule let through. Those lines are
+  // always written, so the counts are exact.
+  logged?: Record<string, number>;
+  loggedVerb?: string;
 }) {
   const [all, setAll] = useState(false);
   const shown = matches.filter((m) => all || m.match !== 'never');
@@ -988,6 +993,11 @@ function Matches({
               <span className="text-body">
                 · {verb} {approx && '≈ '}
                 {count(observed[m.id]!)} requests
+              </span>
+            ) : null}
+            {logged?.[m.id] ? (
+              <span className="text-body">
+                · {count(logged[m.id]!)} requests {loggedVerb}
               </span>
             ) : null}
           </li>
@@ -1021,7 +1031,8 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
     'an access rule'
   );
   const listed = Array.isArray(config.global.client_allowlist) && config.global.client_allowlist.length > 0;
-  const d = r.decisions;
+  const d = r.actions;
+  const loggedHere = blockRule ? r.logged_rules[blockRule] : undefined;
   const share = (n: number | undefined) => (n ? `${count(n)} requests (${rate(n, r.requests)})` : undefined);
   const sample = `${flow.sample.method ?? 'GET'} ${flow.sample.host}${flow.sample.path}`;
 
@@ -1044,7 +1055,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
       title: 'Access rules choose the settings',
       body: (
         <div className="flex flex-col gap-2">
-          <Matches phase="config" matches={flow.rules.config} describe={describe(config.config_rules)} observed={r.config_rules} approx={r.estimated > 0} />
+          <Matches phase="config" matches={flow.rules.config} describe={describe(config.config_rules)} observed={r.config_rules} approx={r.estimated > 0} logged={r.logged_rules} loggedVerb="logged instead of blocked" />
           {listed &&
             (flow.result.allowlist ? (
               <Notice tone="amber">
@@ -1073,13 +1084,13 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
             {s.ban ? ` and bans the client IP on that edge for ${s.ban.replace(/(\D)0s$/, '$1').replace(/(\D)0m$/, '$1')}, on every host` : ''}.
           </>
         ) : s.block === 'log' ? (
-          <>Only logged as one access rule {blocker} would block; it goes on to the next steps.</>
+          <>Access rule {blocker} only logs: the request goes on to the next steps.</>
         ) : flow.result.allowlist ? (
           'Not blocked: the sample client IP is on the trusted client allowlist.'
         ) : (
           'Not blocked: no access rule that matches the sample sets block.'
         ),
-      seen: [share(d.blocked) && `${share(d.blocked)} were blocked`, share(d.banned) && `${share(d.banned)} were refused because the client IP was banned`, share(d.would_block) && `${share(d.would_block)} would be blocked by a log only rule`].filter(Boolean).join('; ') || undefined,
+      seen: [share(d.blocked) && `${share(d.blocked)} were blocked`, share(d.banned) && `${share(d.banned)} were refused because the client IP was banned`, share(loggedHere) && `${share(loggedHere)} were logged instead of blocked by ${blockRule}`].filter(Boolean).join('; ') || undefined,
     },
     {
       title: 'Backstop',
@@ -1107,7 +1118,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
       title: 'Rate limits',
       body: (
         <div className="flex flex-col gap-2">
-          <Matches phase="rate_limit" matches={flow.rules.rate_limit} describe={describe(config.rate_limit_rules)} observed={r.rate_limit_rules} verb="blocked" />
+          <Matches phase="rate_limit" matches={flow.rules.rate_limit} describe={describe(config.rate_limit_rules)} observed={r.rate_limit_rules} verb="blocked" logged={r.logged_rules} loggedVerb="logged instead of limited" />
           {flow.result.rate_limit_capped && <Notice tone="amber">More rules match than the edge checks for one request; the extra ones are skipped.</Notice>}
         </div>
       ),
@@ -1161,7 +1172,7 @@ function Steps({ flow, config, r }: { flow: Flow; config: Config; r: RouteDetail
       ))}
       {stopAt >= 0 && (
         <li className="ml-12">
-          <Notice tone="amber">This sample request stops here: {decisionName(rejected!)}.</Notice>
+          <Notice tone="amber">This sample request stops here: {actionName(rejected!)}.</Notice>
         </li>
       )}
     </ol>

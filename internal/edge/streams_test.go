@@ -231,8 +231,8 @@ func TestUpgradeClientGoneDuring101(t *testing.T) {
 		t.Fatalf("client got %q after its connection broke", b)
 	}
 	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
-	if got := h.logs.lines("access")[0]["edge.decision"]; got != "client_gone" {
-		t.Errorf("edge.decision = %v, want client_gone", got)
+	if got := h.logs.lines("access")[0]["edge.action"]; got != "client_gone" {
+		t.Errorf("edge.action = %v, want client_gone", got)
 	}
 	counts := h.srv.store.load().active.stats.counts()
 	if got := upstreamErrors(t, counts); len(got) != 0 {
@@ -314,7 +314,13 @@ func TestSSE(t *testing.T) {
 				w.Header().Set("Content-Type", ct)
 				_, _ = io.WriteString(w, "one\n")
 				http.NewResponseController(w).Flush()
-				<-next
+				// A failed read never closes next; the client leaving must still
+				// end this handler, or closing the test server waits forever.
+				select {
+				case <-next:
+				case <-r.Context().Done():
+					return
+				}
 				_, _ = io.WriteString(w, "two\n")
 			}
 			resp := h.do("GET", "/events", nil, "Accept", "text/event-stream")
@@ -340,6 +346,9 @@ func TestSSE(t *testing.T) {
 			close(gone)
 		}
 		resp := h.do("GET", "/events", nil, "Accept", "text/event-stream")
+		// A failed check below must still close the stream: the upstream ends
+		// only when the client leaves, and closing the test server waits for it.
+		defer resp.Body.Close()
 		readLine(t, bufio.NewReader(resp.Body))
 		if h.srv.m.streams.Load() != 1 || h.srv.m.inflight.Load() != 0 {
 			t.Fatalf("open SSE: streams %d, inflight %d", h.srv.m.streams.Load(), h.srv.m.inflight.Load())

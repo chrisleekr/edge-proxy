@@ -34,9 +34,9 @@ Turn on `auth` and `locale` with a `config` rule that matches a few paths first,
 
 ### Blocking requests
 
-An access rule with `"block": "block"` answers the requests it matches with 403 and the `forbidden` template, right after the config phase, so a blocked request costs no backstop slot, token check or Valkey call. `"block": "log"` lets them through and counts them as would block. As with every setting, the last matching rule that sets `block` wins, so a later matching rule with `"block": "log"` turns an earlier rule's block into log for the requests both match, and the later rule is the one counted.
+An access rule with `"block": "block"` answers the requests it matches with 403 and the `forbidden` template, right after the config phase, so a blocked request costs no backstop slot, token check or Valkey call. `"block": "log"` lets them through and counts them as logged. As with every setting, the last matching rule that sets `block` wins, so a later matching rule with `"block": "log"` turns an earlier rule's block into log for the requests both match, and the later rule is the one counted.
 
-Start with `log`, watch **Blocking access rules** on **Stats** and the `would_block` decision in the [access log](../operate/monitoring.md#logs), then switch to `block`. `kill_switch.block`, under **Settings**, turns every `block` into `log` in an incident. [Bot detection](bots.md) has recipes.
+Start with `log`, watch **Blocking access rules** on **Stats** and the lines whose `edge.logged_rules` contains the rule in the [access log](../operate/monitoring.md#logs), then switch to `block`. `kill_switch.block`, under **Settings**, turns every `block` into `log` in an incident. [Bot detection](bots.md) has recipes.
 
 The default `forbidden` template is an HTML page, since a block usually refuses a page request. For API paths, add a JSON template with status 403 and map it in the blocking rule, or in a rule matching the API paths:
 
@@ -46,7 +46,7 @@ The default `forbidden` template is an HTML page, since a block usually refuses 
 
 ### Banning a client
 
-A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of seconds from `1s` to `24h`. `ban` without `"block": "block"` in the same rule is refused at save. When that rule is the winning block rule for a request, the edge answers 403 as usual and remembers the client IP for that long. Later requests from that IP get 403 with the `forbidden` template and the decision `banned`, on every host and path, before the backstop, token check or any rate limit. An IPv6 client is remembered by its /64.
+A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of seconds from `1s` to `24h`. `ban` without `"block": "block"` in the same rule is refused at save. When that rule is the winning block rule for a request, the edge answers 403 as usual and remembers the client IP for that long. Later requests from that IP get 403 with the `forbidden` template and the action `banned`, on every host and path, before the backstop, token check or any rate limit. An IPv6 client is remembered by its /64.
 
 ```json
 { "settings": { "block": "block", "ban": "24h" } }
@@ -68,7 +68,7 @@ A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of se
 
 A matched request skips:
 
-- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or would block (the rule whose setting it lifted counts it under **Lifted by an allow** on **Stats**), and any ban
+- every access rule's `block` setting, whether `block` or `log`, so it is not counted as blocked or logged (the rule whose setting it lifted counts it under **Lifted by an allow** on **Stats**), and any ban
 - every rate-limit rule, including [autopilot rules](publishing.md#autopilot-rules), count rules, penalties already running and `on_missing_key: reject`. No Valkey call is made and no counter or quota changes
 
 On a route that requires a JWT, a trusted client is treated as `optional`: it needs no token, but a token it sends is still verified. A bad one is refused with 401, and a valid one gives claims and `X-Edge-Auth-*` headers as usual. Claims and those headers come only from a verified token. The kill switch still turns JWT checks off entirely. `ratelimit_headers` is reported false for a trusted client, since no rate-limit rule runs.
@@ -100,7 +100,7 @@ An access rule with `"allow": true` lets the requests it matches through every o
 
 Because anyone can send a header, cookie, path or user agent, an allow rule must require something the client can't forge, as a condition of its own joined with `and` at the top level: the client IP (`ip.src eq` or `in`), an [IP list](bots.md#ip-lists) (`client.ip_lists eq` or `in`) or a verified crawler (`client.verified_bot`). A client IP condition counts only when every range is no wider than /24 for IPv4 or /48 for IPv6, as the allowlist does; wider networks go in an IP list. A condition in parentheses or in an `and` subgroup counts, but one inside an `or` or a negated group does not. Other conditions may narrow it further, such as a host or path. A rule that matches on anything else alone, or that joins the client IP with another condition by `or`, is refused at save, and so is `allow` with `block` in the same rule. A typed IP list such as `office` changes within about a minute with no publish, while the rule itself is published. It needs schema 12 edges.
 
-A request this rule lets through past a block is always logged, not sampled, with the rule listed in `edge.config_rules` and `edge.decision` `allow`, so a lifted block can be seen in the [access log](../operate/monitoring.md#logs). **Simulate** (`POST /api/simulate`) reports the rule as `allow_rule`, and a [policy test](#policy-tests) checks its effect with `rejected` and `config_rules`.
+Each allowed request's [access log](../operate/monitoring.md#logs) line names the rule in `edge.decided_by` and lists it in `edge.matched_rules` as `allowed`; a block it lifted is listed as `overridden`. **Simulate** (`POST /api/simulate`) reports it as `allow_rule`, and a [policy test](#policy-tests) checks its effect with `rejected` and `config_rules`.
 
 ## Expressions
 

@@ -206,20 +206,20 @@ type reqState struct {
 	hdrMatch  []int // matched request-header rules
 	reason    reason
 	rejected  bool
-	// wouldBlock is set when a block rule in log mode matched.
-	wouldBlock bool
-	// wouldLimit is set when a log-only rate-limit rule found the request over
-	// its limit, and wlRule names the first such rule.
-	wouldLimit bool
-	wlRule     string
+	// logged is set when a log-only rule found the request refusable: a block
+	// rule in log mode matched, or a log-only rate-limit rule was over its
+	// limit. The access line is then always written.
+	logged bool
 	// ban is the ban a banned request met, or the one a trap request set;
 	// banDropped means the table was full and the trap's ban was not kept.
 	ban        ratelimit.Ban
 	banDropped bool
 	// rlIdx holds the rate-limit rules step 8 checked, as indexes into the
-	// version's rules, so the access line can name them without an allocation
-	// here. The array is as large as step 8's checks can be.
+	// version's rules, and rlOut what each found at the same position, so the
+	// access line can show them without an allocation here. The arrays are as
+	// large as step 8's checks can be.
 	rlIdx    [maxRateLimitCalls + maxCountRules]int
+	rlOut    [maxRateLimitCalls + maxCountRules]rlResult
 	nRL      int
 	upstream bool // response came from the upstream
 	// upErr is why the upstream exchange failed, and cause its class, for
@@ -240,7 +240,7 @@ type reqState struct {
 	nCounts int
 
 	cors              *corsPolicy // nil when no CORS policy applies
-	rlRule            string      // the rate-limit rule that answered 429
+	rlRule            string      // the rate-limit rule behind a 429, 400 or 503 refusal
 	rlPolicy, rlState []byte      // RateLimit-Policy and RateLimit values
 
 	// Set by proxy for the shared ReverseProxy's hooks.
@@ -344,7 +344,7 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 		e.reject(st, kForbidden, reasonBlocked)
 		return
 	case "log":
-		st.wouldBlock = true
+		st.logged = true
 	}
 	// Allowlist and kill switch override bans as they override block. A
 	// version without ban rules skips the shard lookup.
@@ -579,9 +579,9 @@ func (e *Edge) finish(st *reqState, r *http.Request) {
 			st.ver.stats.lift(st.set.blockRule)
 		}
 	}
-	decision := decisionOf(st)
-	endSpan(st, r, decision)
-	e.alog.write(st, r, elapsed, decision)
+	action, by := actionOf(st), decidedBy(st)
+	endSpan(st, r, action, by)
+	e.alog.write(st, r, elapsed, action, by)
 }
 
 // statusWriter records the status and the body bytes written, for logs and

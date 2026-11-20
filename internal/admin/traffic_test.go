@@ -136,39 +136,47 @@ func TestRefusedRequestsCountAsBlocked(t *testing.T) {
 		blocked int64
 	}{
 		{"rate limited", "AA", func(c string) string {
-			return geo(c, "edge.decision", "rate_limited", "http.response.status_code", 429, "edge.rate_limit_rule", "login")
+			return geo(c, "edge.action", "rate_limited", "http.response.status_code", 429, "edge.decided_by", "login")
 		}, 1},
 		{"access rule block", "AB", func(c string) string {
-			return geo(c, "edge.decision", "blocked", "http.response.status_code", 403)
+			return geo(c, "edge.action", "blocked", "http.response.status_code", 403)
 		}, 1},
 		{"malformed path", "AC", func(c string) string {
-			return access("GET", "evil.example", "/%2e%2e/etc/passwd", "client.geo.country_iso_code", c, "edge.decision", "path", "http.response.status_code", 400)
+			return access("GET", "evil.example", "/%2e%2e/etc/passwd", "client.geo.country_iso_code", c, "edge.action", "path", "http.response.status_code", 400)
 		}, 1},
 		{"malformed method", "AD", func(c string) string {
-			return access("BREW", "evil.example", "/", "client.geo.country_iso_code", c, "edge.decision", "method", "http.response.status_code", 405)
+			return access("BREW", "evil.example", "/", "client.geo.country_iso_code", c, "edge.action", "method", "http.response.status_code", 405)
 		}, 1},
-		{"log only would block", "AE", func(c string) string { return geo(c, "edge.decision", "would_block") }, 0},
-		{"log only would limit", "AK", func(c string) string { return geo(c, "edge.decision", "would_limit", "edge.rate_limit_rule", "login") }, 0},
+		{"allowed with a log-only rule logged", "AE", func(c string) string { return geo(c, "edge.logged_rules", []string{"tools"}) }, 0},
+		{"older edge: log-only access rule", "AK", func(c string) string {
+			return oldAccess("GET", "api.example.com", "/", "client.geo.country_iso_code", c, "edge.decision", "would_block", "edge.block_rule", "tools")
+		}, 0},
+		{"older edge: log-only rate limit", "AL", func(c string) string {
+			return oldAccess("GET", "api.example.com", "/", "client.geo.country_iso_code", c, "edge.decision", "would_limit", "edge.rate_limit_rule", "login")
+		}, 0},
+		{"older edge: rate limited", "AM", func(c string) string {
+			return oldAccess("GET", "api.example.com", "/", "client.geo.country_iso_code", c, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login", "http.response.status_code", 429)
+		}, 1},
 		{"upstream error", "AF", func(c string) string {
-			return geo(c, "edge.decision", "upstream_error", "http.response.status_code", 502)
+			return geo(c, "edge.action", "upstream_error", "http.response.status_code", 502)
 		}, 0},
 		{"allow", "AG", func(c string) string { return geo(c) }, 0},
 		{"upstream timeout", "AH", func(c string) string {
-			return geo(c, "edge.decision", "upstream_timeout", "http.response.status_code", 504)
+			return geo(c, "edge.action", "upstream_timeout", "http.response.status_code", 504)
 		}, 0},
 		{"upstream tls refusal", "AI", func(c string) string {
-			return geo(c, "edge.decision", "upstream_tls", "http.response.status_code", 502)
+			return geo(c, "edge.action", "upstream_tls", "http.response.status_code", 502)
 		}, 0},
 		// The client left before any answer, so the edge logs no status.
 		{"client gone", "AJ", func(c string) string {
-			return geo(c, "edge.decision", "client_gone", "http.response.status_code", 0)
+			return geo(c, "edge.action", "client_gone", "http.response.status_code", 0)
 		}, 0},
 	}
 	var lines []string
 	for _, tc := range cases {
 		lines = append(lines, tc.line(tc.country))
 	}
-	if got := decode[map[string]int](t, h.shipper().post(lines...)); got["accepted"] != 9 || got["skipped"] != 2 {
+	if got := decode[map[string]int](t, h.shipper().post(lines...)); got["accepted"] != 11 || got["skipped"] != 2 {
 		t.Fatalf("ingest = %v", got)
 	}
 	got := h.traffic(vera, "?minutes=5")
@@ -198,7 +206,7 @@ func TestLinesThatAreNotAccessLinesAddNoTraffic(t *testing.T) {
 	for range 1000 {
 		lines = append(lines, `{}`, `null`)
 	}
-	lines = append(lines, geo("US"), access("BREW", "evil.example", "/", "client.geo.country_iso_code", "FR", "edge.decision", "method", "http.response.status_code", 405))
+	lines = append(lines, geo("US"), access("BREW", "evil.example", "/", "client.geo.country_iso_code", "FR", "edge.action", "method", "http.response.status_code", 405))
 	if got := decode[map[string]int](t, h.shipper().post(lines...)); got["accepted"] != 2 || got["skipped"] != 2002 {
 		t.Fatalf("ingest = %v", got)
 	}
@@ -478,3 +486,6 @@ func TestTrafficMapSettingAcceptsTheEdgesOfTheGlobe(t *testing.T) {
 		})
 	}
 }
+
+// rfc formats a span bound for the observed route tests' query strings.
+func rfc(t time.Time) string { return t.UTC().Format(time.RFC3339) }

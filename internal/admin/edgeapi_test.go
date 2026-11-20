@@ -88,6 +88,38 @@ func TestSnapshotEndpoint(t *testing.T) {
 	status(t, h.client().do("GET", "/v1/snapshot", nil), 401)
 }
 
+// During a rollout an edge that has not been upgraded still sends its log-only
+// counts as would_limit and would_block. They land as logged, summed with any
+// logged count in the same report, instead of being dropped by the lenient
+// decode.
+func TestReportFromAnOlderEdgeLandsAsLogged(t *testing.T) {
+	h, pub := published(t)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-old", ConfigSource: "admin", Versions: []edge.StatsCounts{{
+		Version: 1, Requests: 10, LatencyMS: []uint64{10},
+		RateLimit:  []edge.RuleCounts{{ID: "search", Evaluated: 10, LegacyLogged: 4}},
+		TopLimited: []edge.TopCount{{Rule: "search", Key: "k3", Display: "198.51.100.9", LegacyLogged: 4}},
+		Rules:      []edge.RuleOutcome{{Phase: "config", ID: "tools", Matched: 3, LegacyLogged: 3}},
+	}}}), 200)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-new", ConfigSource: "admin", Versions: []edge.StatsCounts{{
+		Version: 1, Requests: 10, LatencyMS: []uint64{10},
+		RateLimit: []edge.RuleCounts{{ID: "search", Evaluated: 10, Logged: 2}},
+	}}}), 200)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-big", Versions: []edge.StatsCounts{{
+		Version: 1, RateLimit: []edge.RuleCounts{{ID: "search", Logged: 1 << 63, LegacyLogged: 1 << 63}}}}}), 422)
+	h.advance(time.Minute)
+	if err := h.s.flush(t.Context(), h.now()); err != nil {
+		t.Fatal(err)
+	}
+	rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
+	if len(rows) != 1 || len(rows[0].RateLimit) != 1 || rows[0].RateLimit[0] != (edge.RuleCounts{ID: "search", Evaluated: 20, Logged: 6}) ||
+		len(rows[0].TopLimited) != 1 || rows[0].TopLimited[0].Logged != 4 ||
+		len(rows[0].Rules) != 1 || rows[0].Rules[0].Logged != 3 {
+		t.Fatalf("stats %+v", rows)
+	}
+}
+
 func TestReportsAreAggregated(t *testing.T) {
 	h, pub := published(t)
 	e := h.client()
@@ -101,11 +133,11 @@ func TestReportsAreAggregated(t *testing.T) {
 			Rules:      []edge.RuleOutcome{{Phase: "config", ID: "admin-route", Matched: requests, Upstream5xx: 1, AuthFailures: 1}},
 		}}}), 200)
 	}
-	// k3 is a log-only rule's subject: its would-limit estimates sum apart from limited.
+	// k3 is a log-only rule's subject: its logged estimates sum apart from limited.
 	rep("edge-a", 10, edge.TopCount{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 16},
-		edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", WouldLimit: 16})
+		edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", Logged: 16})
 	rep("edge-b", 5, edge.TopCount{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 32},
-		edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", WouldLimit: 16})
+		edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", Logged: 16})
 	status(t, e.do("POST", "/v1/edge/report", map[string]any{"instance": ""}), 422)
 	status(t, e.do("POST", "/v1/edge/report", "not json"), 400)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Deployment: strings.Repeat("f", 65)}), 422)
@@ -116,7 +148,7 @@ func TestReportsAreAggregated(t *testing.T) {
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, LatencyMS: []uint64{1 << 63}}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, RateLimit: []edge.RuleCounts{{ID: "login", Limited: 1 << 63}}}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Key: "k", Limited: 1 << 63}}}}}), 422)
-	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Key: "k", WouldLimit: 1 << 63}}}}}), 422)
+	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Key: "k", Logged: 1 << 63}}}}}), 422)
 	// Postgres refuses NUL in jsonb; one in the batch would fail it the same way.
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, TopLimited: []edge.TopCount{{Rule: "login", Key: "k2", Display: "q=\x00", Limited: 1}}}}}), 422)
 	status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: "edge-c", Versions: []edge.StatsCounts{{Version: 1, RateLimit: []edge.RuleCounts{{ID: "lo\x00gin", Limited: 1}}}}}), 422)
@@ -151,7 +183,7 @@ func TestReportsAreAggregated(t *testing.T) {
 	rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
 	if len(rows) != 1 || rows[0].Requests != 15 || rows[0].Edge5xx != 2 || rows[0].AuthFailures != 4 || !slices.Equal(rows[0].LatencyMS, []uint64{15, 0, 2}) ||
 		rows[0].RateLimit[0] != (edge.RuleCounts{ID: "login", Evaluated: 15, Limited: 2}) || len(rows[0].TopLimited) != 2 || rows[0].TopLimited[0].Limited != 48 ||
-		rows[0].TopLimited[1] != (edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", WouldLimit: 32}) ||
+		rows[0].TopLimited[1] != (edge.TopCount{Rule: "search", Key: "k3", Display: "198.51.100.9", Logged: 32}) ||
 		len(rows[0].Rules) != 1 || rows[0].Rules[0] != (edge.RuleOutcome{Phase: "config", ID: "admin-route", Matched: 15, Upstream5xx: 2, AuthFailures: 2}) {
 		t.Fatalf("stats %+v", rows)
 	}

@@ -121,7 +121,7 @@ func TestGuardAfterFullRollout(t *testing.T) {
 func TestGuardSignals(t *testing.T) {
 	g := defaultGuard()
 	base := &cohort{Requests: 10_000, Edge5xx: 10, LatencyMS: []uint64{9_000, 1_000}, rules: map[string]*edge.RuleCounts{
-		"login": {ID: "login", Evaluated: 1_000, Limited: 10, WouldLimit: 0}, "search": {ID: "search", Evaluated: 1_000, WouldLimit: 20},
+		"login": {ID: "login", Evaluated: 1_000, Limited: 10, Logged: 0}, "search": {ID: "search", Evaluated: 1_000, Logged: 20},
 	}}
 	cases := []struct {
 		name    string
@@ -174,7 +174,7 @@ func TestGuardSignals(t *testing.T) {
 func TestGuardNamesTheRuleThatTripped(t *testing.T) {
 	g := defaultGuard()
 	base := &cohort{Requests: 10_000, rules: map[string]*edge.RuleCounts{
-		"api":    {ID: "api", Evaluated: 1_000, Limited: 10, WouldLimit: 10},
+		"api":    {ID: "api", Evaluated: 1_000, Limited: 10, Logged: 10},
 		"login":  {ID: "login", Evaluated: 1_000, Limited: 300},
 		"search": {ID: "search", Evaluated: 1_000, Limited: 10},
 	}}
@@ -563,7 +563,7 @@ func TestGuardRollbackDropsAnOverlayOldEdgesCannotRead(t *testing.T) {
 }
 
 // sampledTop is a rule's top subjects as the edges report them: n subjects,
-// each with its count, field "limited" or "would_limit", estimated as est.
+// each with its count, field "limited" or "logged", estimated as est.
 // The edges sample one request in 16, so est is a multiple of 16 that
 // scatters around the exact count from minute to minute.
 func sampledTop(rule, field string, n int, est int64) string {

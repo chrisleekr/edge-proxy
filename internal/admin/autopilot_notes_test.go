@@ -271,7 +271,7 @@ func (h *harness) observedRoute(host, method, template string) int64 {
 // routeHour records requests answered 2xx on route in hour.
 func (h *harness) routeHour(route int64, hour time.Time, requests int64) {
 	h.t.Helper()
-	if _, err := h.db.Exec(context.Background(), `INSERT INTO observed_route_hour (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes)
+	if _, err := h.db.Exec(context.Background(), `INSERT INTO observed_route_hour (route_id, hour, requests, versioned, status, latency_ms, actions, config_rules, rate_limit_rules, query_shapes)
 		VALUES ($1, $2, $3, $3, $4, '{}', '{}', '{}', '{}', '{}')`, route, hour, requests, []int64{0, 0, requests, 0, 0, 0}); err != nil {
 		h.t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func (h *harness) routeHour(route int64, hour time.Time, requests int64) {
 // logins limited.
 func (h *harness) loginStuffing() {
 	h.t.Helper()
-	h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":400,"would_limit":0}]`, "[]")
+	h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":400,"logged":0}]`, "[]")
 }
 
 // stuffingNote is an attack_signature on login whose claim the stuffing
@@ -294,7 +294,7 @@ func stuffingNote() map[string]any {
 // 203.0.113.0/24.
 func (h *harness) partnerLimited() {
 	h.t.Helper()
-	h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":30,"would_limit":0}]`,
+	h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":30,"logged":0}]`,
 		`[{"rule":"login","key":"k1","display":"203.0.113.9","limited":30}]`)
 }
 
@@ -860,7 +860,7 @@ func TestNoteBenignNeedsAnAnchor(t *testing.T) {
 		if _, err := h.db.Exec(t.Context(), `INSERT INTO verified_bot_sets (source_url, fetched_at, prefixes) VALUES ('https://bots.example.com/googlebot.json', now(), '["66.249.64.0/19"]')`); err != nil {
 			t.Fatal(err)
 		}
-		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":30,"would_limit":0}]`, `[{"rule":"login","key":"k1","display":"66.249.66.1","limited":30}]`)
+		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":30,"logged":0}]`, `[{"rule":"login","key":"k1","display":"66.249.66.1","limited":30}]`)
 		_, cs := agentCase(t, h, pub, agent)
 		c := claim("subject_limited", ">=", 20, lastMinutes(60))
 		c["subject"] = "66.249.66.0/24"
@@ -895,7 +895,7 @@ func TestNoteVacuousClaimsAnchorNothing(t *testing.T) {
 	t.Run("a floor of 0 on 7 days of stats is refused", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		for k := range 8 {
-			h.statsAt(lastHour(h, k).Add(10*time.Minute), 10_000, `[{"id":"login","evaluated":2000,"limited":0,"would_limit":0}]`, "[]")
+			h.statsAt(lastHour(h, k).Add(10*time.Minute), 10_000, `[{"id":"login","evaluated":2000,"limited":0,"logged":0}]`, "[]")
 		}
 		_, cs := agentCase(t, h, pub, agent)
 		in := learning("expected_pattern", scopeRule("login"), claim("rule_evaluated", ">=", 0, thatHourDaily(h)))
@@ -993,7 +993,7 @@ func TestNoteJWTClaimAnchor(t *testing.T) {
 				Action: "block", FailMode: "open"})
 			status(t, pub.save(pub.revision(), c, adminTest), 200)
 			status(t, pub.publishDraft("Limit accounts", "override_reason", "IdP is down, publishing anyway"), 201)
-			h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"account","evaluated":2000,"limited":30,"would_limit":0}]`, "[]")
+			h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"account","evaluated":2000,"limited":30,"logged":0}]`, "[]")
 			_, cs := agentCase(t, h, pub, agent)
 			in := learning("collateral_risk", scopeRule("account"), claim("rule_limited", ">=", 20, lastMinutes(60)))
 			in["effect"] = map[string]any{"require_jwt_claim": true}
@@ -1402,7 +1402,7 @@ func TestNoteStatistics(t *testing.T) {
 	})
 	t.Run("a sampled metric is an estimate", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
-		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":40,"would_limit":0}]`,
+		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":40,"logged":0}]`,
 			`[{"rule":"login","key":"k1","display":"198.51.100.1","limited":20},{"rule":"login","key":"k2","display":"198.51.100.2","limited":20}]`)
 		_, cs := agentCase(t, h, pub, agent)
 		in := learning("attack_signature", scopeRule("login"), claim("rule_subjects", ">=", 2, lastMinutes(60)))
@@ -1511,9 +1511,9 @@ func enforcedNote(t *testing.T, h *harness, pub, agent *client, in, p map[string
 func signatureCase(t *testing.T, h *harness, pub, agent *client, evaluated, limited int64, p map[string]any) (int64, string) {
 	t.Helper()
 	for k := 1; k <= 14; k++ {
-		h.statsAt(dailyAt(h, k), 10_000, `[{"id":"login","evaluated":1000,"limited":10,"would_limit":0}]`, "[]")
+		h.statsAt(dailyAt(h, k), 10_000, `[{"id":"login","evaluated":1000,"limited":10,"logged":0}]`, "[]")
 	}
-	h.statsAt(dailyAt(h, 0), 10_000, fmt.Sprintf(`[{"id":"login","evaluated":%d,"limited":%d,"would_limit":0}]`, evaluated, limited), "[]")
+	h.statsAt(dailyAt(h, 0), 10_000, fmt.Sprintf(`[{"id":"login","evaluated":%d,"limited":%d,"logged":0}]`, evaluated, limited), "[]")
 	in := learning("attack_signature", scopeRule("login"), claim("rule_limited", ">=", float64(limited), lastMinutes(60)))
 	in["statement"] = "Credential stuffing on login: limited logins far above their daily level, from rotating addresses"
 	return enforcedNote(t, h, pub, agent, in, p)
@@ -1672,9 +1672,9 @@ func TestNoteOneCaseConfirms(t *testing.T) {
 			return "[" + strings.Join(parts, ",") + "]"
 		}
 		for k := 1; k <= 14; k++ {
-			h.statsAt(dailyAt(h, k), 10_000, `[{"id":"login","evaluated":500,"limited":20,"would_limit":0}]`, top(2))
+			h.statsAt(dailyAt(h, k), 10_000, `[{"id":"login","evaluated":500,"limited":20,"logged":0}]`, top(2))
 		}
-		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":500,"limited":300,"would_limit":0}]`, top(30))
+		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":500,"limited":300,"logged":0}]`, top(30))
 		in := learning("attack_signature", scopeRule("login"), claim("rule_subjects", ">=", 30, lastMinutes(60)))
 		in["statement"] = "Stuffing on login comes from 30 addresses at once, where 2 are limited on a usual day"
 		note, _ := enforcedNote(t, h, pub, agent, in, proposal("enforce", "login-stuffing", loginRule()))
@@ -1687,9 +1687,9 @@ func TestNoteOneCaseConfirms(t *testing.T) {
 	t.Run("an attack signature with a z of 4 under 3 times its median confirms", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		for k, v := range []int{100, 101, 99, 100, 102, 98, 100, 101, 99, 100, 100, 101, 99, 100} {
-			h.statsAt(dailyAt(h, k+1), 10_000, fmt.Sprintf(`[{"id":"login","evaluated":2000,"limited":%d,"would_limit":0}]`, v), "[]")
+			h.statsAt(dailyAt(h, k+1), 10_000, fmt.Sprintf(`[{"id":"login","evaluated":2000,"limited":%d,"logged":0}]`, v), "[]")
 		}
-		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":150,"would_limit":0}]`, "[]")
+		h.statsAt(dailyAt(h, 0), 10_000, `[{"id":"login","evaluated":2000,"limited":150,"logged":0}]`, "[]")
 		in := learning("attack_signature", scopeRule("login"), claim("rule_limited", ">=", 150, lastMinutes(60)))
 		in["statement"] = "Stuffing on login: limited logins well over their steady daily level"
 		note, _ := enforcedNote(t, h, pub, agent, in, proposal("enforce", "login-stuffing", loginRule()))
@@ -2446,7 +2446,7 @@ func TestNoteAblationTriggers(t *testing.T) {
 	loginHours := func(h *harness, limited ...int64) {
 		hour := h.now().UTC().Truncate(time.Hour)
 		for i, v := range limited {
-			h.statsAt(hour.Add(time.Duration(i-4)*time.Hour+10*time.Minute), 10_000, fmt.Sprintf(`[{"id":"login","evaluated":%d,"limited":%d,"would_limit":0}]`, 2*v, v), "[]")
+			h.statsAt(hour.Add(time.Duration(i-4)*time.Hour+10*time.Minute), 10_000, fmt.Sprintf(`[{"id":"login","evaluated":%d,"limited":%d,"logged":0}]`, 2*v, v), "[]")
 		}
 	}
 	for _, tc := range []struct {

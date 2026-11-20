@@ -109,7 +109,7 @@ func loginRule() map[string]any {
 
 func proposal(action, name string, rule map[string]any) map[string]any {
 	return map[string]any{"action": action, "name": name, "rule": rule, "ttl": "1h", "rationale": "Many failed logins per address",
-		"evidence": map[string]any{"anomaly": "rule_would_block on login"}}
+		"evidence": map[string]any{"anomaly": "rule_logged on login"}}
 }
 
 // proposed is a propose answer.
@@ -197,20 +197,20 @@ func liveRuleIn(c snapshot.Config, id string) (snapshot.RateLimitRule, bool) {
 
 // ruleMinutes writes minutes of fleet traffic on the active version, with
 // rule id counted as given and top as its most-limited subjects.
-func ruleMinutes(h *harness, pub *client, minutes int, fleet, evaluated, limited, wouldLimit int64, id, top string) {
+func ruleMinutes(h *harness, pub *client, minutes int, fleet, evaluated, limited, logged int64, id, top string) {
 	h.t.Helper()
-	rules := fmt.Sprintf(`[{"id":%q,"evaluated":%d,"limited":%d,"would_limit":%d}]`, id, evaluated, limited, wouldLimit)
+	rules := fmt.Sprintf(`[{"id":%q,"evaluated":%d,"limited":%d,"logged":%d}]`, id, evaluated, limited, logged)
 	h.putStats(pub.active().Version, minutes, fleet, 0, 0, []int64{fleet}, rules, top)
 }
 
 // observed has an enforce proposal live log-only, then 6 minutes of
-// traffic at 10,000 requests a minute, of which the rule would limit
-// wouldLimit, with top as its subjects.
-func observed(t *testing.T, h *harness, pub, agent *client, wouldLimit int64, top string) string {
+// traffic at 10,000 requests a minute, of which the rule logged
+// `logged`, with top as its subjects.
+func observed(t *testing.T, h *harness, pub, agent *client, logged int64, top string) string {
 	t.Helper()
 	id := liveRule(t, h, pub, agent, proposal("enforce", "login-stuffing", loginRule()))
 	h.advance(6 * time.Minute)
-	ruleMinutes(h, pub, 6, 10_000, 1_000, 0, wouldLimit, id, top)
+	ruleMinutes(h, pub, 6, 10_000, 1_000, 0, logged, id, top)
 	return id
 }
 
@@ -358,10 +358,10 @@ func TestAutopilotPolicy(t *testing.T) {
 		h.wantMetrics(`admin_autopilot_policy_rejections_total{reason="observed_too_short"} 1`)
 	})
 	refusedAtEnforce := []struct {
-		reason     string
-		settings   map[string]any
-		wouldLimit int64
-		top        string
+		reason   string
+		settings map[string]any
+		logged   int64
+		top      string
 	}{
 		// 500 of 10,000 fleet requests a minute is 5%, over the 2% default.
 		{"block_share", nil, 500, "[]"},
@@ -371,13 +371,13 @@ func TestAutopilotPolicy(t *testing.T) {
 	}
 	// The share budget is for collateral. Estimates of the attackers' counts
 	// that fall short in some minutes and overshoot in others cancel.
-	t.Run("would-limits that all go to 10 attackers, estimated over and under, enforce with no block_share refusal", func(t *testing.T) {
+	t.Run("logged requests that all go to 10 attackers, estimated over and under, enforce with no block_share refusal", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		id := liveRule(t, h, pub, agent, proposal("enforce", "login-stuffing", loginRule()))
 		h.advance(6 * time.Minute)
 		for ago := 1; ago <= 6; ago++ {
 			est := int64(32 + 16*(ago%2)) // 40 each a minute, estimated at 48 or 32
-			h.statsMinute(1, ago, 1_500, fmt.Sprintf(`[{"id":%q,"evaluated":500,"limited":0,"would_limit":400}]`, id), sampledTop(id, "would_limit", 10, est))
+			h.statsMinute(1, ago, 1_500, fmt.Sprintf(`[{"id":%q,"evaluated":500,"limited":0,"logged":400}]`, id), sampledTop(id, "logged", 10, est))
 		}
 		h.tick()
 		var shadow float64
@@ -400,7 +400,7 @@ func TestAutopilotPolicy(t *testing.T) {
 			if strings.Contains(top, "%s") {
 				top = fmt.Sprintf(top, id)
 			}
-			ruleMinutes(h, pub, 6, 10_000, 1_000, 0, tc.wouldLimit, id, top)
+			ruleMinutes(h, pub, 6, 10_000, 1_000, 0, tc.logged, id, top)
 			h.tick()
 			if st := ruleState(t, h, id); st != "rejected" || lastReason(t, h, id, "rejected") != tc.reason {
 				t.Fatalf("rule %s, want rejected for %s", st, tc.reason)
@@ -671,7 +671,7 @@ func enforcingOnAttackers(t *testing.T, h *harness, pub, agent *client) string {
 	t.Helper()
 	id := liveRule(t, h, pub, agent, proposal("enforce", "login-stuffing", loginRule()))
 	h.advance(6 * time.Minute)
-	ruleMinutes(h, pub, 6, 10_000, 1_000, 0, 100, id, sampledTop(id, "would_limit", 1, 100))
+	ruleMinutes(h, pub, 6, 10_000, 1_000, 0, 100, id, sampledTop(id, "logged", 1, 100))
 	h.tick()
 	var shadow float64
 	if err := h.db.QueryRow(t.Context(), "SELECT shadow_ratio FROM autopilot_rules WHERE id = $1", id).Scan(&shadow); err != nil || ruleState(t, h, id) != "enforcing" || shadow != 0 {
@@ -1014,7 +1014,7 @@ func TestAutopilotCases(t *testing.T) {
 		}
 		rule, _ := got.Proposals[0]["rule"].(map[string]any)
 		evidence, _ := got.Proposals[0]["evidence"].(map[string]any)
-		if rule["expression"] != loginRule()["expression"] || got.Proposals[0]["ttl_seconds"] != float64(3600) || evidence["anomaly"] != "rule_would_block on login" {
+		if rule["expression"] != loginRule()["expression"] || got.Proposals[0]["ttl_seconds"] != float64(3600) || evidence["anomaly"] != "rule_logged on login" {
 			t.Fatalf("proposal %v", got.Proposals[0])
 		}
 		st := decode[autopilotState](t, pub.do("GET", "/api/autopilot", nil))

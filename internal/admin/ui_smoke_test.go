@@ -47,15 +47,19 @@ func TestUISmoke(t *testing.T) {
 	h.user("oncall", "oncall")
 	h.user("reader", "viewer")
 
-	// Access lines for the Routes page: a rate limited login, and blog posts
-	// enough alike for a grouping suggestion.
+	// Access lines for the Routes page: a rate limited login, logins that the
+	// log-only block-tools let through, and blog posts enough alike for a
+	// grouping suggestion.
 	lines := []string{}
 	for i := range 10 {
-		if i < 2 {
-			lines = append(lines, access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login", "client.geo.country_iso_code", "US"))
-			continue
+		switch {
+		case i < 2:
+			lines = append(lines, access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login", "client.geo.country_iso_code", "US"))
+		case i < 5:
+			lines = append(lines, access("POST", "api.example.com", "/login", "edge.logged_rules", []string{"block-tools"}, "client.geo.country_iso_code", "US"))
+		default:
+			lines = append(lines, access("POST", "api.example.com", "/login", "client.geo.country_iso_code", "US"))
 		}
-		lines = append(lines, access("POST", "api.example.com", "/login", "client.geo.country_iso_code", "US"))
 	}
 	// Some blog readers have no country, as when the CDN does not send one.
 	for i := range 22 {
@@ -66,7 +70,7 @@ func TestUISmoke(t *testing.T) {
 		lines = append(lines, access("GET", "www.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i), "edge.query_keys", []string{"utm_source"}, "client.geo.country_iso_code", country))
 	}
 	// And a request the edge answered 502 because the upstream refused it.
-	lines = append(lines, access("GET", "api.example.com", "/orders/7", "http.response.status_code", 502, "edge.decision", "upstream_error",
+	lines = append(lines, access("GET", "api.example.com", "/orders/7", "http.response.status_code", 502, "edge.action", "upstream_error",
 		"edge.upstream_answered", false, "edge.upstream_error", "dial tcp 10.0.0.1:443: connect: connection refused", "edge.upstream_error_kind", "refused", "client.geo.country_iso_code", "GB"))
 	status(t, h.shipper().post(lines...), http.StatusAccepted)
 	if err := h.s.flushRoutes(t.Context()); err != nil {
@@ -82,9 +86,9 @@ func TestUISmoke(t *testing.T) {
 	// limit throughout and lets it through, for the live counts on the rule
 	// pages and the client's subject page. The edge samples one in 16 over
 	// limit requests into the client counts, so 16 a minute is one sample.
-	limits := `[{"id":"login","evaluated":50,"would_limit":16}]`
+	limits := `[{"id":"login","evaluated":50,"logged":16}]`
 	// The edge always sends limited, so a log only rule's subjects carry 0.
-	client := `[{"rule":"login","key":"k1","display":"198.51.100.7","limited":0,"would_limit":16}]`
+	client := `[{"rule":"login","key":"k1","display":"198.51.100.7","limited":0,"logged":16}]`
 	// The baseline ends where the five anomaly minutes start, so no minute is counted twice.
 	h.advance(-5 * time.Minute)
 	h.putStats(2, 65, 1000, 0, 0, []int64{1000}, limits, client)
@@ -256,7 +260,7 @@ func smokePropose(ctx context.Context, h *harness, run int64) (string, error) {
 	}
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "record_learning", Arguments: map[string]any{
 		"kind": "attack_signature", "basis": "observed", "scope": map[string]any{"kind": "rule", "rule": "login"},
-		"claim":     map[string]any{"metric": "rule_would_limit", "window": map[string]any{"last_minutes": 60}, "op": ">=", "value": 100},
+		"claim":     map[string]any{"metric": "rule_logged", "window": map[string]any{"last_minutes": 60}, "op": ">=", "value": 100},
 		"effect":    nil,
 		"evidence":  []int64{read.EvidenceID},
 		"statement": "Password guessing on login keeps one client over the limit all hour",

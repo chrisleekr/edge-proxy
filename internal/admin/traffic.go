@@ -40,10 +40,10 @@ type geoPoint struct {
 	Long float64 `json:"long"`
 }
 
-// notBlocked are the decisions where the edge did not refuse the request.
+// notRefused are the actions where the edge did not refuse the request.
 // Anything else, including a name added later, is a refusal.
-var notBlocked = map[string]bool{
-	"allow": true, "would_block": true, "would_limit": true, "upstream_timeout": true, "upstream_error": true, "upstream_tls": true, "client_gone": true,
+var notRefused = map[string]bool{
+	"allow": true, "upstream_timeout": true, "upstream_error": true, "upstream_tls": true, "client_gone": true,
 }
 
 type trafficKey struct {
@@ -92,7 +92,7 @@ func (l *accessLine) traffic(w int64, now time.Time) (trafficLine, bool) {
 	if !l.Time.IsZero() && !l.plausible(now) {
 		return trafficLine{}, false
 	}
-	return trafficLine{l.minute(now), l.countryOf(), w, !notBlocked[l.Decision], l.sampled()}, true
+	return trafficLine{l.minute(now), l.countryOf(), w, !notRefused[l.Action], l.sampled()}, true
 }
 
 func (a *trafficAggregator) add(t trafficLine) {
@@ -297,7 +297,7 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 		from = s.now().UTC().Truncate(time.Minute).Add(-time.Duration(n-1) * time.Minute)
 	} else {
 		var err error
-		if from, err = s.since(r); err != nil {
+		if from, _, err = s.span(r); err != nil {
 			return err
 		}
 	}

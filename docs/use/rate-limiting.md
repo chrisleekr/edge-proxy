@@ -36,7 +36,7 @@ This is the rule's **Then** block in the UI; its expression (here `http.request.
 
 ## Before you block: shadow mode
 
-Start every rule in shadow mode, `"action": "log"`: it counts the requests it would have limited and lets them through. A rule added in the UI starts that way. **Stats** shows its **Over limit, log only** count against real traffic, with the clients it would hit, and **Needs attention** on the dashboard lists log-only rules with requests over their limit. Each request it would have limited is also written to the [access log](../operate/monitoring.md#logs) as a `would_limit` line naming the rule (`edge.rate_limit_rule`), whatever `LOG_SAMPLE_RATE` is, unless an access rule's `would_block` or a rejection, such as a 429, gives the line another decision. Switch it to `block` once the numbers look right, and publish that change through a [canary](publishing.md#canary) so only part of the traffic sees it first. The [rollback guard](publishing.md#rollback-guard) compares a changed rule with what it found while it only logged.
+Start every rule in shadow mode, `"action": "log"`: it counts the requests it would have limited and lets them through. A rule added in the UI starts that way. **Stats** shows its **Logged instead of limited** count against real traffic, with the clients it would hit, and **Needs attention** on the dashboard lists log-only rules with requests over their limit. Each request it would have limited is also written to the [access log](../operate/monitoring.md#logs), whatever `LOG_SAMPLE_RATE` is, with the rule in `edge.logged_rules` and its entry in `edge.matched_rules` (`result` `logged`). Switch it to `block` once the numbers look right, and publish that change through a [canary](publishing.md#canary) so only part of the traffic sees it first. The [rollback guard](publishing.md#rollback-guard) compares a changed rule with what it found while it only logged.
 
 ## How a request is checked
 
@@ -65,7 +65,7 @@ flowchart TD
     Algo -->|"yes"| Pass
     Algo -->|"no"| Over
     Over --> Action{"action"}
-    Action -->|"log"| Shadow["Count would_limit,<br/>let it through"]
+    Action -->|"log"| Shadow["Count logged,<br/>let it through"]
     Action -->|"block"| Limited["429 with Retry-After"]
 ```
 

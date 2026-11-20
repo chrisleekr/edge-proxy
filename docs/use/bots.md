@@ -43,9 +43,9 @@ starts_with(http.request.uri.path, "/wp-") or starts_with(http.request.uri.path,
 { "settings": { "block": "block", "ban": "24h" } }
 ```
 
-The first request that matches gets 403, and every later request from that client IP on that edge gets 403 with the decision `banned` for 24 hours, on every host. See [Banning a client](policy.md#banning-a-client) for what ends a ban early and what clears it. Bans an edge records show on the [IP lists](#ip-lists) page, where a person can lift one.
+The first request that matches gets 403, and every later request from that client IP on that edge gets 403 with the action `banned` for 24 hours, on every host. See [Banning a client](policy.md#banning-a-client) for what ends a ban early and what clears it. Bans an edge records show on the [IP lists](#ip-lists) page, where a person can lift one.
 
-Anchor the expression on paths your own sites and services never use. `/wp-` also matches a top-level path such as a GitLab group, a user or a MinIO bucket named `wp-something`, and would ban its owner on every host. Start with `"block": "log"` and no `ban`, check the `would_block` lines for this rule in the [access log](../operate/monitoring.md#logs) against your real traffic, and only then switch to `block` with `ban`.
+Anchor the expression on paths your own sites and services never use. `/wp-` also matches a top-level path such as a GitLab group, a user or a MinIO bucket named `wp-something`, and would ban its owner on every host. Start with `"block": "log"` and no `ban`, check the lines whose `edge.logged_rules` contains this rule in the [access log](../operate/monitoring.md#logs) against your real traffic, and only then switch to `block` with `ban`.
 
 ## IP lists
 
@@ -241,7 +241,7 @@ It needs:
 
 Pick the limit from **Stats → Client signals**, which shows how many requests carried each signal and their share. Set it well above what real users with the signal send in a minute, and below the fleet's rate.
 
-Roll it out as every recipe here does: `log` first, watch **Over limit, log only** on **Stats** and the `would_limit` lines in the [access log](../operate/monitoring.md#logs), which name the rule and carry the JA4, JA3, User-Agent and browser headers of each request it would have limited, publish `block` through a [canary](publishing.md#canary), then keep it. Give it no `penalty`: the edge checks a penalty before the rule, so on a `ja4` key it would block every client on the fingerprint for its duration.
+Roll it out as every recipe here does: `log` first, watch **Logged instead of limited** on **Stats** and the lines whose `edge.logged_rules` contains the rule in the [access log](../operate/monitoring.md#logs), which carry the JA4, JA3, User-Agent and browser headers of each request it would have limited, publish `block` through a [canary](publishing.md#canary), then keep it. Give it no `penalty`: the edge checks a penalty before the rule, so on a `ja4` key it would block every client on the fingerprint for its duration.
 
 Trade-offs:
 

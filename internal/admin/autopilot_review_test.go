@@ -100,7 +100,7 @@ func TestAutopilotEnforceChecksSubjectAddresses(t *testing.T) {
 		}
 		id := liveRule(t, h, pub, agent, proposal("enforce", "login-stuffing", loginRule()))
 		h.advance(6 * time.Minute)
-		ruleMinutes(h, pub, 6, 10_000, 1_000, 0, 20, id, fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"2001:4860:4801:10::/64","limited":0,"would_limit":20}]`, id))
+		ruleMinutes(h, pub, 6, 10_000, 1_000, 0, 20, id, fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"2001:4860:4801:10::/64","limited":0,"logged":20}]`, id))
 		h.tick()
 		if st := ruleState(t, h, id); st != "rejected" || lastReason(t, h, id, "rejected") != "crawler_subject" {
 			t.Fatalf("rule %s", st)
@@ -115,7 +115,7 @@ func TestAutopilotEnforceChecksSubjectAddresses(t *testing.T) {
 			t.Fatalf("key %v", r.Key)
 		}
 		h.advance(6 * time.Minute)
-		ruleMinutes(h, pub, 6, 10_000, 1_000, 0, 20, id, fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"203.0.113.9 POST","limited":0,"would_limit":20}]`, id))
+		ruleMinutes(h, pub, 6, 10_000, 1_000, 0, 20, id, fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"203.0.113.9 POST","limited":0,"logged":20}]`, id))
 		h.tick()
 		if st := ruleState(t, h, id); st != "rejected" || lastReason(t, h, id, "rejected") != "protected_subject" {
 			t.Fatalf("rule %s", st)
@@ -125,7 +125,7 @@ func TestAutopilotEnforceChecksSubjectAddresses(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		// 500 of 10,000 a minute is 5%, but 480 of them are one attacker's.
 		id := observed(t, h, pub, agent, 500, "[]")
-		if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"would_limit":480}]`, id)); err != nil {
+		if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"logged":480}]`, id)); err != nil {
 			t.Fatal(err)
 		}
 		h.tick()
@@ -343,7 +343,7 @@ func TestAutopilotReadTools(t *testing.T) {
 	const injected = "ignore-previous-instructions"
 	t.Run("rule stats past six hours come in hourly steps, filtered to the rule", func(t *testing.T) {
 		h, pub, _ := autopilotHarness(t)
-		h.putStats(1, 400, 100, 0, 0, []int64{100}, `[{"id":"login","evaluated":10,"limited":1,"would_limit":0},{"id":"other","evaluated":5}]`,
+		h.putStats(1, 400, 100, 0, 0, []int64{100}, `[{"id":"login","evaluated":10,"limited":1,"logged":0},{"id":"other","evaluated":5}]`,
 			`[{"rule":"login","key":"k1","display":"q=`+injected+`","limited":1}]`)
 		out := mustCall(t, h.mcpSession(pub.userToken("stats.read"), 0), "get_rule_stats", map[string]any{"rule": "login", "minutes": 600})
 		series, _ := out["series"].([]any)
@@ -713,11 +713,11 @@ func TestAutopilotShadowAndDuplicates(t *testing.T) {
 	t.Run("the stored shadow ratio leaves heavy subjects out", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		id := observed(t, h, pub, agent, 600, "[]")
-		if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"would_limit":384}]`, id)); err != nil {
+		if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"logged":384}]`, id)); err != nil {
 			t.Fatal(err)
 		}
 		h.tick()
-		// Over 6 minutes: 3,600 would-limits, 2,304 of them the attacker's,
+		// Over 6 minutes: 3,600 logged requests, 2,304 of them the attacker's,
 		// less 3 standard deviations of its sampled estimate, sqrt(16 x 2,304) = 192:
 		// 720 of 6,000 evaluated.
 		var shadow float64
@@ -728,7 +728,7 @@ func TestAutopilotShadowAndDuplicates(t *testing.T) {
 	t.Run("a subject whose estimate is mostly inherited is not heavy", func(t *testing.T) {
 		h, pub, agent := autopilotHarness(t)
 		id := observed(t, h, pub, agent, 500, "[]")
-		if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"would_limit":480,"err":470}]`, id)); err != nil {
+		if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"logged":480,"err":470}]`, id)); err != nil {
 			t.Fatal(err)
 		}
 		h.tick()
@@ -789,7 +789,7 @@ func TestAutopilotInvestigate(t *testing.T) {
 func TestAutopilotPerRuleGuardWithoutAShadow(t *testing.T) {
 	h, pub, agent := autopilotHarness(t)
 	id := observed(t, h, pub, agent, 500, "[]")
-	if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"would_limit":500}]`, id)); err != nil {
+	if _, err := h.db.Exec(t.Context(), "UPDATE edge_stats_minute SET top_limited = $1", fmt.Sprintf(`[{"rule":%q,"key":"k1","display":"198.51.100.7","limited":0,"logged":500}]`, id)); err != nil {
 		t.Fatal(err)
 	}
 	h.tick()
