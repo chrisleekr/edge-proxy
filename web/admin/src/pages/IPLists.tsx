@@ -229,6 +229,8 @@ function LineIssues({ error }: { error: unknown }) {
 function EditList({ s, onDone }: { s: Source; onDone: () => void }) {
   const typed = s.url === '';
   const entries = useQuery({ queryKey: ['ip-list-entries', s.id], queryFn: () => api<{ entries: string }>('GET', `/api/ip-lists/${s.id}/entries`), enabled: typed });
+  // The list refetches every minute: compare against what the form opened with.
+  const [start] = useState(s);
   const [name, setName] = useState(s.name);
   const [url, setURL] = useState(s.url);
   const [wide, setWide] = useState(s.wide);
@@ -236,9 +238,9 @@ function EditList({ s, onDone }: { s: Source; onDone: () => void }) {
   const body = text ?? entries.data?.entries ?? '';
   const locked = s.used_by.length > 0;
   const patch = {
-    ...(name !== s.name && { name: name.trim() }),
-    ...(!typed && url !== s.url && { url: url.trim() }),
-    ...(wide !== s.wide && { wide }),
+    ...(name !== start.name && { name: name.trim() }),
+    ...(!typed && url !== start.url && { url: url.trim() }),
+    ...(wide !== start.wide && { wide }),
     ...(typed && text !== undefined && text !== entries.data?.entries && { entries: text }),
   };
   const save = useMutation({ mutationFn: () => api('PATCH', `/api/ip-lists/${s.id}`, patch), onSuccess: onDone });

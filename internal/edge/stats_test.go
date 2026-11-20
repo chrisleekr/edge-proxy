@@ -449,7 +449,11 @@ func TestLiftedOutcomesReported(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, nil)
 			h.load(envelope(tc.config()))
-			h.do("GET", "/", nil, "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", tc.client).Body.Close()
+			resp := h.do("GET", "/", nil, "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", tc.client)
+			resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status %d, want %d", resp.StatusCode, tc.status)
+			}
 			var got RuleOutcome
 			for _, r := range h.srv.poller.reg.deltas()[0].Rules {
 				if r.ID == "tools" {

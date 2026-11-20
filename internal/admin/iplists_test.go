@@ -1033,3 +1033,19 @@ func TestParseList(t *testing.T) {
 		})
 	}
 }
+
+// An edge from before the rename polls /v1/denylist: admin rolled first must
+// keep serving it the lists and the ban lifts.
+func TestDenylistPathServesWhatIPListsServes(t *testing.T) {
+	h, pub, e, _ := listHarness(t)
+	status(t, addTyped(pub, "office", "198.51.100.7", false), http.StatusCreated)
+	status(t, report(e, ban("203.0.113.9", h.now().Add(-time.Minute), time.Hour)), http.StatusOK)
+	status(t, pub.do("POST", "/api/bans/lift", map[string]string{"ip": "203.0.113.9"}), http.StatusNoContent)
+	old := decode[ipListsBody](t, e.do("GET", "/v1/denylist", nil))
+	if len(old.Lists) != 1 || old.Lists[0].Name != "office" || len(old.Lifts) != 1 {
+		t.Fatalf("/v1/denylist %+v, want 1 list and 1 lift", old)
+	}
+	if cur := edgeIPLists(t, e); fmt.Sprint(old) != fmt.Sprint(cur) {
+		t.Fatalf("/v1/denylist %+v differs from /v1/ip-lists %+v", old, cur)
+	}
+}

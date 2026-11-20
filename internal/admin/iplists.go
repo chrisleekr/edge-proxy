@@ -71,6 +71,8 @@ func (s *Server) ipListRoutes() {
 	s.handle("GET /api/bans", "stats.read", s.listBans)
 	s.handle("POST /api/bans/lift", "ip_lists.manage", s.liftBan)
 	s.handle("GET /v1/ip-lists", permEdge, s.serveIPLists)
+	// Edges from before the rename poll this path, so an admin-first rollout keeps their lists and ban lifts.
+	s.handle("GET /v1/denylist", permEdge, s.serveIPLists)
 }
 
 // parseList reads a downloaded IP list: JSON when the body starts with { or [
@@ -521,6 +523,17 @@ func (s *Server) setIPList(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	ctx := r.Context()
 	err = s.change(ctx, p.actor, func(tx pgx.Tx) (admindb.Event, error) {
+		// A rename takes publishTx's locks, in its order and before the list row,
+		// so a save or publish adding a rule that names the old name cannot commit
+		// between the use check and the rename.
+		if in.Name != nil {
+			if _, err := tx.Exec(ctx, "SELECT 1 FROM config_draft FOR UPDATE"); err != nil {
+				return admindb.Event{}, err
+			}
+			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", publishLock); err != nil {
+				return admindb.Event{}, err
+			}
+		}
 		var cur struct {
 			Name    string
 			URL     *string
@@ -618,7 +631,7 @@ func (s *Server) setIPList(w http.ResponseWriter, r *http.Request, p *principal)
 			}
 		}
 		// A new address or width means the last download no longer applies:
-		// fetch again within a minute.
+		// clearing the attempt makes it due on the leader's next check.
 		if cur.URL != nil && (changes["url"] != nil || changes["wide"] != nil) {
 			if _, err := tx.Exec(ctx, "UPDATE ip_list_status SET last_attempt_at = NULL WHERE source_id = $1", id); err != nil {
 				return admindb.Event{}, err
@@ -781,7 +794,7 @@ func (s *Server) removeIPList(w http.ResponseWriter, r *http.Request, p *princip
 }
 
 // refreshIPList makes a downloaded source due: the leader fetches it on its next
-// check, within a minute. Fetch status is telemetry, so it writes no audit row.
+// check, every minute once any download in progress ends. Fetch status is telemetry, so it writes no audit row.
 func (s *Server) refreshIPList(w http.ResponseWriter, r *http.Request, _ *principal) error {
 	id, err := sourceID(r)
 	if err != nil {

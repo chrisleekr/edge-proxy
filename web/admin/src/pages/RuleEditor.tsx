@@ -53,9 +53,19 @@ function AllowFix({ onAdd }: { onAdd: (list: string) => void }) {
   const canRead = useCan()('stats.read');
   const lists = useQuery({ ...ipListsQuery, enabled: canRead });
   const [pick, setPick] = useState('');
-  const names = (lists.data ?? []).map((l) => l.name);
+  // Typed lists only: an allow on a downloaded list lets whoever publishes it skip enforcement.
+  const names = (lists.data ?? []).filter((l) => l.url === '').map((l) => l.name);
   const list = pick || names[0] || '';
-  if (!list) return null;
+  if (!list)
+    return (
+      <p className="text-sm text-body">
+        Type the addresses in an{' '}
+        <Link to="/ip-lists" className="font-medium text-heading underline">
+          IP list
+        </Link>{' '}
+        first, then name it here.
+      </p>
+    );
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <Button onClick={() => onAdd(list)}>Add condition: client is on IP list</Button>
@@ -303,7 +313,7 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
         {/* Every problem is listed here too, so none hides under a closed section. */}
         <Issues issues={errors.map((i) => ({ ...i, path: i.path || 'rule' }))} />
         {/* The fix follows the problem it fixes. */}
-        {errors.some((i) => i.path === 'expression' && i.message.startsWith('an always-allow rule must require')) && (
+        {text === undefined && errors.some((i) => i.path === 'expression' && i.message.startsWith('an always-allow rule must require')) && (
           <AllowFix onAdd={(name) => setQuery((cur) => {
               const row = { field: 'client.ip_lists', operator: 'in', value: [name] };
               // An "or" or negated group must stay whole, so the new row joins it from outside.

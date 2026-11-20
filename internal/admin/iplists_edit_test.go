@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -482,5 +483,37 @@ func TestADownloadStartedBeforeAnEditIsDropped(t *testing.T) {
 				t.Fatalf("stale attempt recorded at %v", s.LastAttemptAt)
 			}
 		})
+	}
+}
+
+// A rename waits for a transaction holding the draft, as a save or publish
+// does, so a rule naming the old name cannot land between the use check and
+// the rename.
+func TestIPListRenameWaitsForTheDraftLock(t *testing.T) {
+	h, pub, _, _ := listHarness(t)
+	status(t, addTyped(pub, "office", "198.51.100.7", false), http.StatusCreated)
+	// The draft row exists once a draft is saved; with none there is nothing to lock.
+	status(t, pub.save(`"0"`, listRuleConfig("")), http.StatusOK)
+	tx, err := h.db.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }() //nolint:usetesting // t.Context may be cancelled
+	if _, err := tx.Exec(t.Context(), "SELECT 1 FROM config_draft FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() { done <- patchList(t, pub, "office", map[string]any{"name": "hq"}).StatusCode }()
+	waitingOnLocks(t, h, 1)
+	select {
+	case code := <-done:
+		t.Fatalf("rename answered %d while the draft was locked", code)
+	default:
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-done; code != http.StatusNoContent {
+		t.Fatalf("rename after the lock was released: %d", code)
 	}
 }
