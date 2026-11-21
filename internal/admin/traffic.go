@@ -6,8 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -22,9 +25,13 @@ import (
 const (
 	// liveMinutes is how far back the live view can look.
 	liveMinutes = 60
-	// minuteKeep is how long minute rows live. Longer than liveMinutes so a
-	// late flush still lands in a minute the live view reads.
-	minuteKeep = 2 * time.Hour
+	// minuteRead is how far back flushes write minute rows, so a one-hour
+	// period and the hour before it, which the war room compares, are both
+	// read exactly. It must stay below minuteKeep.
+	minuteRead = 150 * time.Minute
+	// minuteKeep is how long minute rows live. Longer than minuteRead so a
+	// late flush still lands in a minute a span reads.
+	minuteKeep = 3 * time.Hour
 	// unknownCountry is for a line with no usable country.
 	unknownCountry = "unknown"
 )
@@ -38,6 +45,8 @@ var maxPendingTraffic = 10_000
 type geoPoint struct {
 	Lat  float64 `json:"lat"`
 	Long float64 `json:"long"`
+	// Name labels where the edges are on the war room.
+	Name string `json:"name,omitempty"`
 }
 
 // notRefused are the actions where the edge did not refuse the request.
@@ -69,11 +78,16 @@ func newTrafficAggregator() *trafficAggregator {
 // countryOf is the line's country if it is two upper-case letters or digits.
 // The value is shipper supplied, so anything else must not become a key.
 func (l *accessLine) countryOf() string {
-	c := l.Country
-	if len(c) == 2 && all(c, func(b byte) bool { return isDigit(b) || b >= 'A' && b <= 'Z' }) {
-		return c
+	if validCountry(l.Country) {
+		return l.Country
 	}
 	return unknownCountry
+}
+
+// validCountry is the shape a country key must have: two upper-case letters
+// or digits.
+func validCountry(c string) bool {
+	return len(c) == 2 && all(c, func(b byte) bool { return isDigit(b) || b >= 'A' && b <= 'Z' })
 }
 
 // trafficLine is what traffic keeps of an access line, so a batch holds a
@@ -144,11 +158,11 @@ func (s *Server) flushTraffic(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, flushTimeout)
 	defer cancel()
 	now := s.now().UTC()
-	liveFrom := now.Truncate(time.Minute).Add(-(liveMinutes - 1) * time.Minute)
+	minuteFrom := now.Truncate(time.Minute).Add(-minuteRead + time.Minute)
 	var minutes, hours trafficRows
 	roll := map[trafficKey]*trafficCount{}
 	for k, c := range s.trafficAgg.take() {
-		if !k.minute.Before(liveFrom) {
+		if !k.minute.Before(minuteFrom) {
 			minutes.add(k.minute, k.country, c)
 		}
 		hk := trafficKey{k.minute.Truncate(time.Hour), k.country}
@@ -192,11 +206,12 @@ func (s *Server) flushTraffic(ctx context.Context) error {
 
 func (s *Server) trafficRoutes() {
 	s.handle("GET /api/traffic", "stats.read", s.getTraffic)
+	s.handle("GET /api/settings/traffic-map", "config.read", s.getTrafficMap)
 	s.handle("PUT /api/settings/traffic-map", "settings.manage", s.putTrafficMap)
 }
 
-// TrafficMapSettings is what the Traffic map needs from the operator: where
-// the edges are, so it can draw lines to them. Nil draws none.
+// TrafficMapSettings is where the edges are, and an optional place name, for
+// the war room map's lines and label. Nil draws none.
 type TrafficMapSettings struct {
 	Edge *geoPoint `json:"edge"`
 }
@@ -207,11 +222,12 @@ type trafficMapIn struct {
 	Edge *struct {
 		Lat  *float64 `json:"lat"`
 		Long *float64 `json:"long"`
+		Name string   `json:"name"`
 	} `json:"edge"`
 }
 
-// settings reports a missing coordinate or a place outside the globe, else
-// the settings to store.
+// settings reports a missing coordinate, a place outside the globe or a bad
+// name, else the settings to store.
 func (in trafficMapIn) settings() (TrafficMapSettings, []expr.Issue) {
 	e := in.Edge
 	if e == nil {
@@ -230,10 +246,14 @@ func (in trafficMapIn) settings() (TrafficMapSettings, []expr.Issue) {
 	case *e.Long < -180 || *e.Long > 180:
 		errs = append(errs, expr.Issue{Path: "edge.long", Msg: "longitude must be from -180 to 180 degrees"})
 	}
+	name := strings.TrimSpace(e.Name)
+	if utf8.RuneCountInString(name) > 60 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		errs = append(errs, expr.Issue{Path: "edge.name", Msg: "name must be at most 60 characters with no control characters"})
+	}
 	if errs != nil {
 		return TrafficMapSettings{}, errs
 	}
-	return TrafficMapSettings{Edge: &geoPoint{Lat: *e.Lat, Long: *e.Long}}, nil
+	return TrafficMapSettings{Edge: &geoPoint{Lat: *e.Lat, Long: *e.Long, Name: name}}, nil
 }
 
 func loadTrafficMap(ctx context.Context, q querier) (TrafficMapSettings, error) {
@@ -247,6 +267,14 @@ func loadTrafficMap(ctx context.Context, q querier) (TrafficMapSettings, error) 
 		return m, err
 	}
 	return m, json.Unmarshal(b, &m)
+}
+
+func (s *Server) getTrafficMap(w http.ResponseWriter, r *http.Request, _ *principal) error {
+	m, err := loadTrafficMap(r.Context(), s.db)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, m)
 }
 
 func (s *Server) putTrafficMap(w http.ResponseWriter, r *http.Request, p *principal) error {
@@ -282,22 +310,47 @@ type countryTraffic struct {
 	Estimated int64  `json:"estimated"`
 }
 
+// trafficPoint is one country's counts in one minute or hour.
+type trafficPoint struct {
+	At        time.Time `json:"at"`
+	Requests  int64     `json:"requests"`
+	Blocked   int64     `json:"blocked"`
+	Estimated int64     `json:"estimated"`
+}
+
 // getTraffic sums countries over the last ?minutes= (live, 1 to 60) or
-// ?hours= (a period, as for routes). With neither it is the last 24 hours.
+// ?hours= (a period, as for routes), or ?from= and ?to=. A span that starts
+// within the last 150 minutes (minuteRead) is read by the minute, any other by
+// the hour. With none of them it is the last 24 hours.
+// With ?country= it also lists that country's rows in the same window.
 func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal) error {
 	q := r.URL.Query()
+	country := q.Get("country")
+	if q.Has("country") && country != unknownCountry && country != otherKey && !validCountry(country) {
+		return fail(http.StatusBadRequest, "country must be a two-letter code, unknown or *")
+	}
 	table, col := "traffic_hour", "hour"
-	var from time.Time
+	var from, to time.Time
+	end := s.now().UTC().Truncate(time.Minute).Add(time.Minute)
 	if q.Has("minutes") {
 		n, err := strconv.Atoi(q.Get("minutes"))
-		if err != nil || n < 1 || n > liveMinutes || q.Has("hours") {
-			return fail(http.StatusBadRequest, "minutes must be 1 to 60, and not given with hours")
+		if err != nil || n < 1 || n > liveMinutes || q.Has("hours") || q.Has("from") || q.Has("to") {
+			return fail(http.StatusBadRequest, "minutes must be 1 to 60, and not given with hours, from or to")
 		}
 		table, col = "traffic_minute", "minute"
-		from = s.now().UTC().Truncate(time.Minute).Add(-time.Duration(n-1) * time.Minute)
+		from, to = end.Add(-time.Duration(n)*time.Minute), end
 	} else {
-		var err error
-		if from, _, err = s.span(r); err != nil {
+		f, t, ok, err := parseSpan(q)
+		if err != nil {
+			return err
+		}
+		// Minute rows are written only for the last minuteRead, though kept
+		// longer, so only a span starting in it is read by the minute and exact.
+		if ok && !f.Truncate(time.Minute).Before(end.Add(-minuteRead)) {
+			table, col = "traffic_minute", "minute"
+			from = earlierOf(f.Truncate(time.Minute), end)
+			to = laterOf(from, earlierOf(ceil(t, time.Minute), end))
+		} else if from, to, err = s.span(r); err != nil {
 			return err
 		}
 	}
@@ -306,7 +359,7 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 		return err
 	}
 	rows, err := s.db.Query(r.Context(), `SELECT country, sum(requests)::bigint, sum(blocked)::bigint, sum(estimated)::bigint
-		FROM `+table+` WHERE `+col+` >= $1 GROUP BY country ORDER BY 2 DESC, 1`, from)
+		FROM `+table+` WHERE `+col+` >= $1 AND `+col+` < $2 GROUP BY country ORDER BY 2 DESC, 1`, from, to)
 	if err != nil {
 		return err
 	}
@@ -316,7 +369,9 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 		To        time.Time        `json:"to"`
 		Countries []countryTraffic `json:"countries"`
 		Edge      *geoPoint        `json:"edge"`
-	}{From: from, To: s.now().UTC(), Countries: []countryTraffic{}, Edge: settings.Edge}
+		Series    []trafficPoint   `json:"series,omitzero"`
+	}{To: earlierOf(to, s.now().UTC()), Countries: []countryTraffic{}, Edge: settings.Edge}
+	out.From = earlierOf(from, out.To)
 	for rows.Next() {
 		var c countryTraffic
 		if err := rows.Scan(&c.Country, &c.Requests, &c.Blocked, &c.Estimated); err != nil {
@@ -326,6 +381,26 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	rows.Close()
+	if q.Has("country") {
+		pts, err := s.db.Query(r.Context(), `SELECT `+col+`, requests, blocked, estimated FROM `+table+`
+			WHERE country = $1 AND `+col+` >= $2 AND `+col+` < $3 ORDER BY 1`, country, from, to)
+		if err != nil {
+			return err
+		}
+		defer pts.Close()
+		out.Series = []trafficPoint{}
+		for pts.Next() {
+			var p trafficPoint
+			if err := pts.Scan(&p.At, &p.Requests, &p.Blocked, &p.Estimated); err != nil {
+				return err
+			}
+			out.Series = append(out.Series, p)
+		}
+		if err := pts.Err(); err != nil {
+			return err
+		}
 	}
 	return writeJSON(w, http.StatusOK, out)
 }

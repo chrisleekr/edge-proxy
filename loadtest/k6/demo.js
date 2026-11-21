@@ -34,7 +34,7 @@ function token(kind) {
 }
 
 // Countries by client number, so a given address always comes from the same
-// one and the Traffic map has places to show.
+// one and the war room map has places to show.
 const countries = ['US', 'US', 'US', 'GB', 'DE', 'DE', 'FR', 'JP', 'AU', 'BR', 'IN', 'CA', 'ZA', 'SG', 'MX', 'NL'];
 const located = (n) => ({ ...viewer(n), 'CloudFront-Viewer-Country': countries[n % countries.length] });
 const client = () => located(Math.floor(Math.random() * ips));

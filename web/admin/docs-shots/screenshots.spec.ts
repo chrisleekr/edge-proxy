@@ -6,8 +6,32 @@ import { expect, type Page, test } from '@playwright/test';
 const shot = async (page: Page, name: string, heading: string) => {
   await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
   await page.waitForLoadState('networkidle');
-  await expect(page).toHaveScreenshot(`${name}.png`);
+  // Shows the whole page, not just the first screen. fullPage alone keeps
+  // 100vh at 800px, so the sticky h-screen sidebar would end there. Growing
+  // the viewport to the page's height (or the sidebar's, when the page is
+  // shorter than its nav) lays the page out whole. The war room's cards fill
+  // their columns, so its height follows the viewport's: grow until it holds.
+  let height = 0;
+  for (let next = await fullHeight(page); next !== height; next = await fullHeight(page)) {
+    height = next;
+    await page.setViewportSize({ width: 1280, height });
+  }
+  // A click leaves the pointer where the resized page may put a hover
+  // effect, such as a number field's spinner.
+  await page.mouse.move(0, 0);
+  // fullPage still captures a panel that renders after the measurement.
+  await expect(page).toHaveScreenshot(`${name}.png`, { fullPage: true });
+  // Back to the first-screen size, so the next page's height is measured from it.
+  await page.setViewportSize({ width: 1280, height: 800 });
 };
+
+// The page's height after two frames, so layout that reacts to a resize
+// (ResizeObserver, a React render) has landed.
+const fullHeight = (page: Page) =>
+  page.evaluate(async () => {
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return Math.max(document.documentElement.scrollHeight, ...Array.from(document.querySelectorAll('aside'), (a) => a.scrollHeight));
+  });
 
 test('docs screenshots', async ({ page }) => {
   await page.clock.setFixedTime(new Date(process.env.SHOT_TIME!));
@@ -28,7 +52,9 @@ test('docs screenshots', async ({ page }) => {
     if (route.request().url().includes('/api/audit')) body = body.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '00000000-0000-4000-8000-000000000000');
     // Audit rows of case claims, case runs and precision rows carry the
     // prompt's hash, which changes with every prompt edit.
-    body = body.replace(/"prompt_sha256":"[0-9a-f]{64}"/g, `"prompt_sha256":"${'5e'.repeat(32)}"`);
+    // Other hashes (a run's events, a note's fields) cover tool calls'
+    // real-time durations and results, so every hash is fixed.
+    body = body.replace(/"([a-z_]*sha256)":"[0-9a-f]{64}"/g, `"$1":"${'5e'.repeat(32)}"`);
     // A tool call's time is measured in real time.
     if (route.request().url().includes('/api/autopilot/cases/')) body = body.replace(/"duration_ms":\d+/g, '"duration_ms":4');
     // Postgres stamps a token's creation with the real time, not admin's
@@ -49,7 +75,7 @@ test('docs screenshots', async ({ page }) => {
     ['fleet', '/fleet', 'Fleet'],
     ['audit', '/audit', 'Audit log'],
     ['routes', '/routes', 'Routes'],
-    ['traffic', '/traffic?view=period&range=1h', 'Traffic map'],
+    ['warroom', '/traffic?view=period&range=1h', 'War room'],
     ['value-lists', '/value-lists', 'Value lists'],
     ['templates', '/templates', 'Templates'],
     ['cors', '/cors', 'CORS policies'],
@@ -66,8 +92,7 @@ test('docs screenshots', async ({ page }) => {
     await shot(page, name, heading);
   }
 
-  // Needs attention fills the dashboard's first screen, so the traffic
-  // chart and its release marks get a shot of their own.
+  // The docs explain the traffic chart's release marks from a close-up.
   await page.goto('/?range=1h');
   const traffic = page.getByRole('region', { name: 'Traffic, last hour' });
   await expect(traffic.getByRole('link', { name: /^Version 4 published/ })).toBeVisible();
@@ -100,17 +125,10 @@ test('docs screenshots', async ({ page }) => {
   await shot(page, 'autopilot-note', name);
 
   await page.goto('/tests');
-  // The simulate form above the results loads with the expression schema.
-  // Scrolling before it renders would move the form, so the shot's scroll
-  // position would depend on which request answers first.
+  // The simulate form above the results loads with the expression schema;
+  // the page's height is measured only once it has rendered.
   await expect(page.getByRole('combobox', { name: 'Method' })).toBeVisible();
   await page.getByRole('button', { name: 'Run tests on the saved draft' }).click();
   await expect(page.getByRole('list', { name: 'Test results' })).toBeVisible();
-  // The window scrolls (the layout has no inner scroll container). Scrolling
-  // into view is a no-op when the list is already partly visible, so late
-  // requests would leave the position depending on load timing: settle first,
-  // then scroll to the bottom.
-  await page.waitForLoadState('networkidle');
-  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await shot(page, 'tests', 'Tests and simulate');
 });

@@ -597,25 +597,31 @@ test('a role that reads stats but not config sees Notifications without asking f
   await other.context().close();
 });
 
-test('a role that reads stats sees the traffic map, which turns live and holds still when motion is reduced', async ({ browser }) => {
+test('a role that reads stats reaches the war room, which shows Live then Period and holds the flows still when motion is reduced', async ({ browser }) => {
   const other = await (await browser.newContext()).newPage();
   await other.goto('/');
   await other.getByLabel('Username').fill(oncall);
   await other.getByLabel('Password').fill(password);
   await other.getByRole('button', { name: 'Sign in' }).click();
-  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Traffic map', exact: true }).click();
-  // The seeded lines are real; the live window is only 5 minutes, so it is mocked.
+  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'War room', exact: true }).click();
+  await expect(other.getByRole('heading', { level: 1, name: 'War room' })).toBeVisible();
+  await expect(other.getByRole('button', { name: 'Live', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(other.getByText('NOT LIVE')).toHaveCount(0);
+  // The seeded lines are real; the live window is only 5 minutes, so it is mocked below.
   await other.getByRole('button', { name: 'Period', exact: true }).click();
   await expect(other).toHaveURL(/view=period/);
   await expect(other.getByRole('button', { name: 'Period', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(other.getByText('NOT LIVE')).toBeVisible();
+  await expect(other.getByRole('button', { name: 'Back to live' }).first()).toBeVisible();
+  await expect(other.getByRole('region', { name: 'Where requests come from' }).getByRole('heading', { name: /^Where requests came from, .*\d\d:\d\d to .*\d\d:\d\d UTC$/ })).toBeVisible();
   await expect(other.getByRole('cell', { name: 'United States' })).toBeVisible();
   await expect(other.getByRole('cell', { name: 'Country not known' })).toBeVisible();
-  const globe = other.getByRole('img', { name: /^Globe of requests by country/ });
-  await expect(globe).toBeVisible();
-  // Read-only: the form to move the edges is for roles that manage settings.
+  // Read-only: the form to move the edges is on Settings, for roles that manage them.
   await expect(other.getByRole('heading', { name: 'Where the edges are' })).toHaveCount(0);
-  // Hovering a country names it, with its counts.
-  await expect(globe.locator('[data-country="US"] > title')).toHaveText(/^United States: [\d,]+ requests, [\d,]+ blocked$/);
+  // This role has stats.read only: the config, audit and autopilot parts are left out.
+  await expect(other.getByRole('region', { name: 'Recent changes' })).toHaveCount(0);
+  await expect(other.getByText('Kill switches')).toHaveCount(0);
+  await expect(other.getByRole('button', { name: 'Ask autopilot' })).toHaveCount(0);
 
   const now = Date.now();
   await other.route('**/api/traffic?minutes=5', (r) =>
@@ -627,81 +633,269 @@ test('a role that reads stats sees the traffic map, which turns live and holds s
           { country: 'DE', requests: 900, blocked: 0, estimated: 0 },
           { country: 'US', requests: 300, blocked: 12, estimated: 0 },
         ],
-        edge: null,
+        edge: { lat: 50.11, long: 8.68, name: 'Frankfurt' },
       },
     }),
   );
   await other.getByRole('button', { name: 'Live', exact: true }).click();
   await expect(other.getByRole('button', { name: 'Live', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(other).not.toHaveURL(/view=period/);
-  // Germany starts at the centre of the globe, so its outline always has a path.
-  const outline = () => other.locator('path[data-country="DE"]').getAttribute('d');
-  const before = await outline();
-  expect(before).toBeTruthy();
-  await other.waitForTimeout(1000);
-  expect(await outline()).not.toBe(before);
+  await expect(other.getByRole('region', { name: 'Where requests come from' }).getByRole('heading', { name: 'Requests flowing to the edges' })).toBeVisible();
+  const flowAnimation = () => other.locator('.wr-flow').first().evaluate((el) => getComputedStyle(el).animationName);
+  await expect.poll(flowAnimation).toBe('wr-flow');
 
   await other.emulateMedia({ reducedMotion: 'reduce' });
-  await other.waitForTimeout(300);
-  const still = await outline();
-  await other.waitForTimeout(1000);
-  expect(await outline()).toBe(still);
-
-  await other.setViewportSize({ width: 375, height: 812 });
-  expect(await other.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+  await expect.poll(flowAnimation).toBe('none');
   await other.context().close();
 });
 
-test('the traffic map explains no logs and no countries, marks estimates and unmapped countries, and turns from the keyboard', async ({ browser }) => {
-  // Reduced motion from the start, so only the keyboard can turn the globe.
-  const other = await (await browser.newContext({ reducedMotion: 'reduce' })).newPage();
+test('war room flow lines start at a drawn mark and the Europe inset covers world lines under it', async ({ browser }) => {
+  const other = await (await browser.newContext()).newPage();
+  const countries = [
+    { country: 'DE', requests: 900, blocked: 0, estimated: 0 },
+    { country: 'GB', requests: 700, blocked: 0, estimated: 0 },
+    { country: 'US', requests: 300, blocked: 12, estimated: 0 },
+    { country: 'BR', requests: 200, blocked: 0, estimated: 0 },
+    { country: 'CL', requests: 100, blocked: 0, estimated: 0 },
+  ];
+  let edge = { lat: -33.87, long: 151.21, name: 'Sydney' };
+  await other.route('**/api/traffic?minutes=5', (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge } }));
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'War room', exact: true }).click();
+  const map = other.getByRole('region', { name: 'Where requests come from' });
+  await expect(map.getByRole('heading', { name: 'Requests flowing to the edges' })).toBeVisible();
+  await expect(map.getByText('Edges in Sydney')).toBeVisible();
+
+  // Each line must begin at a circle, else a country shows a line out of bare land.
+  const startsAtCircle = () =>
+    map.locator('svg').evaluate((svg) => {
+      const circles = [...svg.querySelectorAll('circle')].map((c): [number, number] => [c.cx.baseVal.value, c.cy.baseVal.value]);
+      const flows = [...svg.querySelectorAll<SVGPathElement>('path.wr-flow')];
+      return { flows: flows.length, bare: flows.filter((f) => {
+        const p = f.getPointAtLength(0);
+        return !circles.some(([x, y]) => Math.hypot(x - p.x, y - p.y) <= 1);
+      }).length };
+    });
+  expect(await startsAtCircle()).toEqual({ flows: 5, bare: 0 });
+
+  // The inset is painted over world lines, so no line shows at a point inside its box.
+  const exposed = () =>
+    map.locator('svg').evaluate((svg: SVGSVGElement) => {
+      const box = svg.querySelector('rect')!;
+      const [x0, y0, x1, y1] = [box.x.baseVal.value, box.y.baseVal.value, box.x.baseVal.value + box.width.baseVal.value, box.y.baseVal.value + box.height.baseVal.value];
+      const m = svg.getScreenCTM()!;
+      let inside = 0;
+      let shown = 0;
+      for (const f of svg.querySelectorAll<SVGPathElement>('path.wr-flow')) {
+        for (let i = 0; i <= 200; i++) {
+          const p = f.getPointAtLength((f.getTotalLength() * i) / 200);
+          if (p.x <= x0 || p.x >= x1 || p.y <= y0 || p.y >= y1) continue;
+          inside++;
+          const s = new DOMPoint(p.x, p.y).matrixTransform(m);
+          if (document.elementFromPoint(s.x, s.y)?.getAttribute('fill') === 'none') shown++;
+        }
+      }
+      return { inside, shown };
+    });
+  // A line whose shortest route crosses the map's edge must be one piece that ends at the edge, not two cut pieces.
+  const pieces = () =>
+    map.locator('svg').evaluate((svg) => {
+      const at = /translate\(([-\d.]+) ([-\d.]+)\) rotate\(45\)/.exec([...svg.querySelectorAll('rect')].map((r) => r.getAttribute('transform') ?? '').find((t) => t.includes('rotate(45)')) ?? '')!;
+      return [...svg.querySelectorAll<SVGPathElement>('path.wr-flow')].map((f) => {
+        const end = f.getPointAtLength(f.getTotalLength());
+        return { moves: (f.getAttribute('d')!.match(/M/g) ?? []).length, atEdge: Math.hypot(end.x - Number(at[1]), end.y - Number(at[2])) <= 1 };
+      });
+    });
+  expect(await pieces()).toEqual(Array(5).fill({ moves: 1, atEdge: true }));
+
+  // Chile to Honolulu does not cross the map's edge, so it stays a great circle and passes under the inset.
+  edge = { lat: 21.31, long: -157.86, name: 'Honolulu' };
+  await other.reload();
+  await expect(map.getByText('Edges in Honolulu')).toBeVisible();
+  await map.locator('svg').scrollIntoViewIfNeeded();
+  const seen = await exposed();
+  expect(seen.inside).toBeGreaterThan(0);
+  expect(seen.shown).toBe(0);
+
+  edge = { lat: 50.11, long: 8.68, name: 'Frankfurt' };
+  await other.reload();
+  await expect(map.getByText('Edges in Frankfurt')).toBeVisible();
+  expect(await startsAtCircle()).toEqual({ flows: 5, bare: 0 });
+  await other.context().close();
+});
+
+test('the war room map explains no logs and no countries, marks estimates and unmapped countries, and expands and closes', async ({ browser }) => {
+  const other = await (await browser.newContext()).newPage();
   let countries: { country: string; requests: number; blocked: number; estimated: number }[] = [];
   await other.route('**/api/traffic?minutes=5', (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge: null } }));
   await other.goto('/');
   await other.getByLabel('Username').fill(oncall);
   await other.getByLabel('Password').fill(password);
   await other.getByRole('button', { name: 'Sign in' }).click();
-  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Traffic map', exact: true }).click();
-  await expect(other.getByRole('heading', { name: 'No access logs in the last 5 minutes' })).toBeVisible();
+  await other.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'War room', exact: true }).click();
+  const map = other.getByRole('region', { name: 'Where requests come from' });
+  await expect(map.getByText('No access logs in the last 5 minutes')).toBeVisible();
 
   countries = [{ country: 'unknown', requests: 40, blocked: 0, estimated: 0 }];
   await other.reload();
-  await expect(other.getByText(/carries a country/)).toContainText('CLIENT_IP_SOURCE');
+  await expect(map.getByText(/carries a country/)).toContainText('CLIENT_IP_SOURCE');
 
   countries = [
-    { country: 'SG', requests: 5, blocked: 0, estimated: 5 },
+    { country: 'SG', requests: 20, blocked: 0, estimated: 20 },
     { country: '*', requests: 2, blocked: 0, estimated: 0 },
   ];
   await other.reload();
-  await expect(other.getByRole('row').filter({ hasText: 'Singapore' }).getByText('Not on the map')).toBeVisible();
-  await expect(other.getByRole('cell', { name: 'Other countries' })).toBeVisible();
-  await expect(other.getByRole('cell', { name: /^≈\s*5$/ })).toBeVisible();
+  await expect(map.getByRole('row').filter({ hasText: 'Singapore' }).getByText(/not on the map/)).toBeVisible();
+  await expect(map.getByRole('cell', { name: 'Other countries' })).toBeVisible();
+  await expect(map.getByRole('cell', { name: /^≈\s*4$/ })).toBeVisible();
 
-  // Germany faces the opening view, so its outline has a path before and after.
-  const outline = () => other.locator('path[data-country="DE"]').getAttribute('d');
-  const before = await outline();
-  expect(before).toBeTruthy();
-  await other.getByRole('img', { name: /^Globe of requests by country/ }).focus();
-  await other.keyboard.press('ArrowRight');
-  await expect.poll(outline).not.toBe(before);
+  await map.getByRole('button', { name: 'Expand to fill the screen' }).click();
+  await expect(map.getByRole('button', { name: 'Close, or press Esc' })).toBeVisible();
+  await other.keyboard.press('Escape');
+  await expect(map.getByRole('button', { name: 'Expand to fill the screen' })).toBeVisible();
   await other.context().close();
 });
 
-test('a settings manager places the edges on the traffic map, and clearing removes the lines', async () => {
+test('the mouse wheel zooms the war room map as soon as the page first loads', async () => {
   await page.goto('/traffic?view=period');
-  await expect(page.getByRole('heading', { name: 'Traffic map', exact: true })).toBeVisible();
-  await expect(page.locator('.arc')).toHaveCount(0);
-  await page.getByLabel('Latitude').fill('91');
-  await page.getByLabel('Longitude').fill('8.68');
-  await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText(/latitude must be from -90 to 90/i);
-  await page.getByLabel('Latitude').fill('50.11');
-  await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible();
-  expect(await page.locator('.arc').count()).toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'Clear', exact: true }).click();
-  await expect(page.locator('.arc')).toHaveCount(0);
-  await expect(page.getByLabel('Latitude')).toHaveValue('');
+  const map = page.getByRole('region', { name: 'Where requests come from' });
+  const zoomOut = map.getByRole('button', { name: 'Zoom out' });
+  await expect(zoomOut).toBeDisabled();
+  await map.getByRole('group', { name: 'Map, scroll to zoom' }).hover();
+  await page.mouse.wheel(0, -400);
+  await expect(zoomOut).toBeEnabled();
+});
+
+test('a settings manager places the edges on Settings, the war room map then draws the flows, and clearing removes them', async () => {
+  const flows = page.locator('svg path[vector-effect="non-scaling-stroke"]');
+  const hint = page.getByRole('link', { name: 'Set where the edges are in Settings to draw the flows.' });
+  await page.goto('/traffic?view=period');
+  await expect(page.getByRole('heading', { level: 1, name: 'War room' })).toBeVisible();
+  await expect(hint).toBeVisible();
+  await expect(flows).toHaveCount(0);
+
+  await page.goto('/settings');
+  const form = page.locator('form').filter({ has: page.getByLabel('Latitude') });
+  await form.getByLabel('Latitude').fill('91');
+  await form.getByLabel('Longitude').fill('8.68');
+  await form.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(form.getByRole('alert')).toContainText(/latitude must be from -90 to 90/i);
+  await form.getByLabel('Latitude').fill('50.11');
+  await form.getByLabel('Place name').fill('Frankfurt');
+  await form.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(form.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible();
+
+  await page.goto('/traffic?view=period');
+  await expect(page.getByText('Edges in Frankfurt')).toBeVisible();
+  await expect(hint).toHaveCount(0);
+  expect(await flows.count()).toBeGreaterThan(0);
+
+  await page.goto('/settings');
+  await form.getByRole('button', { name: 'Clear', exact: true }).click();
+  await expect(form.getByLabel('Latitude')).toHaveValue('');
+  await page.goto('/traffic?view=period');
+  await expect(hint).toBeVisible();
+  await expect(page.getByText('Edges in Frankfurt')).toHaveCount(0);
+  await expect(flows).toHaveCount(0);
+});
+
+test('selecting a country in the war room shows its trend and links its access logs', async ({ browser }) => {
+  const other = await (await browser.newContext()).newPage();
+  await other.route('**/api/auth/me', async (r) => {
+    const res = await r.fetch();
+    const me = (await res.json()) as Record<string, unknown>;
+    await r.fulfill({ response: res, json: { ...me, log_search_url: 'https://logs.example.com/search?q=country%3A{country}&from={from}&to={to}' } });
+  });
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await expect(other.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
+  await other.goto('/traffic?view=period');
+  const map = other.getByRole('region', { name: 'Where requests come from' });
+  await map.getByRole('button', { name: 'United States', exact: true }).click();
+  await expect(map.getByRole('img', { name: /^Requests from United States/ })).toBeVisible();
+  await expect(map.getByRole('link', { name: 'Search its access logs' })).toHaveAttribute('href', /q=country%3AUS&from=/);
+  await other.context().close();
+});
+
+test('a firing critical anomaly is counted in the war room status and listed, with no Acknowledge for a role that cannot ack', async ({ browser }) => {
+  const other = await (await browser.newContext()).newPage();
+  // Mocked: the seed cannot make an anomaly fire.
+  const at = new Date().toISOString();
+  await other.route('**/api/anomalies', (r) =>
+    r.fulfill({
+      json: {
+        alertmanager: false,
+        anomalies: [
+          { id: 904, signal: 'traffic_surge', rule: '', phase: '', severity: 'critical', state: 'firing', tripped: 2, passed: 0, started_at: at, fired_at: at, resolved_at: null, notified_at: null, summary: 'Requests surged to test the war room status', case_id: null },
+        ],
+      },
+    }),
+  );
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await expect(other.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
+  await other.goto('/traffic');
+  await expect(other.getByText(/1 ITEM NEEDS A PERSON/)).toBeVisible();
+  const needs = other.getByRole('region', { name: 'Needs a person' });
+  await expect(needs.locator('.wr-item')).toHaveCount(1);
+  await needs.locator('.wr-item').click();
+  // oncall reads stats but has no attention.ack.
+  await expect(needs.getByRole('button', { name: 'Acknowledge' })).toHaveCount(0);
+  await other.context().close();
+});
+
+test('dragging across the war room outcome chart picks a span, and Escape removes it', async () => {
+  // Mocked: the seed serves no per-minute stats, and an empty chart has nothing to pick.
+  const now = Math.floor(Date.now() / 60_000) * 60_000;
+  const rows = Array.from({ length: 60 }, (_, i) => ({
+    minute: new Date(now - (60 - i) * 60_000).toISOString(), version: 2, requests: 100, edge_5xx: 0, upstream_5xx: 0, auth_failures: 0,
+    rate_limit_rules: [], top_limited: [], rules: [], status_codes: { upstream: { '200': 100 } }, upstream_errors: {},
+  }));
+  await page.route('**/api/stats?*', (r) => r.fulfill({ json: rows }));
+  try {
+    await page.goto('/traffic?view=period&range=1h');
+    const plot = page.getByRole('region', { name: 'Requests by outcome' }).getByRole('img').first();
+    await expect(plot).toHaveAccessibleName(/Average a minute: [1-9]\d* passed on/);
+    // Locator hovers scroll the plot into view; raw coordinates below the fold miss it.
+    await plot.scrollIntoViewIfNeeded();
+    const box = (await plot.boundingBox())!;
+    await plot.hover({ position: { x: box.width * 0.3, y: box.height / 2 } });
+    await page.mouse.down();
+    await plot.hover({ position: { x: box.width * 0.5, y: box.height / 2 } });
+    await plot.hover({ position: { x: box.width * 0.7, y: box.height / 2 } });
+    await page.mouse.up();
+    const picked = page.getByLabel('Time range').locator('option', { hasText: /^Picked:/ });
+    await expect(picked).toHaveCount(1);
+    // The map names its window to the minute and routes to whole hours, so match the form, not the times.
+    await expect(page.getByRole('region', { name: 'Where requests come from' }).getByRole('heading', { name: /^Where requests came from, .*\d\d:\d\d to .*\d\d:\d\d UTC$/ })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Routes hit hardest' }).getByRole('heading', { name: /^Routes hit hardest, .*\d\d:\d\d to .*\d\d:\d\d UTC$/ })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(picked).toHaveCount(0);
+  } finally {
+    await page.unroute('**/api/stats?*');
+  }
+});
+
+test('the war room does not scroll sideways on a phone', async ({ browser }) => {
+  const other = await (await browser.newContext({ viewport: { width: 375, height: 812 } })).newPage();
+  await other.goto('/');
+  await other.getByLabel('Username').fill(oncall);
+  await other.getByLabel('Password').fill(password);
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  // Navigating before sign-in answers would cancel it.
+  await expect(other.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
+  await other.goto('/traffic?view=period');
+  await expect(other.getByRole('cell', { name: 'United States' })).toBeVisible();
+  await other.waitForLoadState('networkidle');
+  expect(await other.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await other.context().close();
 });
 
 test('an acknowledged item leaves the list for the acknowledged items, and undo brings it back', async () => {
@@ -1206,7 +1400,7 @@ test('the sidebar groups pages by job', async () => {
   const main = page.getByRole('navigation', { name: 'Main' });
   // Headings and links in document order, so each link sits under its group.
   await expect(main.locator('p, a')).toHaveText([
-    'Monitor', 'Dashboard', 'Stats', 'Traffic map', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
+    'Monitor', 'Dashboard', 'Stats', 'War room', 'Routes', 'Fleet', 'Notifications', 'Autopilot',
     'Policy', 'Rules', 'Value lists', 'IP lists', 'Templates', 'CORS policies', 'Issuers', 'Settings',
     'Release', 'Tests and simulate', 'Publish', 'Versions',
     'Admin', 'Audit log', 'Users and tokens',
@@ -1300,8 +1494,8 @@ test('at 1280 pixels wide no page scrolls sideways or has a serious accessibilit
     [route!, 'POST api.example.com/login'],
     ['/fleet', 'Fleet'],
     ['/stats', 'Stats'],
-    ['/traffic', 'Traffic map'],
-    ['/traffic?view=period', 'Traffic map'],
+    ['/traffic', 'War room'],
+    ['/traffic?view=period', 'War room'],
     ['/notifications', 'Notifications'],
     ['/autopilot', 'Autopilot'],
     [investigated, `Case ${investigated.split('/').pop()}`],

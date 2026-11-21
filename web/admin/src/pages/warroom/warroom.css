@@ -1,0 +1,350 @@
+/* The war room is always dark: it is made for a wall screen and a dark room,
+   whatever the admin's theme. Every rule is scoped under .wr. */
+.wr {
+  --wr-bg: #000000;
+  --wr-card: #0a0a0a;
+  --wr-ring: rgba(255, 255, 255, 0.14);
+  --wr-heading: #ededed;
+  --wr-body: #a1a1a1;
+  --wr-muted: #8f8f8f;
+  --wr-red: #ff6166;
+  --wr-amber: #f5b544;
+  --wr-green: #4fd97a;
+  --wr-blue: #4c9dff;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 100vh;
+  padding: 16px 20px;
+  gap: 14px;
+  background: var(--wr-bg);
+  color: var(--wr-body);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  color-scheme: dark;
+}
+.wr.wr-wall {
+  height: 100vh;
+  overflow: hidden;
+  padding: 20px 28px;
+  gap: 16px;
+  font-size: 18px;
+}
+.wr a {
+  color: var(--wr-heading);
+}
+.wr a:hover {
+  color: #ffffff;
+}
+.wr-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--wr-muted);
+}
+.wr-wall .wr-eyebrow {
+  font-size: 14px;
+}
+.wr-card {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px 18px;
+  border-radius: 8px;
+  background: var(--wr-card);
+  box-shadow: 0 0 0 1px var(--wr-ring);
+}
+.wr-card.wr-expanded {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  z-index: 50;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+.wr-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.8);
+}
+.wr-h2 {
+  margin: 0;
+  color: var(--wr-heading);
+  font-size: 18px;
+  font-weight: 600;
+}
+.wr-wall .wr-h2 {
+  font-size: 22px;
+}
+.wr-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: var(--wr-heading);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+.wr-btn:hover {
+  background: #262626;
+}
+.wr-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.wr-btn-primary,
+.wr-btn-on {
+  background: var(--wr-heading);
+  color: #0a0a0a;
+  box-shadow: none;
+}
+.wr-btn-primary:hover,
+.wr-btn-on:hover {
+  background: #cccccc;
+  color: #0a0a0a;
+}
+.wr-sel {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: var(--wr-heading);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
+  font: inherit;
+  font-size: 14px;
+}
+.wr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wr-heading);
+  box-shadow: 0 0 0 1px var(--wr-ring);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.wr-chip:disabled {
+  cursor: default;
+}
+.wr-chip[aria-pressed='false'] {
+  color: var(--wr-muted);
+  text-decoration: line-through;
+}
+.wr-segs {
+  display: flex;
+  padding: 2px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--wr-ring);
+}
+.wr-seg {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--wr-body);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.wr-seg[aria-pressed='true'] {
+  border-radius: 5px;
+  background: var(--wr-heading);
+  color: #0a0a0a;
+}
+.wr-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.wr-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 76px 110px;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 4px;
+  border: 0;
+  border-top: 1px solid #1f1f1f;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* Six tiles split only into even rows (6, 3, 2 or 1 across), never 5 and 1.
+   Each tile needs 200px for its figure; .wr has 20px side padding. */
+.wr-tiles {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 1299px) {
+  .wr-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 663px) {
+  .wr-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 451px) {
+  .wr-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* A phone is too narrow for the desktop figure columns. */
+@media (max-width: 480px) {
+  .wr-row {
+    grid-template-columns: minmax(0, 1fr) 64px 56px 72px;
+    font-size: 14px;
+  }
+}
+.wr-row:hover {
+  background: #141414;
+}
+.wr-row:has([aria-pressed='true']) {
+  background: #0f1520;
+}
+.wr-rowbtn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.wr-rowbtn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+.wr-row:has(.wr-rowbtn:focus-visible) {
+  outline: 2px solid var(--wr-blue);
+  outline-offset: 2px;
+}
+.wr code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #1a1a1a;
+  color: var(--wr-heading);
+}
+.wr-xbtn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  justify-content: center;
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  font-size: 14px;
+}
+.wr-zbtn {
+  justify-content: center;
+  width: 32px;
+  padding: 0;
+  font-size: 18px;
+}
+.wr :is(.wr-btn, .wr-item, .wr-chip, .wr-seg, .wr-row, .wr-sel, .wr-plot, .wr-pin):focus-visible {
+  outline: 2px solid var(--wr-blue);
+  outline-offset: 2px;
+}
+/* A finger needs a bigger target than a mouse. */
+@media (pointer: coarse) {
+  .wr-btn,
+  .wr-sel {
+    min-height: 44px;
+  }
+  .wr-seg,
+  .wr-chip {
+    min-height: 40px;
+  }
+  .wr-xbtn,
+  .wr-zbtn {
+    width: 44px;
+    min-height: 44px;
+  }
+}
+.wr-num {
+  font-variant-numeric: tabular-nums;
+}
+.wr-mono {
+  font-family: var(--font-mono);
+}
+.wr-flow {
+  stroke-dasharray: 2 10;
+  animation: wr-flow linear infinite;
+}
+.wr-flow-warn {
+  stroke-dasharray: 3 15;
+  animation: wr-flow-warn linear infinite;
+}
+@keyframes wr-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+@keyframes wr-flow-warn {
+  to {
+    stroke-dashoffset: -36;
+  }
+}
+.wr-live-dot {
+  animation: wr-blink 2s ease-in-out infinite;
+}
+@keyframes wr-blink {
+  50% {
+    opacity: 0.3;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wr-flow,
+  .wr-flow-warn,
+  .wr-live-dot {
+    animation: none;
+  }
+}
+/* A column holding one card that should fill it; in the wall it is clipped, not scrolled. */
+.wr-fill {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wr-fill > :first-child {
+  flex: 1 1 auto;
+}
+.wr-wall .wr-fill > * {
+  min-height: 0;
+  overflow: hidden;
+}

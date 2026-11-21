@@ -123,8 +123,8 @@ function LoginForm({ username: known }: { username?: string }) {
 // it uses, so they load when a rule is first opened.
 const RuleEditor = lazy(() => import('./pages/RuleEditor').then((m) => ({ default: m.RuleEditor })));
 
-// The traffic map brings the globe and its outlines, which only it uses.
-const TrafficMap = lazy(() => import('./pages/Traffic').then((m) => ({ default: m.TrafficMap })));
+// The war room brings the map and its outlines, which only it uses.
+const WarRoom = lazy(() => import('./pages/WarRoom').then((m) => ({ default: m.WarRoom })));
 
 // The section a path belongs to, so nested screens keep their nav link
 // marked: a rule editor is under Rules, a version under Versions.
@@ -163,6 +163,21 @@ function Shell({ me }: { me: Me }) {
   // The draft needs config.read; without it the app still serves the
   // screens the role can read, such as the dashboard and stats.
   const Draft = can('config.read') ? DraftProvider : Fragment;
+  // The war room fills the screen, so it has no sidebar or top bar.
+  if (sectionOf(path) === '/traffic' && can('stats.read'))
+    return (
+      <Draft>
+        <a href="#main" className="sr-only rounded-control bg-brand px-3 py-2 text-on-brand focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50">
+          Skip to content
+        </a>
+        <Crash key={path}>
+          <Suspense fallback={<Pending error={null} />}>
+            <WarRoom />
+          </Suspense>
+        </Crash>
+        {finding && <Palette onClose={() => setFinding(false)} />}
+      </Draft>
+    );
   return (
     <Draft>
       <a href="#main" className="sr-only rounded-control bg-brand px-3 py-2 text-on-brand focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50">
@@ -305,7 +320,7 @@ function Route({ path, can }: { path: string; can: (p: string) => boolean }) {
     fleet: () => <Fleet />,
     'ip-lists': () => <IPLists canManage={can('ip_lists.manage')} />,
     stats: () => <Stats />,
-    traffic: () => <TrafficMap />,
+    traffic: () => <WarRoom />,
     notifications: () => <Notifications canRead={can('config.read')} canManage={can('settings.manage')} />,
     autopilot: () =>
       parts[1] === 'cases' && parts[2] ? (

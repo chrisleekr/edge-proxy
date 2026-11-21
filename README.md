@@ -22,9 +22,9 @@ The edge never routes: it forwards every request it allows to one upstream, your
 
 ![Admin dashboard](docs/assets/screenshots/dashboard.png)
 
-The [Traffic map](docs/use/dashboard.md#traffic-map) shows where requests come from by the viewer's country, live or over a time range, with the share the edge refused and lines to where your edges are.
+The [War room](docs/use/dashboard.md#war-room) is one screen for an incident: what needs a person, requests by outcome, and where requests come from by viewer country, live or over a time range.
 
-![Traffic map](docs/assets/screenshots/traffic.png)
+![War room](docs/assets/screenshots/warroom.png)
 
 ## What it does
 
@@ -51,15 +51,15 @@ limit:  2 per 1m, keyed on ip, sliding window, 1m penalty
 <table>
 <tr>
 <td width="50%" valign="top"><a href="docs/use/dashboard.md#rules"><img src="docs/assets/screenshots/rule-editor.png" alt="Rule editor"></a><br><b>Rules</b>: build a match from conditions, see the expression it makes and how much traffic the rule matched and blocked.</td>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#tests-and-simulate"><img src="docs/assets/screenshots/tests.png" alt="Policy tests"></a><br><b>Tests and simulate</b>: policy tests run on the draft, and a publish needs them to pass.</td>
-</tr>
-<tr>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#versions"><img src="docs/assets/screenshots/versions.png" alt="Versions"></a><br><b>Versions</b>: every publish is a version with its author and changes; compare any two, or revert in one step.</td>
 <td width="50%" valign="top"><a href="docs/use/dashboard.md#routes"><img src="docs/assets/screenshots/route-detail.png" alt="Route detail"></a><br><b>Routes</b>: every route the edges served, and what the policy does to its requests, step by step.</td>
 </tr>
 <tr>
+<td width="50%" valign="top"><a href="docs/use/dashboard.md#tests-and-simulate"><img src="docs/assets/screenshots/tests.png" alt="Policy tests"></a><br><b>Tests and simulate</b>: policy tests run on the draft, and a publish needs them to pass.</td>
 <td width="50%" valign="top"><a href="docs/use/autopilot.md#reading-a-case"><img src="docs/assets/screenshots/autopilot-case.png" alt="Autopilot case"></a><br><b>Autopilot cases</b>: what started a case, the model's evidence and admin's checks on what it proposed.</td>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#audit-log"><img src="docs/assets/screenshots/audit.png" alt="Audit log"></a><br><b>Audit log</b>: every change, who made it and when, in a tamper-evident chain you can verify and export.</td>
+</tr>
+<tr>
+<td width="50%" valign="top"><a href="docs/use/dashboard.md#versions"><img src="docs/assets/screenshots/versions.png" alt="Versions"></a><br><b>Versions</b>: every publish is a version with its author and changes; compare any two, or revert in one step.</td>
+<td width="50%" valign="top"><a href="docs/use/dashboard.md#fleet-and-stats"><img src="docs/assets/screenshots/fleet.png" alt="Fleet"></a><br><b>Fleet</b>: every edge, the version it has loaded and where its config came from, plus the verified crawler ranges it matches.</td>
 </tr>
 </table>
 
