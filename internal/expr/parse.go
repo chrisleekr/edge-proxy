@@ -378,6 +378,11 @@ func (p *parser) parseList() ([]string, error) {
 			p.next()
 			return list, nil
 		}
+		// A bare $name names a value list everywhere else, so reading it here
+		// as a literal would save a rule that never matches what was meant.
+		if t := p.peek(); t.kind == tokWord && strings.HasPrefix(t.text, "$") {
+			return nil, &SyntaxError{t.pos, `a value list replaces the whole set: write "in $name", or quote "$name" for a literal`}
+		}
 		v, err := p.parseScalar()
 		if err != nil {
 			return nil, err
