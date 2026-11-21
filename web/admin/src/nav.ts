@@ -10,7 +10,6 @@ export const nav: { group: string; links: { to: string; label: string; perm: str
       { to: '/traffic', label: 'Traffic map', perm: 'stats.read' },
       { to: '/routes', label: 'Routes', perm: 'stats.read' },
       { to: '/fleet', label: 'Fleet', perm: 'stats.read' },
-      { to: '/ip-lists', label: 'IP lists', perm: 'stats.read' },
       { to: '/notifications', label: 'Notifications', perm: 'stats.read' },
       { to: '/autopilot', label: 'Autopilot', perm: 'autopilot.read' },
     ],
@@ -19,6 +18,8 @@ export const nav: { group: string; links: { to: string; label: string; perm: str
     group: 'Policy',
     links: [
       { to: '/rules', label: 'Rules', perm: 'config.read' },
+      { to: '/value-lists', label: 'Value lists', perm: 'config.read' },
+      { to: '/ip-lists', label: 'IP lists', perm: 'stats.read' },
       { to: '/templates', label: 'Templates', perm: 'config.read' },
       { to: '/cors', label: 'CORS policies', perm: 'config.read' },
       { to: '/issuers', label: 'Issuers', perm: 'config.read' },

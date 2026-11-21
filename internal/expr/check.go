@@ -30,6 +30,8 @@ type Env struct {
 	// RelativePaths accepts a path literal without its leading "/", as
 	// checks did before, so a version stored then still loads.
 	RelativePaths bool
+	// Lists are the config's global.lists, which $name values name.
+	Lists map[string]ValueList
 }
 
 // Issue is one validation problem, located by a path such as "rules[1].rules[0]".
@@ -131,7 +133,45 @@ func (c *checker) rule(r Node, path string) {
 		c.add(path, "operator %q can't be used with field %q", op.Name, f.Name)
 		return
 	}
+	if r.Value.ListName != "" {
+		c.listRef(f, op, r.Value.ListName, path)
+		return
+	}
 	c.value(f, op, r.Value, path)
+}
+
+// listRef checks $name as if the list's values were written in the
+// condition, so a value that can never match with this operator is refused
+// where the list is used. A pattern operator tests each value in turn, so
+// each counts as a condition; "in" is one set lookup and counts once.
+func (c *checker) listRef(f FieldDef, op OpDef, name, path string) {
+	g, ok := c.env.Lists[name]
+	switch {
+	case !ok:
+		c.add(path, "value list %q doesn't exist", name)
+	case f.Type == TypeIP:
+		c.add(path, "addresses go in an IP list: match it with client.ip_lists")
+	case f.ListKind == "":
+		c.add(path, "field %q takes values written in the condition, not a value list", f.Name)
+	case g.Field != f.Name:
+		c.add(path, "value list %q holds values for %s, not %s", name, g.Field, f.Name)
+	case !slices.Contains(ListOps(f), op.Name):
+		c.add(path, `operator %q can't take a value list of %s; use "is in" or "is not in"`, op.Name, strings.ToLower(f.ListKind))
+	case op.List:
+		c.value(f, op, Value{List: g.Values, IsList: true}, path)
+	default:
+		c.conditions += len(g.Values) - 1
+		// Refused with its count at the end; skip checking each value.
+		if len(g.Values) > MaxConditions {
+			return
+		}
+		for _, s := range g.Values {
+			n := len(c.issues)
+			if c.value(f, op, Value{One: s}, path); len(c.issues) > n {
+				return
+			}
+		}
+	}
 }
 
 func (c *checker) key(f FieldDef, key, path string) {

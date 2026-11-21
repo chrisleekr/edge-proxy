@@ -111,7 +111,7 @@ starts_with(http.request.uri.path, "/api/") and not ip.src in {"10.0.0.0/8"}
 http.request.jwt.claims["tenant"] eq "acme" and http.request.method in {"POST" "PUT"}
 ```
 
-`true` matches every request. Fields, operators and syntax are in [Expressions](../reference/expressions.md). Admin parses and validates expressions; the UI never does.
+`true` matches every request. A [value list](../reference/expressions.md#value-lists), written `$name`, holds a list of values many rules share, such as user agents or countries: make and edit value lists on the **Value lists** page (**New value list**, then the list's name to edit it; renaming a value list also updates the rules that use it), or select values in a rule and choose **Save as list**. Fields, operators and syntax are in [Expressions](../reference/expressions.md). Admin parses and validates expressions; the UI never does.
 
 ## Settings
 

@@ -15,8 +15,12 @@ import {
 } from 'react-querybuilder';
 import 'react-querybuilder/dist/query-builder.css';
 import { ipListsQuery } from './pages/IPLists';
+import { valueExample } from './values';
+import { useDraft } from './draft';
 import { Link } from './router';
-import { api, type Json, type Phase, type Rendered, type Schema, useCan } from './api';
+import { Button } from './ui';
+import { withList } from './pages/Sections';
+import { api, type Checked, type Json, type Phase, type Rendered, type Schema, useCan } from './api';
 
 const dnd = createDndKitAdapter(DndKit);
 
@@ -30,33 +34,13 @@ interface Ctx {
   schema: Schema;
 }
 
-// Example values by field, shown as placeholders so an empty row says what
-// to type. Keys are the names keyed fields take.
+// Example keys by field, shown as placeholders so an empty row says what
+// to type.
 const keyExample: Record<string, string> = {
   'http.request.headers': 'header, such as x-api-key',
   'http.request.cookies': 'cookie, such as session',
   'http.request.uri.args': 'argument, such as page',
   'http.request.jwt.claims': 'claim, such as sub',
-};
-const valueExample: Record<string, string> = {
-  'http.request.full_uri': 'https://api.example.com/v1/orders?page=2',
-  'http.request.uri': '/v1/orders?page=2',
-  'http.request.uri.path': '/v1/orders',
-  'http.request.uri.query': 'page=2',
-  'http.host': 'api.example.com',
-  'http.request.method': 'POST',
-  'http.cookie': 'session=abc',
-  'http.referer': 'https://www.example.com/',
-  'http.user_agent': 'curl/8.7.1',
-  'http.x_forwarded_for': '203.0.113.7',
-  'ip.src': '203.0.113.7',
-  'ip.src.country': 'AU',
-  'ip.src.asnum': '13335',
-  'edge.locale': 'en-AU',
-  'tls.client.ja4': 't13d1516h2_8daaf6152771_02713d6af862',
-  'tls.client.ja3': '773906b0efdefa24a7f2b8eb6985bf37',
-  'client.signals': 'ua_tool',
-  'client.ip_lists': 'aws',
 };
 
 // Select is the library's select with its title as its name too: a title
@@ -107,16 +91,77 @@ function setKey(q: RuleGroupType, path: number[], key: string): RuleGroupType {
   return { ...q, rules };
 }
 
-// ValueEditor takes no value, a list (one item per line) or one value.
+const listOf = (v: unknown) => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as { list?: string }).list : undefined);
+
+// SaveList names the typed values as a value list. The server checks the draft
+// with the list in it, so a bad name is refused with its message and no name
+// format is kept here.
+function SaveList({ field, values, taken, onSave, onCancel }: { field: string; values: string[]; taken: Record<string, unknown>; onSave: (name: string) => void; onCancel: () => void }) {
+  const d = useDraft();
+  const [name, setName] = useState('');
+  // A result counts only for the exact name, values and draft it checked.
+  const stamp = JSON.stringify({ name, field, values });
+  const [res, setRes] = useState<{ stamp: string; config: unknown; message: string }>();
+  const exists = Object.hasOwn(taken, name);
+  useEffect(() => {
+    if (!name) return;
+    let live = true;
+    const t = setTimeout(() => {
+      const path = `config.global.lists[${JSON.stringify(name)}]`;
+      api<Checked>('POST', '/api/draft/check', { config: withList(d.config, undefined, name, { field, values }) })
+        .then((r) => live && setRes({ stamp, config: d.config, message: r.errors.filter((i) => i.path === 'config.global.lists' || i.path === path || i.path.startsWith(`${path}.`) || i.path.startsWith(`${path}[`)).map((i) => i.message).join(' ') }))
+        .catch((e: Error) => live && setRes({ stamp, config: d.config, message: e.message }));
+    }, 300);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+    // values is a new array every render; stamp stands for it.
+    // oxlint-disable-next-line react/exhaustive-deps
+  }, [stamp, d.config]);
+  const cur = res?.stamp === stamp && res.config === d.config ? res : undefined;
+  const message = exists ? `“${name}” already exists. Pick another name.` : (cur?.message ?? '');
+  return (
+    <span className="order-last flex basis-full flex-wrap items-center gap-2 text-sm">
+      <input aria-label="List name" placeholder="such as bad-agents" value={name} onChange={(e) => setName(e.target.value)} />
+      <Button
+        disabled={!name || exists || !cur || !!cur.message}
+        onClick={() => {
+          d.setConfig((c) => withList(c, undefined, name, { field, values }));
+          onSave(name);
+        }}
+      >
+        Save
+      </Button>
+      <Button onClick={onCancel}>Cancel</Button>
+      {message && <span className="text-danger">{message}</span>}
+    </span>
+  );
+}
+
+// ValueEditor takes no value, a list (one item per line), one value, or a
+// value list of the config's global.lists for the field. IP list names are
+// picked from admin's lists when the role can read them.
 function ValueEditor(props: ValueEditorProps) {
   const { schema } = props.context as Ctx;
+  const d = useDraft();
   const canReadLists = useCan()('stats.read');
   const mode = useId();
+  const [wantList, setWantList] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [find, setFind] = useState('');
   // Only the IP list field reads the lists; a role that cannot read them types the names.
   const lists = useQuery({ ...ipListsQuery, enabled: props.field === 'client.ip_lists' && canReadLists });
   const op = schema.operators.find((o) => o.name === props.operator);
   if (!op || op.no_value) return null;
+  const f = schema.fields.find((x) => x.name === props.field);
+  const valueLists = (d.config.global.lists ?? {}) as Record<string, { field: string; values: string[] }>;
+  const takesList = !!f?.list_ops?.includes(props.operator);
+  const chosen = listOf(props.value);
+  const useList = chosen !== undefined || (wantList && takesList);
+  const kind = (f?.list_kind ?? 'values').toLowerCase();
+  // The value the operator takes when nothing is typed or picked.
+  const empty = op.list ? [] : '';
   let text: string | undefined;
   let picker: ReactNode;
   if (props.field === 'client.signals') {
@@ -160,6 +205,58 @@ function ValueEditor(props: ValueEditorProps) {
     );
   }
   const hint = text && <span className="order-last basis-full text-sm text-body">{text}</span>;
+  const switcher = (takesList || chosen !== undefined) && (
+    <fieldset className="order-last flex basis-full flex-wrap items-center gap-x-4 text-sm">
+      <legend className="sr-only">Where the values come from</legend>
+      <label className="inline-flex items-center gap-2">
+        <input
+          type="radio"
+          name={mode}
+          checked={!useList}
+          onChange={() => {
+            setWantList(false);
+            if (chosen !== undefined) props.handleOnChange(empty);
+          }}
+        />
+        Type values
+      </label>
+      <label className="inline-flex items-center gap-2">
+        <input type="radio" name={mode} checked={useList} onChange={() => setWantList(true)} />
+        Use a list
+      </label>
+    </fieldset>
+  );
+  if (useList) {
+    const mine = Object.entries(valueLists).filter(([, g]) => g.field === props.field);
+    const g = chosen ? valueLists[chosen] : undefined;
+    const n = g?.values.length ?? 0;
+    const words = op.label.toLowerCase();
+    const matches = props.operator === 'in' ? `is one of the ${n}` : props.operator === 'not_in' ? `is none of the ${n}` : `${words} any of the ${n}`;
+    return (
+      <>
+        {switcher}
+        <select aria-label="Value list" value={chosen ?? ''} onChange={(e) => props.handleOnChange(e.target.value === '' ? empty : { list: e.target.value })}>
+          <option value="">Pick a list</option>
+          {chosen && !mine.some(([name]) => name === chosen) && <option value={chosen}>{chosen} (not a list of {kind})</option>}
+          {mine.map(([name, x]) => (
+            <option key={name} value={name}>
+              {name} · {x.values.length} {kind}
+            </option>
+          ))}
+        </select>
+        {g && <span className="order-last basis-full text-sm text-body">Matches when the {f?.label.toLowerCase()} {matches} values.{!op.list && ` Counts as ${n} of this rule's 32 conditions.`}</span>}
+        {mine.length === 0 && (
+          <span className="order-last basis-full text-sm text-body">
+            No lists of {kind} yet. Create one in{' '}
+            <Link to={`/value-lists/_new?field=${encodeURIComponent(props.field)}`} className="font-medium text-heading underline">
+              Value lists
+            </Link>
+            .
+          </span>
+        )}
+      </>
+    );
+  }
   if (op.list) {
     const items = Array.isArray(props.value) ? (props.value as string[]) : [];
     return (
@@ -173,6 +270,23 @@ function ValueEditor(props: ValueEditorProps) {
         onChange={(e) => props.handleOnChange(e.target.value === '' ? [] : e.target.value.split('\n'))}
       />}
       {hint}
+      {switcher}
+      {takesList && items.some((x) => x.trim()) && (saving ? (
+        <SaveList
+          field={props.field}
+          values={items.filter((x) => x.trim())}
+          taken={valueLists}
+          onSave={(name) => {
+            props.handleOnChange({ list: name });
+            setSaving(false);
+          }}
+          onCancel={() => setSaving(false)}
+        />
+      ) : (
+        <span className="order-last basis-full">
+          <Button onClick={() => setSaving(true)}>Save as list</Button>
+        </span>
+      ))}
       </>
     );
   }
@@ -185,6 +299,7 @@ function ValueEditor(props: ValueEditorProps) {
       {picker ?? input}
       {hint}
       {!hint && how && <span className="order-last basis-full text-sm text-body">{how}</span>}
+      {switcher}
     </>
   );
 }

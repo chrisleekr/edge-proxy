@@ -43,6 +43,13 @@ func TestParseRendersCanonicalText(t *testing.T) {
 		{"true inside a chain", `ssl and true`, `ssl and (true)`},
 		{"negated true", `not true`, `not (true)`},
 		{"whitespace is free", "ssl\tand\n\r ssl", `ssl and ssl`},
+		{"value list of user agents", `http.user_agent contains $bad-agents`, `http.user_agent contains $bad-agents`},
+		{"value list with in", `ip.src.country in $eu`, `ip.src.country in $eu`},
+		{"value list with not in", `not ip.src.country in $eu`, `not ip.src.country in $eu`},
+		{"value list with a negated operator", `not http.user_agent contains $bad`, `not http.user_agent contains $bad`},
+		{"value list in a function operator", `starts_with(http.request.uri.path, $paths)`, `starts_with(http.request.uri.path, $paths)`},
+		{"quoted dollar stays a literal", `http.user_agent eq "$bad"`, `http.user_agent eq "$bad"`},
+		{"quoted dollar inside a list stays a literal", `http.user_agent in {"$bad"}`, `http.user_agent in {"$bad"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

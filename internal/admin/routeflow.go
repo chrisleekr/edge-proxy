@@ -114,7 +114,7 @@ type ruleMatch struct {
 // classify evaluates n for the route with three-valued logic: conditions on
 // route fields are run through the expression compiler against the sample
 // paths; anything else is unknown, and its label is recorded in deps.
-func classify(n expr.Node, phase expr.Phase, k routeKey, deps map[string]bool) int {
+func classify(n expr.Node, phase expr.Phase, lists map[string]expr.ValueList, k routeKey, deps map[string]bool) int {
 	if !n.IsGroup() {
 		if !routeFields[n.Field] {
 			f, _ := expr.LookupField(n.Field)
@@ -127,14 +127,20 @@ func classify(n expr.Node, phase expr.Phase, k routeKey, deps map[string]bool) i
 			deps["Path value"] = true
 			return 0
 		}
-		m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(string) bool { return true }, AllowRegex: true, RelativePaths: true})
+		m, issues := expr.Compile(n, expr.Env{Phase: phase, ViewerAvailable: func(string) bool { return true }, AllowRegex: true, RelativePaths: true, Lists: lists})
 		if issues != nil {
 			// Only a config that no longer compiles gets here, and that is
 			// refused before classify runs.
 			deps["this condition"] = true
 			return 0
 		}
-		paths := append([]string{samplePath(k.template, 0), samplePath(k.template, 1)}, valueSamples(k.template, n.Value)...)
+		v := n.Value
+		if v.ListName != "" {
+			// Samples come from the values; the condition stays unexpanded so
+			// a large value list still fits the expression text limit.
+			v = expr.Value{List: lists[v.ListName].Values, IsList: true}
+		}
+		paths := append([]string{samplePath(k.template, 0), samplePath(k.template, 1)}, valueSamples(k.template, v)...)
 		a := m(routeRequest{k.host, k.method, paths[0]})
 		for _, p := range paths[1:] {
 			if m(routeRequest{k.host, k.method, p}) != a {
@@ -156,7 +162,7 @@ func classify(n expr.Node, phase expr.Phase, k routeKey, deps map[string]bool) i
 	}
 	seen := map[int]bool{}
 	for _, c := range n.Rules {
-		seen[classify(c, phase, k, deps)] = true
+		seen[classify(c, phase, lists, k, deps)] = true
 	}
 	out := other
 	switch {
@@ -172,11 +178,11 @@ func classify(n expr.Node, phase expr.Phase, k routeKey, deps map[string]bool) i
 }
 
 // matchRules classifies every rule of one phase for the route.
-func matchRules(phase expr.Phase, k routeKey, ids []string, exprs []expr.Node) []ruleMatch {
+func matchRules(phase expr.Phase, lists map[string]expr.ValueList, k routeKey, ids []string, exprs []expr.Node) []ruleMatch {
 	out := []ruleMatch{}
 	for i, n := range exprs {
 		deps := map[string]bool{}
-		m := ruleMatch{ID: ids[i], Match: [...]string{matchNever, matchDepends, matchAlways}[classify(expr.Normalize(n), phase, k, deps)+1]}
+		m := ruleMatch{ID: ids[i], Match: [...]string{matchNever, matchDepends, matchAlways}[classify(expr.Normalize(n), phase, lists, k, deps)+1]}
 		if m.Match == matchDepends {
 			m.DependsOn = slices.Sorted(maps.Keys(deps))
 		}
@@ -275,17 +281,17 @@ func (s *Server) routeFlow(w http.ResponseWriter, r *http.Request, _ *principal)
 	for _, x := range cfg.ConfigRules {
 		ids, exprs = append(ids, x.ID), append(exprs, x.Expression)
 	}
-	out.Rules["config"] = matchRules(expr.PhaseConfig, k, ids, exprs)
+	out.Rules["config"] = matchRules(expr.PhaseConfig, cfg.Global.Lists, k, ids, exprs)
 	ids, exprs = nil, nil
 	for _, x := range cfg.RateLimitRules {
 		ids, exprs = append(ids, x.ID), append(exprs, x.Expression)
 	}
-	out.Rules["rate_limit"] = matchRules(expr.PhaseRateLimit, k, ids, exprs)
+	out.Rules["rate_limit"] = matchRules(expr.PhaseRateLimit, cfg.Global.Lists, k, ids, exprs)
 	ids, exprs = nil, nil
 	for _, x := range cfg.RequestHeaderRules {
 		ids, exprs = append(ids, x.ID), append(exprs, x.Expression)
 	}
-	out.Rules["request_headers"] = matchRules(expr.PhaseRequestHeaders, k, ids, exprs)
+	out.Rules["request_headers"] = matchRules(expr.PhaseRequestHeaders, cfg.Global.Lists, k, ids, exprs)
 	return writeJSON(w, http.StatusOK, out)
 }
 

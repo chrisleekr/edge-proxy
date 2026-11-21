@@ -89,6 +89,10 @@ type Global struct {
 	// sets on every request. Nil uses the deployment's default and an empty
 	// list trusts none, so it is a pointer. Added in schema 8.
 	CDNTrustedHeaders *[]string `json:"cdn_trusted_headers,omitempty"`
+	// Lists are named value lists for one field each, which conditions name
+	// as $name, so one list of user agents or AS numbers serves many rules.
+	// Added in schema 13, omitted when empty.
+	Lists map[string]expr.ValueList `json:"lists,omitempty"`
 }
 
 // Backstop is the per-replica, per-IP token bucket.

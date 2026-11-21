@@ -133,6 +133,16 @@
             "X-Internal-Debug"
           ]
         }
+      },
+      "lists": {
+        "scraper-agents": {
+          "field": "http.user_agent",
+          "values": [
+            "Go-http-client/",
+            "Scrapy/",
+            "python-requests/"
+          ]
+        }
       }
     },
     "auth": {
@@ -292,6 +302,24 @@
           "responses": {
             "rate_limited": "friendly-429"
           }
+        }
+      },
+      {
+        "id": "log-scrapers",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "http.user_agent",
+              "operator": "contains",
+              "value": {
+                "list": "scraper-agents"
+              }
+            }
+          ]
+        },
+        "settings": {
+          "block": "log"
         }
       },
       {
@@ -583,6 +611,41 @@
         "rate_limit_rules": [
           "pages-per-ip"
         ]
+      }
+    },
+    {
+      "name": "office scripts are not logged as scrapers",
+      "request": {
+        "host": "api.example.com",
+        "path": "/api/orders",
+        "ip": "198.51.100.10",
+        "ip_lists": [
+          "office"
+        ],
+        "headers": {
+          "User-Agent": "python-requests/2.31"
+        }
+      },
+      "expect": {
+        "settings": {
+          "block": ""
+        }
+      }
+    },
+    {
+      "name": "other scripts are logged as scrapers",
+      "request": {
+        "host": "api.example.com",
+        "path": "/api/orders",
+        "ip": "192.0.2.10",
+        "headers": {
+          "User-Agent": "python-requests/2.31"
+        }
+      },
+      "expect": {
+        "settings": {
+          "block": "log"
+        }
       }
     }
   ]

@@ -65,6 +65,11 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 		Exact     bool         `json:"exact"`
 		// The rule builder hides a deprecated field; rules using it still run.
 		Deprecated bool `json:"deprecated,omitempty"`
+		// ListKind is what a value list for this field holds, with the
+		// operators that take one; absent when the field has no value lists.
+		ListKind  string   `json:"list_kind,omitempty"`
+		ListOps   []string `json:"list_ops,omitempty"`
+		ListExact bool     `json:"list_exact,omitempty"`
 	}
 	// The fields that need deployment config, and whether each has it.
 	deployed := map[string]bool{expr.VerifiedBotField: s.cfg.Deployment.VerifiedBots}
@@ -75,7 +80,8 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 	for _, f := range expr.Fields {
 		needs := f.Source == expr.SourceViewer || f.Name == expr.VerifiedBotField
 		fd := field{Name: f.Name, Label: f.Label, Type: f.Type, Keyed: f.Keyed, Phases: []expr.Phase{},
-			Available: !needs || deployed[f.Name], Exact: f.Exact, Deprecated: f.Deprecated}
+			Available: !needs || deployed[f.Name], Exact: f.Exact, Deprecated: f.Deprecated,
+			ListKind: f.ListKind, ListOps: expr.ListOps(f), ListExact: f.ListExact}
 		for _, p := range phases {
 			if f.InPhase(p) {
 				fd.Phases = append(fd.Phases, p)

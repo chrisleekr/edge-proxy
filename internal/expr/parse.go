@@ -266,15 +266,23 @@ func (p *parser) parseFunc() (Node, error) {
 	if err := p.expectPunct(","); err != nil {
 		return Node{}, err
 	}
-	v, err := p.parseScalar()
-	if err != nil {
+	r.Operator = name
+	g, ok, err := p.listRef()
+	switch {
+	case err != nil:
 		return Node{}, err
+	case ok:
+		r.Value = Value{ListName: g}
+	default:
+		v, err := p.parseScalar()
+		if err != nil {
+			return Node{}, err
+		}
+		r.Value = Value{One: v}
 	}
 	if err := p.expectPunct(")"); err != nil {
 		return Node{}, err
 	}
-	r.Operator = name
-	r.Value = Value{One: v}
 	return r, nil
 }
 
@@ -298,6 +306,10 @@ func (p *parser) parseComparison() (Node, error) {
 		op = "strict_wildcard"
 	}
 	r.Operator = op
+	if g, ok, err := p.listRef(); err != nil || ok {
+		r.Value = Value{ListName: g}
+		return r, err
+	}
 	if op == "in" {
 		list, err := p.parseList()
 		if err != nil {
@@ -334,6 +346,20 @@ func (p *parser) parseFieldRef() (Node, error) {
 	return r, nil
 }
 
+// listRef consumes a bare $name word, a value list of global.lists. A quoted
+// "$name" stays a literal.
+func (p *parser) listRef() (string, bool, error) {
+	t := p.peek()
+	if t.kind != tokWord || !strings.HasPrefix(t.text, "$") {
+		return "", false, nil
+	}
+	p.next()
+	if len(t.text) == 1 {
+		return "", false, &SyntaxError{t.pos, "expected a value list name after $"}
+	}
+	return t.text[1:], true, nil
+}
+
 func (p *parser) parseScalar() (string, error) {
 	t := p.next()
 	if t.kind == tokString || (t.kind == tokWord && !keywords[t.text]) {
@@ -351,6 +377,11 @@ func (p *parser) parseList() ([]string, error) {
 		if t := p.peek(); t.kind == tokPunct && t.text == "}" {
 			p.next()
 			return list, nil
+		}
+		// A bare $name names a value list everywhere else, so reading it here
+		// as a literal would save a rule that never matches what was meant.
+		if t := p.peek(); t.kind == tokWord && strings.HasPrefix(t.text, "$") {
+			return nil, &SyntaxError{t.pos, `a value list replaces the whole set: write "in $name", or quote "$name" for a literal`}
 		}
 		v, err := p.parseScalar()
 		if err != nil {

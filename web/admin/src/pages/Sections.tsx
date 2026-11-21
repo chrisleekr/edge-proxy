@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useContext, useState } from 'react';
 import { api, type Config, type Issue, type Json, type JsonObject, type Schema } from '../api';
 import { useDraft } from '../draft';
-import { useLeaveGuard } from '../router';
+import { Link, navigate, useLeaveGuard } from '../router';
+import { phases, ruleLink, rulesOf } from '../phases';
 import { GuardForm, guardWhere } from '../GuardForm';
 import { Amount, Choice, Count, Errors, kindWhen, Labeled, Lines, setField, sizeUnits, timeUnits, without } from '../RuleForms';
 import { Badge, Button, CanWrite, Card, Check, CodeEditor, ConfirmButton, Editable, ErrorBox, type Field, Hint, Input, JsonEditor, Jump, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
@@ -11,10 +12,10 @@ import { Badge, Button, CanWrite, Card, Check, CodeEditor, ConfirmButton, Editab
 // the server on every edit, puts each problem under its field and keeps
 // Save off until there are none; nothing here validates.
 
-const useSchema = () => useQuery({ queryKey: ['schema'], queryFn: () => api<Schema>('GET', '/api/expr/schema'), staleTime: Infinity });
+export const useSchema = () => useQuery({ queryKey: ['schema'], queryFn: () => api<Schema>('GET', '/api/expr/schema'), staleTime: Infinity });
 
 // q quotes a name as the server's issue paths do, such as responses["web"].
-const q = (name: string) => JSON.stringify(name);
+export const q = (name: string) => JSON.stringify(name);
 
 // only keeps the issues for exactly this path, not those inside it.
 const only = (issues: Issue[], path: string) => issues.filter((i) => i.path === path);
@@ -342,6 +343,109 @@ export function CORS() {
         })}
         <AddNamed label="New policy name" button="Add policy" example="web" taken={names} onAdd={(n) => setAll({ ...all, [n]: { origins: [''] } })} />
       </Section>
+    </Page>
+  );
+}
+
+export type ValueListDef = { field: string; values: string[] };
+
+// namedLists collects the value lists an expression uses.
+const namedLists = (n: Json, out: Set<string>) => {
+  const x = n as { rules?: Json[]; value?: { list?: string } } | null;
+  if (x?.rules) x.rules.forEach((r) => namedLists(r, out));
+  else if (typeof x?.value?.list === 'string') out.add(x.value.list);
+};
+
+// renameListRefs points every condition that uses the list from at to, so a
+// rename and its references land in the same draft edit.
+const renameListRefs = (n: Json, from: string, to: string): Json => {
+  const x = n as { rules?: Json[]; value?: { list?: string } } | null;
+  if (x?.rules) return { ...x, rules: x.rules.map((r) => renameListRefs(r, from, to)) };
+  return x?.value?.list === from ? { ...x, value: { ...x.value, list: to } } : n;
+};
+
+// listUsers lists the IDs of the rules that use a value list, in any phase.
+export const listUsers = (c: Config, name: string) =>
+  phases
+    .flatMap((p) => rulesOf(c, p.key))
+    .filter((r) => {
+      const s = new Set<string>();
+      namedLists(r.expression, s);
+      return s.has(name);
+    })
+    .map((r) => r.id);
+
+// withList puts a value list under its name in the config, removing the old key
+// and rewriting the rules that use it when the name changed.
+export function withList(c: Config, old: string | undefined, name: string, def: ValueListDef): Config {
+  const lists = (c.global.lists ?? {}) as Record<string, ValueListDef>;
+  // Same name: overwrite in place so key order and the draft's no-edit comparison hold.
+  if (!old || old === name) return { ...c, global: { ...c.global, lists: { ...lists, [name]: def } } };
+  const { [old]: _, ...rest } = lists;
+  const next: Config = { ...c, global: { ...c.global, lists: { ...rest, [name]: def } } };
+  for (const { key } of phases) next[key] = rulesOf(c, key).map((r) => ({ ...r, expression: renameListRefs(r.expression, old, name) }));
+  return next;
+}
+
+export function ValueLists() {
+  const d = useDraft();
+  const canWrite = useContext(CanWrite);
+  const schema = useSchema();
+  if (!schema.data) return <Pending error={schema.error} />;
+  const all = (d.config.global.lists ?? {}) as Record<string, ValueListDef>;
+  const names = Object.keys(all).sort();
+  return (
+    <Page title="Value lists" info="A value list holds one kind of value. A rule can use it only on a field of that kind, and the values are checked as that field's values. Addresses are not value lists: they go in IP lists.">
+      <ReadOnlyNote />
+      <p className="text-body">
+        A value list is a named set of values, such as user agents or countries, that many rules use as <code>$name</code>. It is part of the policy: changes take effect when you publish. IP addresses? Use{' '}
+        <Link to="/ip-lists" className="font-medium text-heading underline">
+          IP lists
+        </Link>
+        .
+      </p>
+      {canWrite && (
+        <div>
+          <Button variant="primary" onClick={() => navigate('/value-lists/_new')}>
+            New value list
+          </Button>
+        </div>
+      )}
+      {names.length === 0 && <p className="text-body">No value lists yet.</p>}
+      <ul className="flex flex-col gap-2">
+        {names.map((name) => {
+          const g = all[name]!;
+          const def = schema.data.fields.find((f) => f.name === g.field);
+          const used = listUsers(d.config, name);
+          const n = (g.values ?? []).length;
+          return (
+            <li key={name} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-control border border-line px-4 py-3 text-sm">
+              <Link to={`/value-lists/${encodeURIComponent(name)}`} className="break-all font-mono font-medium text-heading underline">
+                {name}
+              </Link>
+              <span className="text-body">
+                {def?.list_kind ?? g.field} · {n.toLocaleString()} {n === 1 ? 'value' : 'values'}
+              </span>
+              {used.length ? (
+                <span className="text-body">
+                  used by{' '}
+                  {used.map((id, i) => (
+                    <span key={id}>
+                      {i > 0 && ', '}
+                      <Link to={ruleLink(d.config, id) ?? '/rules'} className="font-medium text-heading underline">
+                        {id}
+                      </Link>
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span className="text-warning">not used</span>
+              )}
+              {d.at(`global.lists[${q(name)}]`).length > 0 && <span className="text-danger">has problems</span>}
+            </li>
+          );
+        })}
+      </ul>
     </Page>
   );
 }

@@ -16,6 +16,11 @@ export interface FieldDef {
   exact: boolean;
   // Deprecated fields stay readable in existing rules but are not offered for new ones.
   deprecated?: boolean;
+  // What a value list for this field holds, such as "User agents"; absent when no value list can.
+  list_kind?: string;
+  // Operators that take a value list, and whether it is limited to is in and is not in.
+  list_ops?: string[];
+  list_exact?: boolean;
 }
 
 export interface OpDef {
@@ -200,7 +205,7 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   });
   if (res.status === 204) return undefined as T;
   const data = (await res.json().catch(() => ({}))) as Partial<{ title: string; detail: string; errors: Issue[]; test_results: TestResult[] }>;
-  if (!res.ok) throw new Problem(res.status, data.title ?? res.statusText, data.detail, data.errors ?? [], data.test_results ?? []);
+  if (!res.ok) throw new Problem(res.status, data.title || res.statusText || `HTTP ${res.status}`, data.detail, data.errors ?? [], data.test_results ?? []);
   return data as T;
 }
 

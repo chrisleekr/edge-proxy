@@ -506,7 +506,12 @@ func TestHTTPEdgeCases(t *testing.T) {
 			t.Fatalf("interim: %d", resp.StatusCode)
 		}
 		_, _ = io.WriteString(conn, "hello")
+		// The upstream's own 100 Continue may be forwarded too; a client
+		// skips any number of interim responses (RFC 9110 §15.2).
 		resp, err := http.ReadResponse(br, nil)
+		for err == nil && resp.StatusCode == http.StatusContinue {
+			resp, err = http.ReadResponse(br, nil)
+		}
 		if p := last(); err != nil || resp.StatusCode != 200 || p[len(p)-1] != "POST / hello" {
 			t.Fatalf("after continue: %v %v %q", resp, err, p)
 		}

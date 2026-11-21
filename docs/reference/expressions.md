@@ -21,6 +21,7 @@ true
 | Keyed fields | `field["key"]`, key quoted |
 | Strings | `"..."`, escapes `\"` and `\\` only. Bare words work for simple values |
 | Lists | `{a "b c" d}`, space-separated |
+| Value lists | `$name`, a [value list](#value-lists) in place of a value or a list. A quoted `"$name"` is a literal |
 | Booleans | `ssl` alone means true; `not ssl` means false |
 | Match all | `true` |
 
@@ -93,12 +94,44 @@ On a list field (headers, cookies, query args, claims), a condition matches if *
 
 In wildcards, `*` matches any characters and the pattern must match the whole value. `\*` and `\\` are the only escapes, and `**` is rejected as a likely typo. `wildcard` folds case for ASCII letters only; other letters must match exactly.
 
+## Value lists
+
+A value list is a named set of values for one field, kept in the policy at `global.lists` and managed on the **Value lists** page: it lists each value list with the rules that use it, **New value list** adds one, and a value list's own page edits its name, field and values. Renaming a value list changes `$name` in every rule that uses it, in the same draft edit. A condition names it with `$name` where a value or a list would go:
+
+```text
+http.user_agent contains $bad-agents
+ip.src.country in $eu-only
+not starts_with(http.request.uri.path, $public-paths)
+```
+
+`in $name` matches when the field equals any value of the value list, as `in {...}` does. A value list replaces the whole set, so a bare `$name` inside `{...}` is a syntax error; quote it for a literal. A pattern operator (`contains`, `starts_with`, `ends_with`, `wildcard`, `strict_wildcard`, `matches`) matches when any value matches, and its negated form when none does. A value list belongs to one field and is used only with that field, and its values are checked as that field's when the policy is saved and again where a rule uses it, with that rule's operator: a URL paths value list holding `.php` works with `ends_with` and is refused with `in`, since a path starts with `/`.
+
+| Value list kind | Field | Operators |
+|---|---|---|
+| User agents | `http.user_agent` | `in` and the pattern operators |
+| URL paths | `http.request.uri.path` | `in` and the pattern operators |
+| Hostnames | `http.host` | `in` and the pattern operators |
+| Referers | `http.referer` | `in` and the pattern operators |
+| Header values | `http.request.headers` | `in` and the pattern operators |
+| Cookie values | `http.request.cookies` | `in` and the pattern operators |
+| Query values | `http.request.uri.args` | `in` and the pattern operators |
+| JWT claim values | `http.request.jwt.claims` | `in` and the pattern operators |
+| Countries | `ip.src.country` | `in`, `not_in` |
+| Continents | `ip.src.continent` | `in`, `not_in` |
+| AS numbers | `ip.src.asnum` | `in`, `not_in` |
+| JA4 fingerprints | `tls.client.ja4` | `in`, `not_in` |
+| JA3 fingerprints | `tls.client.ja3` | `in`, `not_in` |
+
+Addresses go in an [IP list](../use/bots.md#ip-lists), read through `client.ip_lists`, not in a value list. A value list is part of the policy, so a change takes effect when you publish, and it needs schema 13 edges. A value list no rule uses is warned about, and removing one a rule still uses is refused at that rule.
+
 ## Limits
 
 | Limit | Value |
 |---|---|
 | Text length | 4000 bytes |
-| Conditions | 32 |
+| Conditions | 32. With a pattern operator, each value of a value list counts as one; `in $name` counts once |
 | Nesting depth | 8 |
 | A literal value | 4096 bytes |
 | A regex | 1024 bytes |
+| Value lists | 100, each of 1 to 10,000 values |
+| Value list values across every use | 200,000, since each use is compiled on its own |

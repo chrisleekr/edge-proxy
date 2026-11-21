@@ -5,6 +5,7 @@
 package expr
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 )
@@ -39,20 +40,32 @@ type Value struct {
 	List []string
 	// IsList distinguishes an empty list from an absent value.
 	IsList bool
+	// ListName names an entry of global.lists, written $name: the condition
+	// compares the field with every value of the value list.
+	ListName string
 }
 
 // IsZero lets `omitzero` drop the value for operators that take none.
-func (v Value) IsZero() bool { return !v.IsList && v.One == "" }
+func (v Value) IsZero() bool { return !v.IsList && v.One == "" && v.ListName == "" }
 
-// MarshalJSON writes a list as a JSON array and a literal as a string.
+// listRef is the JSON form of a value list reference.
+type listRef struct {
+	ListName string `json:"list"`
+}
+
+// MarshalJSON writes a value list as {"list": name}, a list as a JSON array and a
+// literal as a string.
 func (v Value) MarshalJSON() ([]byte, error) {
-	if v.IsList {
+	switch {
+	case v.ListName != "":
+		return json.Marshal(listRef{v.ListName})
+	case v.IsList:
 		return json.Marshal(v.List)
 	}
 	return json.Marshal(v.One)
 }
 
-// UnmarshalJSON accepts a string or an array of strings.
+// UnmarshalJSON accepts a string, an array of strings or {"list": name}.
 func (v *Value) UnmarshalJSON(b []byte) error {
 	var one string
 	if err := json.Unmarshal(b, &one); err == nil {
@@ -65,7 +78,16 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 		*v = Value{List: list, IsList: true}
 		return nil
 	}
-	return errors.New("value must be a string or an array of strings")
+	// The caller's DisallowUnknownFields does not reach a custom unmarshaler,
+	// so the object form is decoded strictly here.
+	var ref listRef
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&ref); err == nil && ref.ListName != "" {
+		*v = Value{ListName: ref.ListName}
+		return nil
+	}
+	return errors.New(`value must be a string, an array of strings or {"list": "name"}`)
 }
 
 // Normalize returns the canonical form of n, which is always a group.

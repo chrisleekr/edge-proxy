@@ -306,8 +306,8 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
             value={ruleID}
             onChange={(e) => setRuleID(e.target.value)}
           />
-          {/* An empty ID is already explained by the field's own hint. */}
-          <Hint>{ruleID && blocked}</Hint>
+          {/* An empty ID is already explained by the field's own hint. A reader has no Apply, so no reason it is off. */}
+          <Hint>{canWrite && ruleID && blocked}</Hint>
           {!taken && <Errors issues={at('id')} />}
         </div>
         {/* Every problem is listed here too, so none hides under a closed section. */}
@@ -357,14 +357,13 @@ function Editor({ phase, id, start, from }: { phase: string; id: string; start?:
           <ErrorBox error={exprError} />
           <section aria-label="Preview" className="mt-4 flex flex-col gap-2">
             <h3 className="text-sm font-medium text-heading">Expression preview</h3>
+            {/* The server renders against the saved draft, which lacks value lists made here, so problems come from the check of the local draft above. */}
             {preview && 'text' in preview && (
               <>
                 <pre data-testid="preview-text" className="whitespace-pre-wrap wrap-anywhere">
                   {preview.text}
                 </pre>
                 {preview.text === 'true' && <p className="text-sm text-body">Matches every request.</p>}
-                <Issues issues={preview.errors} />
-                <Issues issues={preview.warnings} tone="amber" />
               </>
             )}
             {preview && 'failed' in preview && <Issues issues={[{ path: '', message: preview.failed }]} />}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chrisleekr/edge-proxy/internal/expr"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -543,6 +544,76 @@ func TestRouteFlowExplainsEveryRule(t *testing.T) {
 	}
 	status(t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=abc", id), nil), http.StatusBadRequest)
 	status(t, pub.do("GET", "/api/observed-routes/999999/flow", nil), http.StatusNotFound)
+}
+
+// A rule that names a value list is classified by its values, as the
+// edge compiles it, so a value list that holds no path of the route never applies.
+func TestRouteFlowReadsValueListValues(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/users/7")), http.StatusAccepted)
+	id := find(h.routes(pub), "GET", "api.example.com", "/users/{id}").ID
+	cfg := testConfig()
+	cfg.Global.Lists = map[string]expr.ValueList{
+		"other-paths": {Field: "http.request.uri.path", Values: []string{"/admin/", "/orders/"}},
+		"user-paths":  {Field: "http.request.uri.path", Values: []string{"/admin/", "/users/"}},
+	}
+	cfg.ConfigRules = append(cfg.ConfigRules,
+		snapshot.ConfigRule{ID: "other", Expression: mustParse(`starts_with(http.request.uri.path, $other-paths)`), Settings: snapshot.Settings{BodyLimit: new(int64(512))}},
+		snapshot.ConfigRule{ID: "users", Expression: mustParse(`starts_with(http.request.uri.path, $user-paths)`), Settings: snapshot.Settings{BodyLimit: new(int64(256))}},
+	)
+	status(t, pub.save(pub.revision(), cfg, adminTest), 200)
+	f := decode[flowView](t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=draft", id), nil))
+	got := f.Rules["config"]
+	if n := len(got); n < 2 || fmt.Sprint(got[n-2:]) != fmt.Sprint([]ruleMatch{{ID: "other", Match: matchNever}, {ID: "users", Match: matchAlways}}) {
+		t.Fatalf("config rules = %+v", got)
+	}
+	if !slices.Equal(f.Result.ConfigRules, []string{"users"}) {
+		t.Fatalf("simulated = %+v", f.Result)
+	}
+}
+
+// A path value list's values fill the route's placeholders as written values do,
+// so a value list naming one user is seen to match only some of /users/{id}.
+func TestRouteFlowSamplesValueListValues(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/users/7")), http.StatusAccepted)
+	id := find(h.routes(pub), "GET", "api.example.com", "/users/{id}").ID
+	cfg := testConfig()
+	cfg.Global.Lists = map[string]expr.ValueList{"one-user": {Field: "http.request.uri.path", Values: []string{"/users/42"}}}
+	cfg.ConfigRules = append(cfg.ConfigRules, snapshot.ConfigRule{ID: "one", Expression: mustParse(`http.request.uri.path in $one-user`), Settings: snapshot.Settings{BodyLimit: new(int64(512))}})
+	status(t, pub.save(pub.revision(), cfg, adminTest), 200)
+	f := decode[flowView](t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=draft", id), nil))
+	got := f.Rules["config"]
+	if last := got[len(got)-1]; last.ID != "one" || last.Match != matchDepends {
+		t.Fatalf("config rules = %+v", got)
+	}
+}
+
+// A value list of many hostnames expands to a condition longer than the
+// expression text limit, but the flow still classifies it like a short list.
+func TestRouteFlowClassifiesAValueListTooLongToExpand(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/users/7")), http.StatusAccepted)
+	id := find(h.routes(pub), "GET", "api.example.com", "/users/{id}").ID
+	hosts := []string{"api.example.com"}
+	for i := range 250 {
+		hosts = append(hosts, fmt.Sprintf("h%03d.example.com", i))
+	}
+	cfg := testConfig()
+	cfg.Global.Lists = map[string]expr.ValueList{
+		"has-route": {Field: "http.host", Values: hosts},
+		"no-route":  {Field: "http.host", Values: hosts[1:]},
+	}
+	cfg.ConfigRules = append(cfg.ConfigRules,
+		snapshot.ConfigRule{ID: "member", Expression: mustParse(`http.host in $has-route`), Settings: snapshot.Settings{BodyLimit: new(int64(512))}},
+		snapshot.ConfigRule{ID: "stranger", Expression: mustParse(`http.host in $no-route`), Settings: snapshot.Settings{BodyLimit: new(int64(256))}},
+	)
+	status(t, pub.save(pub.revision(), cfg, adminTest), 200)
+	f := decode[flowView](t, pub.do("GET", fmt.Sprintf("/api/observed-routes/%d/flow?version=draft", id), nil))
+	got := f.Rules["config"]
+	if n := len(got); n < 2 || fmt.Sprint(got[n-2:]) != fmt.Sprint([]ruleMatch{{ID: "member", Match: matchAlways}, {ID: "stranger", Match: matchNever}}) {
+		t.Fatalf("config rules = %+v", got)
+	}
 }
 
 // The flow names the rule whose block setting applies from the config it

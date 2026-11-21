@@ -50,6 +50,7 @@ test('docs screenshots', async ({ page }) => {
     ['audit', '/audit', 'Audit log'],
     ['routes', '/routes', 'Routes'],
     ['traffic', '/traffic?view=period&range=1h', 'Traffic map'],
+    ['value-lists', '/value-lists', 'Value lists'],
     ['templates', '/templates', 'Templates'],
     ['cors', '/cors', 'CORS policies'],
     ['issuers', '/issuers', 'Issuers'],
