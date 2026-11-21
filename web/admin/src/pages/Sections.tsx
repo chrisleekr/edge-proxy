@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { type ReactNode, useContext, useState } from 'react';
+import { type FormEvent, type ReactNode, useContext, useState } from 'react';
 import { api, type Config, type Issue, type Json, type JsonObject, type Schema } from '../api';
 import { useDraft } from '../draft';
 import { Link, navigate, useLeaveGuard } from '../router';
@@ -840,7 +840,73 @@ export function Settings({ canManage }: { canManage: boolean }) {
         </Section>
       </div>
       <Guard canManage={canManage} />
+      {canManage && <EdgePlace />}
     </Page>
+  );
+}
+
+// EdgePlace sets where the edges are, which the war room map shows as the
+// diamond the lines flow to. It applies at once and is audited.
+type Place = { lat: number; long: number; name?: string } | null;
+function EdgePlace() {
+  const q = useQuery({ queryKey: ['traffic-map'], queryFn: () => api<{ edge: Place }>('GET', '/api/settings/traffic-map') });
+  if (!q.data) return <Pending error={q.error} />;
+  // Mounted once loaded and kept, so a save's refetch does not reset the form and its notice.
+  return <EdgePlaceForm edge={q.data.edge} />;
+}
+
+function EdgePlaceForm({ edge }: { edge: Place }) {
+  const qc = useQueryClient();
+  const [lat, setLat] = useState(edge ? String(edge.lat) : '');
+  const [long, setLong] = useState(edge ? String(edge.long) : '');
+  const [name, setName] = useState(edge?.name ?? '');
+  // The form is not remounted after a save, so whether a place is stored follows the saves.
+  const [stored, setStored] = useState(!!edge);
+  const save = useMutation({
+    mutationFn: (place: Place) => api('PUT', '/api/settings/traffic-map', { edge: place }),
+    onSuccess: (_, place) => {
+      setStored(place !== null);
+      // Emptied only once the clear is saved, so a failed one leaves the place to retry.
+      if (place === null) {
+        setLat('');
+        setLong('');
+        setName('');
+      }
+      return Promise.all([qc.invalidateQueries({ queryKey: ['traffic-map'] }), qc.invalidateQueries({ queryKey: ['traffic'] })]);
+    },
+  });
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    save.mutate({ lat: Number(lat), long: Number(long), name: name.trim() });
+  };
+  const filled = lat.trim() !== '' && long.trim() !== '';
+  return (
+    <Card
+      id="edge-place"
+      title="Where the edges are"
+      intro="Where the edges run, shown on the war room map as the diamond the lines flow to. Give latitude and longitude in decimal degrees, such as 50.11 and 8.68, and a place name such as Frankfurt. It applies at once and is audited."
+    >
+      <form onSubmit={submit} className="flex flex-col items-start gap-3">
+        <div className="flex flex-wrap gap-3">
+          <Input label="Latitude" type="number" step="any" value={lat} onChange={(e) => setLat(e.target.value)} />
+          <Input label="Longitude" type="number" step="any" value={long} onChange={(e) => setLong(e.target.value)} />
+          <Input label="Place name" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <ErrorBox error={save.error} />
+        {save.isSuccess && <Notice>Saved.</Notice>}
+        <div className="flex gap-2">
+          <Button type="submit" variant="primary" disabled={!filled || save.isPending}>
+            Save
+          </Button>
+          <Button
+            disabled={!stored || save.isPending}
+            onClick={() => save.mutate(null)}
+          >
+            Clear
+          </Button>
+        </div>
+      </form>
+    </Card>
   );
 }
 

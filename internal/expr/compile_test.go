@@ -250,7 +250,7 @@ func FuzzParseRenderRoundTrip(f *testing.F) {
 // realistic lengths, below the wildcard's 512-byte stack buffer.
 func TestMatchingDoesNotAllocate(t *testing.T) {
 	if raceEnabled {
-		t.Skip("sync.Pool drops items under -race; scripts/ci/test.sh checks this in its non-race run")
+		t.Skip("sync.Pool drops items under -race; scripts/ci/bench.sh runs this without -race")
 	}
 	req := &fakeReq{
 		str:   map[string]string{"http.host": "api.example.com", "http.request.uri.path": "/V1/Users/42", "http.user_agent": "Mozilla/5.0 (X11; Linux x86_64)", "http.request.method": "GET"},

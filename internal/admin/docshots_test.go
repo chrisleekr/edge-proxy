@@ -354,7 +354,7 @@ func TestDocScreenshots(t *testing.T) {
 		}
 	}
 	at(0)
-	if _, err := h.owner.Exec(t.Context(), `INSERT INTO settings (key, value, updated_at) VALUES ('traffic_map', '{"edge":{"lat":50.11,"long":8.68}}', now())`); err != nil {
+	if _, err := h.owner.Exec(t.Context(), `INSERT INTO settings (key, value, updated_at) VALUES ('traffic_map', '{"edge":{"lat":50.11,"long":8.68,"name":"Frankfurt"}}', now())`); err != nil {
 		t.Fatal(err)
 	}
 	status(t, h.shipper().post(lines...), http.StatusAccepted)
@@ -384,6 +384,6 @@ func TestDocScreenshots(t *testing.T) {
 	}
 }
 
-// viewerCountries are the access lines' countries for the Traffic map shot,
+// viewerCountries are the access lines' countries for the war room shot,
 // by line position: weighted towards a few, with some lines carrying none.
 var viewerCountries = []string{"US", "US", "DE", "US", "GB", "FR", "US", "DE", "JP", "US", "AU", "GB", "BR", "US", "IN", "DE", "CA", "", "US", "ZA", "SG", "FR", "US", "MX"}

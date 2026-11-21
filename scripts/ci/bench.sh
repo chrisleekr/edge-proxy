@@ -5,3 +5,7 @@
 set -euo pipefail
 
 go test -run='^$' -bench=. -benchtime=100x -benchmem ./...
+
+# The allocation tests skip themselves under -race, where sync.Pool drops
+# items at random, and make test runs the edge with -race: run them here.
+go test -count=1 -run='Alloc' ./...

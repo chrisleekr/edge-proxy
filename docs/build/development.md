@@ -31,10 +31,10 @@ Go (version in `go.mod`), Docker, Node 26 for the UI and the autopilot runner, a
 
 | Command | Does |
 |---|---|
-| `make test` | Unit and integration tests against real Valkey and Postgres (testcontainers), with the race detector for edge packages (and admin with `RACE_ADMIN=1`, which the nightly run sets), then the 100% edge coverage gate. Zero-allocation tests for request-path matchers, and per-request allocation ceilings for allowed, RateLimit-header and 429 requests, run here |
+| `make test` | Unit and integration tests against real Valkey and Postgres (testcontainers), with the race detector for edge packages (and admin with `RACE_ADMIN=1`, which the nightly run sets), then the 100% edge coverage gate. Allocation tests that depend on `sync.Pool` skip themselves under the race detector, so `make bench` runs them |
 | `make lint` | `go vet`, golangci-lint, shellcheck, and a check that comments and docs don't cite design sections or doc paths |
 | `make fuzz` | Every fuzz target (`FUZZTIME=5m` before merging parser or matcher changes). With `BASE=<commit>`, only the targets whose package or its dependencies changed since that commit; CI sets it on PRs and merge requests |
-| `make bench` | Every benchmark, briefly, so they keep compiling and running |
+| `make bench` | Every benchmark, briefly, so they keep compiling and running, then the zero-allocation tests for request-path matchers and the per-request allocation ceilings for allowed, RateLimit-header and 429 requests, without the race detector |
 | `make vuln` | govulncheck |
 | `make ui` | UI lint, typecheck and build, then browser smoke tests against a real admin, SSE and WebSocket through a real edge in Chromium, Firefox and WebKit, and `make screenshots` |
 | `make autopilot` | Runner lint, typecheck and unit tests, then `TestAutopilotRunner`: the real runner, with a scripted adapter in place of a model, against a real admin and Postgres. It covers a case closing with a proposal, a claim refused for a missing credential, a run timing out, an answer without a verdict, two cases running at once with `AUTOPILOT_CONCURRENCY=2`, a lapsed lease and SIGTERM |

@@ -3,15 +3,16 @@ import type { ReactNode } from 'react';
 import { meQuery } from './api';
 
 // LogValues fill a LOG_SEARCH_URL template: a time window in epoch
-// milliseconds, and a status code and host where the page has one.
+// milliseconds, and a status code, host and country where the page has one.
 export interface LogValues {
   from: number;
   to: number;
   status?: string | undefined;
   host?: string | undefined;
+  country?: string | undefined;
 }
 
-const placeholder = /\{(from|to|from_ms|to_ms|status|host)\}/g;
+const placeholder = /\{(from|to|from_ms|to_ms|status|host|country)\}/g;
 
 // logSearchURL fills the template with URL-encoded values. It is undefined
 // when the template uses a placeholder this place has no value for, since
@@ -24,6 +25,7 @@ export function logSearchURL(template: string, v: LogValues): string | undefined
     to_ms: String(v.to),
     status: v.status,
     host: v.host,
+    country: v.country,
   };
   let missing = false;
   const url = template.replace(placeholder, (_, name: string) => {

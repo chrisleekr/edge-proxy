@@ -54,7 +54,7 @@ export const said: Record<string, string> = {
   'settings.save': 'changed settings',
   'settings.guard': 'changed guard settings',
   'settings.autopilot': 'changed autopilot settings',
-  'settings.traffic_map': 'changed where the edges are on the traffic map',
+  'settings.traffic_map': 'changed where the edges are on the war room map',
   'user.create': 'added user',
   'user.disable': 'disabled user',
   'user.roles': 'changed roles of',

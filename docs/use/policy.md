@@ -120,7 +120,7 @@ http.request.jwt.claims["tenant"] eq "acme" and http.request.method in {"POST" "
 | Templates | Response bodies for each kind of edge response: `bad_request`, `unauthorized`, `forbidden`, `payload_too_large`, `rate_limited`, `bad_gateway`, `unavailable`, `overloaded`, `gateway_timeout`. JSON, problem+json, HTML or text, with `{{retry_after}}`, `{{request_id}}` and `{{status}}` placeholders |
 | CORS policies | Named policies: origins, methods, headers, credentials, max age |
 | Issuers | JWT issuers: ID, issuer (the token's `iss`), audiences, JWKS URL (https), algorithm (RS, PS, ES or EdDSA; never HMAC). Access rules say which are accepted |
-| Settings | Kill switch (rate limiting, JWT checks, blocking), trusted client allowlist, local backstop, defaults (body limit and timeouts), locale (supported languages and output header), header forwarding, and the rollback guard |
+| Settings | Kill switch (rate limiting, JWT checks, blocking), trusted client allowlist, local backstop, defaults (body limit and timeouts), locale (supported languages and output header), header forwarding, the rollback guard, and where the edges are (a place for the war room map, which applies at once and is not part of the policy) |
 
 ## Headers your upstream can trust
 
