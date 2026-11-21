@@ -90,6 +90,23 @@ func TestTypedIPListRefusesABadLineAndSavesNothing(t *testing.T) {
 	}
 }
 
+// A pasted file that is not addresses at all is refused with its first
+// problems and a count of the rest, not one error per line.
+func TestTypedIPListReportsTheFirstProblemsOfAPastedFile(t *testing.T) {
+	_, pub, _, _ := listHarness(t)
+	resp := addTyped(pub, "office", strings.Repeat("<html>\n", 1000), false)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d: %s", resp.StatusCode, body(resp))
+	}
+	var problem struct{ Errors []struct{ Message string } }
+	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(problem.Errors); n != maxTypedIssues+1 || problem.Errors[n-1].Message != "and 950 more lines have problems" {
+		t.Fatalf("%d errors, last %+v", n, problem.Errors[n-1])
+	}
+}
+
 // manyAddresses is n distinct addresses, one per line, from 10.0.0.0/16 up.
 func manyAddresses(n int) string {
 	var b strings.Builder
