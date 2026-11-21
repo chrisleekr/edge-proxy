@@ -97,7 +97,9 @@ export function WarRoom() {
 
   const { minutes, step } = live ? { minutes: 66, step: 1 } : ranges[key];
   const q = useQuery({
-    queryKey: ['stats', minutes, step],
+    // Its own key: the dashboard data's range query polls ['stats', minutes, step]
+    // and would refetch a zoomed span this query freezes.
+    queryKey: ['stats', minutes, step, 'warroom'],
     queryFn: () => api<StatRow[]>('GET', `/api/stats?minutes=${minutes}&step=${step}`),
     // A zoomed span is frozen: a refetch would slide the fetched window off its buckets.
     refetchInterval: zoom ? false : live || minutes <= 1440 ? 10_000 : 60_000,

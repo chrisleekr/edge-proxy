@@ -866,6 +866,12 @@ function EdgePlaceForm({ edge }: { edge: Place }) {
     mutationFn: (place: Place) => api('PUT', '/api/settings/traffic-map', { edge: place }),
     onSuccess: (_, place) => {
       setStored(place !== null);
+      // Emptied only once the clear is saved, so a failed one leaves the place to retry.
+      if (place === null) {
+        setLat('');
+        setLong('');
+        setName('');
+      }
       return Promise.all([qc.invalidateQueries({ queryKey: ['traffic-map'] }), qc.invalidateQueries({ queryKey: ['traffic'] })]);
     },
   });
@@ -894,12 +900,7 @@ function EdgePlaceForm({ edge }: { edge: Place }) {
           </Button>
           <Button
             disabled={!stored || save.isPending}
-            onClick={() => {
-              setLat('');
-              setLong('');
-              setName('');
-              save.mutate(null);
-            }}
+            onClick={() => save.mutate(null)}
           >
             Clear
           </Button>
