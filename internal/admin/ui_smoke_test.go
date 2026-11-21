@@ -120,8 +120,8 @@ func TestUISmoke(t *testing.T) {
 	}
 	wg.Go(func() {
 		for t.Context().Err() == nil {
-			if err := h.s.refreshDenylists(t.Context()); err != nil && t.Context().Err() == nil {
-				t.Errorf("denylist tick: %v", err)
+			if err := h.s.refreshIPLists(t.Context()); err != nil && t.Context().Err() == nil {
+				t.Errorf("ip list tick: %v", err)
 			}
 			wait(t.Context(), time.Second)
 		}

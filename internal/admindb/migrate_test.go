@@ -152,10 +152,10 @@ func TestRolePermissions(t *testing.T) {
 		{"editor", "attention.ack", true},
 		{"publisher", "attention.ack", true},
 		{"admin", "attention.ack", true},
-		{"viewer", "denylists.manage", false},
-		{"editor", "denylists.manage", false},
-		{"publisher", "denylists.manage", true},
-		{"admin", "denylists.manage", true},
+		{"viewer", "ip_lists.manage", false},
+		{"editor", "ip_lists.manage", false},
+		{"publisher", "ip_lists.manage", true},
+		{"admin", "ip_lists.manage", true},
 	} {
 		t.Run(tc.role+" "+tc.perm, func(t *testing.T) {
 			var held bool
@@ -408,7 +408,7 @@ func TestIPListNamesMigrationKeepsExistingSources(t *testing.T) {
 		enabled bool
 	}
 	get := func(id int64) (r row) {
-		if err := owner.QueryRow(ctx, "SELECT name, wide, enabled FROM denylist_sources WHERE id = $1", id).Scan(&r.name, &r.wide, &r.enabled); err != nil {
+		if err := owner.QueryRow(ctx, "SELECT name, wide, enabled FROM ip_lists WHERE id = $1", id).Scan(&r.name, &r.wide, &r.enabled); err != nil {
 			t.Fatal(err)
 		}
 		return r
@@ -423,18 +423,48 @@ func TestIPListNamesMigrationKeepsExistingSources(t *testing.T) {
 		t.Fatalf("custom row %+v, want %+v", got, want)
 	}
 	var total, enabled int
-	if err := owner.QueryRow(ctx, "SELECT count(*), count(*) FILTER (WHERE enabled) FROM denylist_sources").Scan(&total, &enabled); err != nil {
+	if err := owner.QueryRow(ctx, "SELECT count(*), count(*) FILTER (WHERE enabled) FROM ip_lists").Scan(&total, &enabled); err != nil {
 		t.Fatal(err)
 	}
 	if total != 74 || enabled != 3 {
 		t.Fatalf("%d sources, %d enabled; want 74 and 3 (the rows people added)", total, enabled)
 	}
 	var wide int
-	if err := owner.QueryRow(ctx, "SELECT count(*) FROM denylist_sources WHERE wide").Scan(&wide); err != nil {
+	if err := owner.QueryRow(ctx, "SELECT count(*) FROM ip_lists WHERE wide").Scan(&wide); err != nil {
 		t.Fatal(err)
 	}
 	// 32 wide defaults, less the aws row that existed and keeps wide false.
 	if wide != 31 {
 		t.Fatalf("%d wide sources, want 31", wide)
+	}
+}
+
+// An install with IP lists and the old permission keeps its lists and its
+// grants when the tables are renamed: only publisher and admin hold the
+// permission, now named ip_lists.manage, and a list can then have no URL.
+func TestIPListsMigrationRenamesTablesAndMovesTheGrant(t *testing.T) {
+	owner := migratedBefore(t, 23)
+	ctx := t.Context()
+	var id int64
+	if err := owner.QueryRow(ctx, "INSERT INTO denylist_sources (name, url, enabled, added_by, added_at) VALUES ('mine', 'https://lists.example.com/mine.txt', true, 'someone', now()) RETURNING id").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, owner, testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := owner.QueryRow(ctx, "SELECT name FROM ip_lists WHERE id = $1", id).Scan(&name); err != nil || name != "mine" {
+		t.Fatalf("list %d is %q, %v; want it kept as mine", id, name, err)
+	}
+	var old int
+	if err := owner.QueryRow(ctx, "SELECT count(*) FROM role_permissions WHERE permission = 'denylists.manage'").Scan(&old); err != nil || old != 0 {
+		t.Fatalf("%d grants of denylists.manage remain, %v", old, err)
+	}
+	var roles string
+	if err := owner.QueryRow(ctx, "SELECT string_agg(role, ',' ORDER BY role) FROM role_permissions WHERE permission = 'ip_lists.manage'").Scan(&roles); err != nil || roles != "admin,publisher" {
+		t.Fatalf("ip_lists.manage is held by %q, %v; want admin,publisher", roles, err)
+	}
+	if _, err := owner.Exec(ctx, "INSERT INTO ip_lists (name, url, added_by, added_at) VALUES ('office', NULL, 'someone', now()), ('lab', NULL, 'someone', now())"); err != nil {
+		t.Fatalf("lists with no URL are refused: %v", err)
 	}
 }

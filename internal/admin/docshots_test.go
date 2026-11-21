@@ -86,6 +86,8 @@ func TestDocScreenshots(t *testing.T) {
 		t.Fatalf("read demo policy: %v", err)
 	}
 	full := demo.Config
+	// The typed list the demo's always-allow rule names, as the demo seeds it.
+	status(t, pub.do("POST", "/api/ip-lists", map[string]any{"name": "office", "entries": "198.51.100.0/28\n2001:db8:a::/48"}), http.StatusCreated)
 	// A config rule that blocks scripted clients, so the route-detail and
 	// dashboard stats include blocks. Rules lists it below the fold, so its
 	// screenshot is unchanged. Appended: the demo's own rules keep their order.
@@ -277,7 +279,7 @@ func TestDocScreenshots(t *testing.T) {
 						{Phase: "config", ID: "partner-api", Matched: n / 12},
 						{Phase: "config", ID: "pages", Matched: n / 15},
 						{Phase: "config", ID: "login-page", Matched: n / 25},
-						{Phase: "config", ID: "block-tools", Matched: n / 40, Blocked: n / 40},
+						{Phase: "config", ID: "block-tools", Matched: n / 40, Blocked: n / 50, Lifted: n / 200},
 						{Phase: "request_headers", ID: "tag-service", Matched: n},
 						{Phase: "request_headers", ID: "drop-debug", Matched: n / 100},
 						{Phase: "request_headers", ID: "legacy-token", Matched: n / 200},

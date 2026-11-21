@@ -31,6 +31,7 @@ const setting = ([k, v]: [string, Json]) => {
   if (k === 'locale') return v ? 'detects locale' : 'no locale';
   if (k === 'ratelimit_headers') return v ? 'RateLimit headers' : 'no RateLimit headers';
   if (k === 'ban' && typeof v === 'string') return `bans the client IP for ${short(v)}`;
+  if (k === 'allow') return v === true ? 'skips blocks, bans, rate limits and required tokens' : 'no allow';
   if (k === 'block') return v === 'block' ? 'blocks with 403' : 'log only, would block';
   if (k === 'responses' && v !== null && typeof v === 'object')
     return Object.entries(v)
@@ -122,6 +123,7 @@ function Row({ rule, to, phase, live }: { rule: Rule; to: string; phase: Phase; 
           {rule.id}
         </Link>
         {logOnly(rule) && <Badge tone="amber">log only</Badge>}
+        {rule.settings?.allow === true && <Badge tone="green">always allow</Badge>}
         {expires && <Badge tone="amber">{`${new Date(expires).getTime() <= now ? 'expired' : 'expires'} ${when(expires)}`}</Badge>}
         <span className="text-sm text-body">{summary(rule)}</span>
         {live && (

@@ -30,6 +30,7 @@ export const phases: {
       ['responses', 'Templates to use for these requests, by kind, such as {"rate_limited": "my-429"}.'],
       ['ratelimit_headers', 'true to send RateLimit and RateLimit-Policy response headers.'],
       ['block', 'block to answer 403 with the forbidden template, or log to only count it as would block. Start with log.'],
+      ['allow', 'true to always allow matching requests past every block, ban, rate limit and token requirement. Not with block. The rule must require the client IP, an IP list or a verified crawler, such as client.ip_lists in {"office"}.'],
       ['ban', 'With block "block" only: a duration such as "24h" (1s to 24h). The client IP that this rule blocks is refused on every host for that long, on the edge that saw it.'],
     ],
     example: { settings: { upstream_timeout: '10s', body_limit: 1048576, ratelimit_headers: true } },

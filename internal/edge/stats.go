@@ -192,8 +192,8 @@ func (r *RuleCounts) Counters() []*uint64 {
 // and how they ended. It fills a cache line, so adds to a hot rule don't
 // contend with its neighbours'.
 type ruleOutcome struct {
-	matched, edge5xx, upstream5xx, authFailures, blocked, wouldBlock atomic.Uint64
-	_                                                                [16]byte
+	matched, edge5xx, upstream5xx, authFailures, blocked, wouldBlock, lifted atomic.Uint64
+	_                                                                        [8]byte
 }
 
 // RuleOutcome is how the requests one config or request-header rule matched
@@ -209,11 +209,14 @@ type RuleOutcome struct {
 	// setting decided, as block and as log.
 	Blocked    uint64 `json:"blocked"`
 	WouldBlock uint64 `json:"would_block"`
+	// Lifted counts the requests whose block or log setting from this rule an
+	// allow lifted.
+	Lifted uint64 `json:"lifted"`
 }
 
 // Counters lists every count in r, like Totals.Counters.
 func (r *RuleOutcome) Counters() []*uint64 {
-	return []*uint64{&r.Matched, &r.Edge5xx, &r.Upstream5xx, &r.AuthFailures, &r.Blocked, &r.WouldBlock}
+	return []*uint64{&r.Matched, &r.Edge5xx, &r.Upstream5xx, &r.AuthFailures, &r.Blocked, &r.WouldBlock, &r.Lifted}
 }
 
 func (o *ruleOutcome) add(status int, fromUpstream bool) {
@@ -260,6 +263,12 @@ func (s *versionStats) block(i int, blocked bool) {
 	} else {
 		s.outcomes[i].wouldBlock.Add(1)
 	}
+}
+
+// lift counts a request an allow let through past config rule i's block
+// setting.
+func (s *versionStats) lift(i int) {
+	s.outcomes[i].lifted.Add(1)
 }
 
 func (s *versionStats) counts() StatsCounts {
@@ -309,7 +318,7 @@ func (s *versionStats) counts() StatsCounts {
 	for i := range s.outcomes {
 		o, r := &s.outcomes[i], s.outcomeIDs[i]
 		r.Matched, r.Edge5xx, r.Upstream5xx, r.AuthFailures = o.matched.Load(), o.edge5xx.Load(), o.upstream5xx.Load(), o.authFailures.Load()
-		r.Blocked, r.WouldBlock = o.blocked.Load(), o.wouldBlock.Load()
+		r.Blocked, r.WouldBlock, r.Lifted = o.blocked.Load(), o.wouldBlock.Load(), o.lifted.Load()
 		c.Rules = append(c.Rules, r)
 	}
 	return c

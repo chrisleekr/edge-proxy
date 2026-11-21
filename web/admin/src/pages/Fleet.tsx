@@ -213,7 +213,7 @@ export interface Row {
   auth_failures: number;
   rate_limit_rules: { id: string; evaluated: number; limited: number; would_limit: number; failed: number }[] | null;
   top_limited: { rule: string; key: string; display: string; limited: number; would_limit?: number }[] | null;
-  rules: { phase: string; id: string; matched: number; blocked: number; would_block: number }[] | null;
+  rules: { phase: string; id: string; matched: number; blocked: number; would_block: number; lifted: number }[] | null;
   // Requests by status code, apart by who answered; codes with none are left out.
   status_codes: { edge?: Record<string, number>; upstream?: Record<string, number> };
   // The edge's upstream failures by cause; causes with none are left out.
@@ -618,13 +618,13 @@ export function Stats() {
   const versions = [...new Set(rows.filter((x) => x.requests > 0).map((x) => x.version))];
   const rules = new Map<string, NonNullable<Row['rate_limit_rules']>[number]>();
   const top = new Map<string, NonNullable<Row['top_limited']>[number]>();
-  const blocks = new Map<string, { id: string; matched: number; blocked: number; would_block: number }>();
+  const blocks = new Map<string, { id: string; matched: number; blocked: number; would_block: number; lifted: number }>();
   for (const x of rows) {
     // Only access rules with a block setting decide blocks; the rest would be rows of zeros.
     for (const o of x.rules ?? []) {
-      if (o.phase !== 'config' || o.blocked + o.would_block === 0) continue;
-      const t = blocks.get(o.id) ?? { id: o.id, matched: 0, blocked: 0, would_block: 0 };
-      for (const k of ['matched', 'blocked', 'would_block'] as const) t[k] += o[k];
+      if (o.phase !== 'config' || o.blocked + o.would_block + o.lifted === 0) continue;
+      const t = blocks.get(o.id) ?? { id: o.id, matched: 0, blocked: 0, would_block: 0, lifted: 0 };
+      for (const k of ['matched', 'blocked', 'would_block', 'lifted'] as const) t[k] += o[k];
       blocks.set(o.id, t);
     }
     for (const c of x.rate_limit_rules ?? []) {
@@ -746,17 +746,18 @@ export function Stats() {
       </Table>
       <Title
         className="-mb-2"
-        info="Access rules with a block setting. Matched: requests the rule matched. Blocked: requests it answered with 403. Would block, log only: requests a log only rule matched and let through, or that the block kill switch let through."
+        info="Access rules with a block setting. Matched: requests the rule matched. Blocked: requests it answered with 403. Would block, log only: requests a log only rule matched and let through, or that the block kill switch let through. Lifted by an allow: requests this rule would have blocked or logged that an always-allow rule or the client allowlist let through."
       >
         Blocking access rules
       </Title>
-      <Table head={['Rule', 'Matched', 'Blocked', 'Would block, log only']} num={[1, 2, 3]} empty={q.data && `No access rule blocked a request ${r.phrase}.`}>
+      <Table head={['Rule', 'Matched', 'Blocked', 'Would block, log only', 'Lifted by an allow']} num={[1, 2, 3, 4]} empty={q.data && `No access rule blocked a request ${r.phrase}.`}>
         {[...blocks.values()].map((x) => (
           <tr key={x.id}>
             <td className="font-mono">{x.id}</td>
             <Cell text={count(x.matched)} />
             <Cell text={count(x.blocked)} />
             <Cell text={count(x.would_block)} />
+            <Cell text={count(x.lifted)} />
           </tr>
         ))}
       </Table>
@@ -937,7 +938,7 @@ export function Spark({ rows, from, to, value }: { rows: Row[]; from: number; to
 // 429s and log only overs, or a config or header rule's matches and blocks.
 // IDs are unique across phases, so one rule is in one list.
 export function ruleCounts(rows: Row[], id: string) {
-  const c = { matched: 0, limited: 0, would_limit: 0, blocked: 0, would_block: 0 };
+  const c = { matched: 0, limited: 0, would_limit: 0, blocked: 0, would_block: 0, lifted: 0 };
   for (const r of rows) {
     for (const x of r.rate_limit_rules ?? [])
       if (x.id === id) {
@@ -950,6 +951,7 @@ export function ruleCounts(rows: Row[], id: string) {
         c.matched += x.matched;
         c.blocked += x.blocked;
         c.would_block += x.would_block;
+        c.lifted += x.lifted;
       }
   }
   return c;
@@ -964,6 +966,7 @@ export const countWords = (c: ReturnType<typeof ruleCounts>) =>
     c.would_limit > 0 && `${count(c.would_limit)} over limit, log only`,
     c.blocked > 0 && `${count(c.blocked)} blocked with 403`,
     c.would_block > 0 && `${count(c.would_block)} would block, log only`,
+    c.lifted > 0 && `${count(c.lifted)} let through by an allow`,
   ]
     .filter(Boolean)
     .join(' · ');

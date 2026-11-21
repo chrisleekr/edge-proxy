@@ -18,8 +18,8 @@ import (
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
-// fakeDenylist serves GET /v1/denylist like admin: bearer auth, ETag, 304.
-type fakeDenylist struct {
+// fakeIPLists serves GET /v1/ip-lists like admin: bearer auth, ETag, 304.
+type fakeIPLists struct {
 	srv      *httptest.Server
 	body     atomic.Pointer[string]
 	etag     atomic.Pointer[string]
@@ -28,12 +28,12 @@ type fakeDenylist struct {
 	inm      atomic.Pointer[string] // If-None-Match of the last request
 }
 
-func newFakeDenylist(t *testing.T, resp string) *fakeDenylist {
+func newFakeIPLists(t *testing.T, resp string) *fakeIPLists {
 	t.Helper()
-	a := &fakeDenylist{}
+	a := &fakeIPLists{}
 	a.set(resp, "")
 	a.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/denylist" || r.Header.Get("Authorization") != "Bearer t0k" {
+		if r.URL.Path != "/v1/ip-lists" || r.Header.Get("Authorization") != "Bearer t0k" {
 			http.NotFound(w, r)
 			return
 		}
@@ -57,14 +57,14 @@ func newFakeDenylist(t *testing.T, resp string) *fakeDenylist {
 	return a
 }
 
-func (a *fakeDenylist) set(body, etag string) {
+func (a *fakeIPLists) set(body, etag string) {
 	a.body.Store(&body)
 	a.etag.Store(&etag)
 }
 
 // listsBody is admin's response for the given lists.
 func listsBody(lists ...IPList) string {
-	b, _ := json.Marshal(DenylistResponse{Lists: lists, Lifts: []BanLift{}, Dropped: []string{}})
+	b, _ := json.Marshal(IPListsResponse{Lists: lists, Lifts: []BanLift{}, Dropped: []string{}})
 	return string(b)
 }
 
@@ -83,12 +83,12 @@ func ruleConfig(version int64, expression string) *snapshot.Config {
 	return c
 }
 
-func denyHarness(t *testing.T, a *fakeDenylist) *harness {
+func ipListHarness(t *testing.T, a *fakeIPLists) *harness {
 	t.Helper()
 	return newHarness(t, map[string]string{"ADMIN_URL": a.srv.URL, "EDGE_SERVICE_TOKEN": "t0k", "LOG_SAMPLE_RATE": "1"})
 }
 
-func (h *harness) pollDenylist() { h.t.Helper(); h.srv.denylist.poll(h.t.Context()) }
+func (h *harness) pollIPLists() { h.t.Helper(); h.srv.ipLists.poll(h.t.Context()) }
 
 // served is the status a request from the default client gets.
 func (h *harness) served() int { h.t.Helper(); return h.statuses(1, "GET", "/")[0] }
@@ -96,13 +96,13 @@ func (h *harness) served() int { h.t.Helper(); return h.statuses(1, "GET", "/")[
 // A listed client is refused once the first poll has loaded the set, and
 // another client is not.
 func TestListedIPIsBlockedAfterTheFirstPoll(t *testing.T) {
-	a := newFakeDenylist(t, `{"lists":[{"name":"aws","prefixes":["198.51.100.0/24","2001:db8::/32"]},{"name":"hetzner","prefixes":["203.0.113.0/24"]}],"lifts":[],"dropped_lists":[],"future_field":1}`)
-	h := denyHarness(t, a)
+	a := newFakeIPLists(t, `{"lists":[{"name":"aws","prefixes":["198.51.100.0/24","2001:db8::/32"]},{"name":"hetzner","prefixes":["203.0.113.0/24"]}],"lifts":[],"dropped_lists":[],"future_field":1}`)
+	h := ipListHarness(t, a)
 	h.load(envelope(denyConfig(1)))
 	if got := h.served(); got != 200 {
 		t.Fatalf("before the first poll: %d", got)
 	}
-	h.pollDenylist()
+	h.pollIPLists()
 	edgeError(t, h.do("GET", "/", nil), 403, "forbidden")
 	if got := h.statuses(1, "GET", "/", "CloudFront-Viewer-Address", otherClient); !eqInts(got, 200) {
 		t.Fatalf("client only on hetzner: %v", got)
@@ -113,7 +113,7 @@ func TestListedIPIsBlockedAfterTheFirstPoll(t *testing.T) {
 	if got := h.statuses(1, "GET", "/", "CloudFront-Viewer-Address", "192.0.2.50:1"); !eqInts(got, 200) {
 		t.Fatalf("client on no list: %v", got)
 	}
-	if n := h.metrics()["edge_denylist_entries"]; n != 3 {
+	if n := h.metrics()["edge_ip_list_entries"]; n != 3 {
 		t.Fatalf("entries %v", n)
 	}
 }
@@ -142,9 +142,9 @@ func TestRulesMatchListsByName(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := denyHarness(t, newFakeDenylist(t, body))
+			h := ipListHarness(t, newFakeIPLists(t, body))
 			h.load(envelope(ruleConfig(1, tc.expression)))
-			h.pollDenylist()
+			h.pollIPLists()
 			if got := h.statuses(1, "GET", "/", "CloudFront-Viewer-Address", tc.addr); !eqInts(got, tc.want) {
 				t.Fatalf("status %v, want %d", got, tc.want)
 			}
@@ -158,9 +158,9 @@ func TestDenylistedFieldMatchesAnyList(t *testing.T) {
 	body := listsBody(
 		IPList{Name: "aws", Prefixes: []string{"198.51.100.0/24"}},
 		IPList{Name: "hetzner", Prefixes: []string{"203.0.113.0/24"}})
-	h := denyHarness(t, newFakeDenylist(t, body))
+	h := ipListHarness(t, newFakeIPLists(t, body))
 	h.load(envelope(ruleConfig(1, `client.denylisted`)))
-	h.pollDenylist()
+	h.pollIPLists()
 	for _, tc := range []struct {
 		name, addr string
 		want       int
@@ -176,14 +176,14 @@ func TestDenylistedFieldMatchesAnyList(t *testing.T) {
 }
 
 // Admin answers 304 while nothing changed, and the edge keeps its set.
-func TestDenylistNotModifiedKeepsTheSet(t *testing.T) {
-	a := newFakeDenylist(t, awsBody)
+func TestIPListNotModifiedKeepsTheSet(t *testing.T) {
+	a := newFakeIPLists(t, awsBody)
 	a.set(awsBody, `"v1"`)
-	h := denyHarness(t, a)
+	h := ipListHarness(t, a)
 	h.load(envelope(denyConfig(1)))
-	h.pollDenylist()
-	h.pollDenylist()
-	if a.requests.Load() != 2 || h.served() != 403 || h.metrics()["edge_denylist_fetch_failures_total"] != 0 {
+	h.pollIPLists()
+	h.pollIPLists()
+	if a.requests.Load() != 2 || h.served() != 403 || h.metrics()["edge_ip_list_fetch_failures_total"] != 0 {
 		t.Fatalf("requests %d", a.requests.Load())
 	}
 	if got := *a.inm.Load(); got != `"v1"` {
@@ -204,37 +204,37 @@ func refuseIPLists(t *testing.T) {
 
 // A response the list builder refuses counts as a fetch failure and the
 // current set stays.
-func TestDenylistRefusedByTheBuilderKeepsTheOldSet(t *testing.T) {
-	a := newFakeDenylist(t, awsBody)
-	h := denyHarness(t, a)
+func TestIPListRefusedByTheBuilderKeepsTheOldSet(t *testing.T) {
+	a := newFakeIPLists(t, awsBody)
+	h := ipListHarness(t, a)
 	h.load(envelope(denyConfig(1)))
-	h.pollDenylist()
+	h.pollIPLists()
 	refuseIPLists(t)
 	a.set(listsBody(IPList{Name: "aws", Prefixes: []string{"203.0.113.0/24"}}), `"v2"`)
-	h.pollDenylist()
-	if h.served() != 403 || h.metrics()["edge_denylist_fetch_failures_total"] != 1 || h.metrics()["edge_denylist_entries"] != 2 {
-		t.Fatalf("set changed or failure not counted: %v", h.metrics()["edge_denylist_fetch_failures_total"])
+	h.pollIPLists()
+	if h.served() != 403 || h.metrics()["edge_ip_list_fetch_failures_total"] != 1 || h.metrics()["edge_ip_list_entries"] != 2 {
+		t.Fatalf("set changed or failure not counted: %v", h.metrics()["edge_ip_list_fetch_failures_total"])
 	}
 }
 
 // With admin down or wrong, the last set stays, the failure is counted and
 // logged, and readiness is unaffected.
-func TestDenylistFailureKeepsTheSetAndReadiness(t *testing.T) {
-	a := newFakeDenylist(t, awsBody)
-	h := denyHarness(t, a)
+func TestIPListFailureKeepsTheSetAndReadiness(t *testing.T) {
+	a := newFakeIPLists(t, awsBody)
+	h := ipListHarness(t, a)
 	h.load(envelope(denyConfig(1)))
-	h.pollDenylist()
+	h.pollIPLists()
 	a.status.Store(500)
-	h.pollDenylist()
+	h.pollIPLists()
 	a.srv.Close()
-	h.pollDenylist()
+	h.pollIPLists()
 	if h.served() != 403 {
 		t.Fatal("set lost while admin was down")
 	}
-	if n := h.metrics()["edge_denylist_fetch_failures_total"]; n != 2 {
+	if n := h.metrics()["edge_ip_list_fetch_failures_total"]; n != 2 {
 		t.Fatalf("failures %v", n)
 	}
-	if !strings.Contains(h.logs.String(), "denylist fetch failed") {
+	if !strings.Contains(h.logs.String(), "ip list fetch failed") {
 		t.Fatal("failure not logged")
 	}
 	in := httptest.NewServer(h.srv.internalMux())
@@ -247,10 +247,10 @@ func TestDenylistFailureKeepsTheSetAndReadiness(t *testing.T) {
 }
 
 // A response with anything the edge can't read is refused whole.
-func TestDenylistInvalidResponseKeepsTheOldSet(t *testing.T) {
-	tooMany := `{"lists":[{"name":"a","prefixes":[` + strings.Repeat(`"10.0.0.1/32",`, MaxDenylistPrefixes) + `"10.0.0.2/32"]}]}`
+func TestIPListInvalidResponseKeepsTheOldSet(t *testing.T) {
+	tooMany := `{"lists":[{"name":"a","prefixes":[` + strings.Repeat(`"10.0.0.1/32",`, MaxIPListPrefixes) + `"10.0.0.2/32"]}]}`
 	// List a is exactly at the cap, so only the total crosses it.
-	overAcrossLists := `{"lists":[{"name":"a","prefixes":[` + strings.TrimSuffix(strings.Repeat(`"10.0.0.1/32",`, MaxDenylistPrefixes), ",") + `]},{"name":"b","prefixes":["10.0.0.3/32"]}]}`
+	overAcrossLists := `{"lists":[{"name":"a","prefixes":[` + strings.TrimSuffix(strings.Repeat(`"10.0.0.1/32",`, MaxIPListPrefixes), ",") + `]},{"name":"b","prefixes":["10.0.0.3/32"]}]}`
 	var many []IPList
 	for i := range expr.MaxIPLists + 1 {
 		many = append(many, IPList{Name: fmt.Sprintf("list-%d", i)})
@@ -269,37 +269,37 @@ func TestDenylistInvalidResponseKeepsTheOldSet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := newFakeDenylist(t, awsBody)
-			h := denyHarness(t, a)
+			a := newFakeIPLists(t, awsBody)
+			h := ipListHarness(t, a)
 			h.load(envelope(denyConfig(1)))
-			h.pollDenylist()
+			h.pollIPLists()
 			a.set(tc.body, `"v2"`)
-			h.pollDenylist()
-			if h.served() != 403 || h.metrics()["edge_denylist_fetch_failures_total"] != 1 || h.metrics()["edge_denylist_entries"] != 2 {
-				t.Fatalf("set changed or failure not counted: %v", h.metrics()["edge_denylist_fetch_failures_total"])
+			h.pollIPLists()
+			if h.served() != 403 || h.metrics()["edge_ip_list_fetch_failures_total"] != 1 || h.metrics()["edge_ip_list_entries"] != 2 {
+				t.Fatalf("set changed or failure not counted: %v", h.metrics()["edge_ip_list_fetch_failures_total"])
 			}
 			// The refused response's ETag was not kept, so admin is asked again.
-			if h.srv.denylist.etag != "" {
-				t.Fatalf("etag %q kept", h.srv.denylist.etag)
+			if h.srv.ipLists.etag != "" {
+				t.Fatalf("etag %q kept", h.srv.ipLists.etag)
 			}
 		})
 	}
 }
 
 // A response over the byte cap is refused.
-func TestDenylistOverTheByteCapIsRefused(t *testing.T) {
-	a := newFakeDenylist(t, "")
-	a.set(`{"lists":[],"pad":"`+strings.Repeat("x", maxDenylistBytes)+`"}`, "")
-	h := denyHarness(t, a)
+func TestIPListOverTheByteCapIsRefused(t *testing.T) {
+	a := newFakeIPLists(t, "")
+	a.set(`{"lists":[],"pad":"`+strings.Repeat("x", maxIPListBytes)+`"}`, "")
+	h := ipListHarness(t, a)
 	h.load(envelope(denyConfig(1)))
-	h.pollDenylist()
-	if n := h.metrics()["edge_denylist_fetch_failures_total"]; n != 1 {
+	h.pollIPLists()
+	if n := h.metrics()["edge_ip_list_fetch_failures_total"]; n != 1 {
 		t.Fatalf("failures %v", n)
 	}
 }
 
 // A body that dies mid-read fails the poll.
-func TestDenylistTruncatedBodyFails(t *testing.T) {
+func TestIPListTruncatedBodyFails(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "100")
 		_, _ = w.Write([]byte(`{"lists"`))
@@ -307,8 +307,8 @@ func TestDenylistTruncatedBodyFails(t *testing.T) {
 	defer srv.Close()
 	h := newHarness(t, map[string]string{"ADMIN_URL": srv.URL, "EDGE_SERVICE_TOKEN": "t0k"})
 	h.load(envelope(denyConfig(1)))
-	h.pollDenylist()
-	if n := h.metrics()["edge_denylist_fetch_failures_total"]; n != 1 {
+	h.pollIPLists()
+	if n := h.metrics()["edge_ip_list_fetch_failures_total"]; n != 1 {
 		t.Fatalf("failures %v", n)
 	}
 }
@@ -316,13 +316,13 @@ func TestDenylistTruncatedBodyFails(t *testing.T) {
 // The edge polls whatever its config reads, so access lines are labelled
 // before any rule names a list. With no list on, it holds a nil set, labels
 // nothing and counts no entries, and turning a list off again frees the set.
-func TestDenylistPollsWhetherOrNotAConfigReadsTheField(t *testing.T) {
-	a := newFakeDenylist(t, awsBody)
-	h := denyHarness(t, a)
-	h.pollDenylist() // no snapshot yet
+func TestIPListPollsWhetherOrNotAConfigReadsTheField(t *testing.T) {
+	a := newFakeIPLists(t, awsBody)
+	h := ipListHarness(t, a)
+	h.pollIPLists() // no snapshot yet
 	h.load(envelope(testConfig(1)))
-	h.pollDenylist()
-	if a.requests.Load() != 2 || h.srv.edge.lists.Load() == nil || h.metrics()["edge_denylist_entries"] != 2 {
+	h.pollIPLists()
+	if a.requests.Load() != 2 || h.srv.edge.lists.Load() == nil || h.metrics()["edge_ip_list_entries"] != 2 {
 		t.Fatalf("requests %d", a.requests.Load())
 	}
 	if h.served() != 200 {
@@ -330,8 +330,8 @@ func TestDenylistPollsWhetherOrNotAConfigReadsTheField(t *testing.T) {
 	}
 
 	a.set(listsBody(), "")
-	h.pollDenylist()
-	if h.served() != 200 || h.metrics()["edge_denylist_entries"] != 0 || h.srv.edge.lists.Load() != nil {
+	h.pollIPLists()
+	if h.served() != 200 || h.metrics()["edge_ip_list_entries"] != 0 || h.srv.edge.lists.Load() != nil {
 		t.Fatal("set not freed")
 	}
 	if got := fmt.Sprint(accessLine(t, h, 0)["client.ip_lists"]); got != "[aws]" {
@@ -346,9 +346,9 @@ func TestDenylistPollsWhetherOrNotAConfigReadsTheField(t *testing.T) {
 // a rule reads the field, and leaves the attribute out for a client on none.
 func TestAccessLogCarriesIPLists(t *testing.T) {
 	body := listsBody(IPList{Name: "aws", Prefixes: []string{"198.51.100.0/24"}}, IPList{Name: "github", Prefixes: []string{"198.51.100.7/32"}})
-	h := denyHarness(t, newFakeDenylist(t, body))
+	h := ipListHarness(t, newFakeIPLists(t, body))
 	h.load(envelope(testConfig(1)))
-	h.pollDenylist()
+	h.pollIPLists()
 	h.statuses(1, "GET", "/")
 	h.statuses(1, "GET", "/", "CloudFront-Viewer-Address", otherClient)
 	listed, unlisted := accessLine(t, h, 0), accessLine(t, h, 1)
@@ -361,14 +361,14 @@ func TestAccessLogCarriesIPLists(t *testing.T) {
 }
 
 // The loop polls right after start, then on its interval, until cancelled.
-func TestDenylistLoopPollsRepeatedly(t *testing.T) {
-	a := newFakeDenylist(t, awsBody)
-	h := denyHarness(t, a)
+func TestIPListLoopPollsRepeatedly(t *testing.T) {
+	a := newFakeIPLists(t, awsBody)
+	h := ipListHarness(t, a)
 	h.load(envelope(denyConfig(1)))
-	h.srv.denylist.every = 5 * time.Millisecond
+	h.srv.ipLists.every = 5 * time.Millisecond
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
-	wg.Go(func() { h.srv.denylist.run(ctx) })
+	wg.Go(func() { h.srv.ipLists.run(ctx) })
 	waitFor(t, func() bool { return a.requests.Load() >= 2 })
 	cancel()
 	wg.Wait()
@@ -381,17 +381,17 @@ func TestDenylistLoopPollsRepeatedly(t *testing.T) {
 // again afterwards is banned again, and the same lift, sent again, leaves
 // that new ban alone.
 func TestLiftEndsOlderBansOnly(t *testing.T) {
-	a := newFakeDenylist(t, "")
-	h := denyHarness(t, a)
+	a := newFakeIPLists(t, "")
+	h := ipListHarness(t, a)
 	now := time.Now()
 	clock := h.fakeClock(now)
 	c := trapConfig(1)
 	c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "listed", Expression: mustParse(`client.ip_lists in {"aws"}`), Settings: snapshot.Settings{Block: new("log")}})
 	h.load(envelope(c))
 	lift := func(ip string, at time.Time) {
-		b, _ := json.Marshal(DenylistResponse{Lists: []IPList{{Name: "aws", Prefixes: []string{"192.0.2.1/32"}}}, Lifts: []BanLift{{IP: ip, At: at.UnixMilli()}}})
+		b, _ := json.Marshal(IPListsResponse{Lists: []IPList{{Name: "aws", Prefixes: []string{"192.0.2.1/32"}}}, Lifts: []BanLift{{IP: ip, At: at.UnixMilli()}}})
 		a.set(string(b), "")
-		h.pollDenylist()
+		h.pollIPLists()
 	}
 
 	trip(t, h, "a.example.com")
@@ -413,8 +413,8 @@ func TestLiftEndsOlderBansOnly(t *testing.T) {
 // A response whose lists the builder refuses still lifts bans: an unban
 // never waits on the lists.
 func TestRefusedListsStillLiftBans(t *testing.T) {
-	a := newFakeDenylist(t, "")
-	h := denyHarness(t, a)
+	a := newFakeIPLists(t, "")
+	h := ipListHarness(t, a)
 	now := time.Now()
 	clock := h.fakeClock(now)
 	h.load(envelope(trapConfig(1)))
@@ -422,28 +422,28 @@ func TestRefusedListsStillLiftBans(t *testing.T) {
 	edgeError(t, h.do("GET", "/", nil), 403, "forbidden")
 	clock.Store(now.Add(time.Second).UnixMilli())
 	refuseIPLists(t)
-	b, _ := json.Marshal(DenylistResponse{Lists: []IPList{{Name: "aws", Prefixes: []string{"192.0.2.1/32"}}}, Lifts: []BanLift{{IP: "198.51.100.7", At: now.Add(time.Second).UnixMilli()}}})
+	b, _ := json.Marshal(IPListsResponse{Lists: []IPList{{Name: "aws", Prefixes: []string{"192.0.2.1/32"}}}, Lifts: []BanLift{{IP: "198.51.100.7", At: now.Add(time.Second).UnixMilli()}}})
 	a.set(string(b), "")
-	h.pollDenylist()
-	if got := h.served(); got != 200 || h.metrics()["edge_denylist_fetch_failures_total"] != 1 {
-		t.Fatalf("after a refused response with a lift: %d, failures %v", got, h.metrics()["edge_denylist_fetch_failures_total"])
+	h.pollIPLists()
+	if got := h.served(); got != 200 || h.metrics()["edge_ip_list_fetch_failures_total"] != 1 {
+		t.Fatalf("after a refused response with a lift: %d, failures %v", got, h.metrics()["edge_ip_list_fetch_failures_total"])
 	}
 }
 
 // A config with a trap but no rule reading client.ip_lists still gets lifts,
 // and holds the set, so its access lines are labelled.
 func TestTrapOnlyConfigAppliesLiftsAndHoldsTheSet(t *testing.T) {
-	a := newFakeDenylist(t, "")
-	h := denyHarness(t, a)
+	a := newFakeIPLists(t, "")
+	h := ipListHarness(t, a)
 	now := time.Now()
 	clock := h.fakeClock(now)
 	h.load(envelope(trapConfig(1)))
 	trip(t, h, "a.example.com")
 	clock.Store(now.Add(time.Second).UnixMilli())
-	b, _ := json.Marshal(DenylistResponse{Lists: []IPList{{Name: "aws", Prefixes: []string{"198.51.100.0/24"}}}, Lifts: []BanLift{{IP: "198.51.100.7", At: now.Add(time.Second).UnixMilli()}}})
+	b, _ := json.Marshal(IPListsResponse{Lists: []IPList{{Name: "aws", Prefixes: []string{"198.51.100.0/24"}}}, Lifts: []BanLift{{IP: "198.51.100.7", At: now.Add(time.Second).UnixMilli()}}})
 	a.set(string(b), "")
-	h.pollDenylist()
-	if h.served() != 200 || h.srv.edge.lists.Load() == nil || h.metrics()["edge_denylist_entries"] != 1 || h.metrics()["edge_denylist_fetch_failures_total"] != 0 {
+	h.pollIPLists()
+	if h.served() != 200 || h.srv.edge.lists.Load() == nil || h.metrics()["edge_ip_list_entries"] != 1 || h.metrics()["edge_ip_list_fetch_failures_total"] != 0 {
 		t.Fatal("lift not applied, or the set was not kept")
 	}
 }
@@ -510,7 +510,7 @@ func TestBanReportsBeyondTheCapAreDropped(t *testing.T) {
 }
 
 // Anything admin sends must be refused or applied, never panic.
-func FuzzApplyDenylist(f *testing.F) {
+func FuzzApplyIPLists(f *testing.F) {
 	for _, s := range []string{
 		`{"lists":[{"name":"aws","prefixes":["1.2.3.4/32","::ffff:1.2.3.0/120","2001:db8::/32","0.0.0.0/0"]},{"name":"aws","prefixes":[]}],"lifts":[{"ip":"::ffff:1.2.3.4","at":1},{"ip":"fe80::1%eth0","at":-1}],"dropped_lists":["x"]}`,
 		`{"lists":[{"name":"a","prefixes":["1.2.3.4/33"]}]}`, `{"lists":[{"name":"a","prefixes":["10.0.0.0/8","10.1.0.0/16"]},{"name":"b","prefixes":["10.1.2.3/32"]}]}`,
@@ -519,7 +519,7 @@ func FuzzApplyDenylist(f *testing.F) {
 		f.Add([]byte(s))
 	}
 	s, _ := inMemoryEdge(f, testConfig(1), "/")
-	d := &denylistPoller{p: s.poller, edge: s.edge}
+	d := &ipListPoller{p: s.poller, edge: s.edge}
 	f.Fuzz(func(t *testing.T, b []byte) {
 		before := s.edge.lists.Load()
 		if err := d.apply(b); err != nil && s.edge.lists.Load() != before {
@@ -530,9 +530,9 @@ func FuzzApplyDenylist(f *testing.F) {
 
 // Decoding and building a response of about 225,000 prefixes across 70 lists,
 // the size of every default provider list turned on.
-func BenchmarkApplyDenylist(b *testing.B) {
+func BenchmarkApplyIPLists(b *testing.B) {
 	const lists = 70
-	resp := DenylistResponse{Lifts: []BanLift{}, Dropped: []string{}}
+	resp := IPListsResponse{Lifts: []BanLift{}, Dropped: []string{}}
 	for i := range lists {
 		resp.Lists = append(resp.Lists, IPList{Name: fmt.Sprintf("list-%d", i)})
 	}
@@ -547,7 +547,7 @@ func BenchmarkApplyDenylist(b *testing.B) {
 	}
 	body, _ := json.Marshal(resp)
 	s, _ := inMemoryEdge(b, testConfig(1), "/")
-	d := &denylistPoller{p: s.poller, edge: s.edge}
+	d := &ipListPoller{p: s.poller, edge: s.edge}
 	b.ReportAllocs()
 	for b.Loop() {
 		if err := d.apply(body); err != nil {

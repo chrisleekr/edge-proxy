@@ -117,12 +117,24 @@ func TestRequestAllocations(t *testing.T) {
 			r.FailMode = "local"
 			c.RateLimitRules = []snapshot.RateLimitRule{r}
 		}, "/v1/items?id=1", 200, 36, -time.Minute, false, ""},
-		// The allowlist match adds no allocation, for a client on it or not.
+		// The allowlist match adds no allocation, for a client on it or not. A
+		// client on it here is spared a block, and a lifted block's access line
+		// is always written, unlike a sampled allowed line: that line is the
+		// one allocation over a plain allowed request.
 		{"client on the allowlist", func(c *snapshot.Config) {
 			c.Global.ClientAllowlist = []string{"198.51.100.0/24", "2001:db8:f00::/48"}
 			c.ConfigRules = append(c.ConfigRules, snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent eq "bench"`), Settings: snapshot.Settings{Block: new("block")}})
 			c.RateLimitRules = []snapshot.RateLimitRule{rlRule("per-ip", "true", "token_bucket", 1, "ip")}
-		}, "/v1/items?id=1", 200, 36, 0, false, ""},
+		}, "/v1/items?id=1", 200, 37, 0, false, ""},
+		// An allow rule's match adds no allocation either. Its lifted block's
+		// line is written as above, and listing two matched rules grows the
+		// line's rule slice once more.
+		{"client matched by an always-allow rule", func(c *snapshot.Config) {
+			c.ConfigRules = append(c.ConfigRules,
+				snapshot.ConfigRule{ID: "tools", Expression: mustParse(`http.user_agent eq "bench"`), Settings: snapshot.Settings{Block: new("block")}},
+				snapshot.ConfigRule{ID: "office", Expression: mustParse(`ip.src in {198.51.100.0/24}`), Settings: snapshot.Settings{Allow: true}})
+			c.RateLimitRules = []snapshot.RateLimitRule{rlRule("per-ip", "true", "token_bucket", 1, "ip")}
+		}, "/v1/items?id=1", 200, 38, 0, false, ""},
 		{"client not on the allowlist", func(c *snapshot.Config) {
 			c.Global.ClientAllowlist = []string{"203.0.113.0/24", "2001:db8:f00::/48"}
 		}, "/v1/items?id=1", 200, 36, 0, false, ""},

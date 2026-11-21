@@ -256,6 +256,36 @@ func TestReportUpstreamErrorCauses(t *testing.T) {
 	}
 }
 
+// Reports carry how many requests an allow let through a block rule. Admin
+// sums them across edges on /api/stats, and a rule stored before the count
+// existed reads back as zero lifted.
+func TestReportLiftedRuleOutcomes(t *testing.T) {
+	h, pub := published(t)
+	e := h.client()
+	e.token = h.edgeToken(pub)
+	for _, instance := range []string{"edge-a", "edge-b"} {
+		status(t, e.do("POST", "/v1/edge/report", edge.StatsReport{Instance: instance, ConfigSource: "admin", Versions: []edge.StatsCounts{{
+			Version: 1, Requests: 10, LatencyMS: []uint64{10},
+			Rules: []edge.RuleOutcome{{Phase: "config", ID: "tools", Matched: 10, Blocked: 3, Lifted: 4}},
+		}}}), 200)
+	}
+	h.advance(time.Minute)
+	if err := h.s.flush(t.Context(), h.now()); err != nil {
+		t.Fatal(err)
+	}
+	h.putOutcomes(1, 1, 1, 5, `[{"phase":"config","id":"old","matched":5,"blocked":2}]`)
+	rows := decode[[]statsRow](t, pub.do("GET", "/api/stats?minutes=5", nil))
+	got := map[string]string{}
+	for _, row := range rows {
+		for _, r := range row.Rules {
+			got[r.ID] = fmt.Sprintf("blocked=%d lifted=%d", r.Blocked, r.Lifted)
+		}
+	}
+	if want := "map[old:blocked=2 lifted=0 tools:blocked=6 lifted=8]"; fmt.Sprint(got) != want {
+		t.Fatalf("rules %v, want %s", got, want)
+	}
+}
+
 // The dashboard shows the minute in progress: each flush writes its running
 // sum, and the next one replaces it rather than adding it twice.
 func TestCurrentMinuteIsShownBeforeItEnds(t *testing.T) {

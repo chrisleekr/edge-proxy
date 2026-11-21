@@ -128,7 +128,7 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 | `IDLE_TIMEOUT` | `75s` | Keep-alive idle timeout, on the public and internal listeners. Set your LB's idle timeout below it |
 | `DRAIN_DELAY` | `10s` | After SIGTERM, how long `/readyz` fails before the edge stops accepting |
 | `SHUTDOWN_TIMEOUT` | `30s` | How long in-flight requests get to finish |
-| `LOG_SAMPLE_RATE` | `1` | Share of allowed, non-5xx requests to log (0 to 1). Rejections and 5xx are always logged |
+| `LOG_SAMPLE_RATE` | `1` | Share of allowed, non-5xx requests to log (0 to 1). Rejections, 5xx and requests an always-allow rule or the allowlist let through past a block are always logged |
 
 Per-route body limits and upstream timeouts are policy, not deployment settings; see [Policy](../use/policy.md#settings).
 

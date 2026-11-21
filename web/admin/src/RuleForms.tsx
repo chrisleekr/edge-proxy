@@ -413,7 +413,7 @@ function DistinctOf({ value, kinds, onChange, issues }: { value: Json; kinds: st
 }
 
 const yesNo = { true: 'Yes', false: 'No' };
-const blockSays = { block: 'Block: answer 403', log: 'Log only: count what would be blocked, block nothing' };
+const blockSays = { block: 'Block: answer 403', log: 'Log only: count what would be blocked, block nothing', allow: 'Always allow' };
 
 function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObject; onChange: (v: JsonObject) => void; choices: RuleChoices; config: Config; at: At }) {
   const s = (value.settings ?? {}) as JsonObject;
@@ -429,11 +429,21 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
     <div className="flex flex-col gap-4">
       <p className="text-sm text-body">Anything not set here keeps the value from earlier matching rules or the defaults under Settings.</p>
       <Labeled
-        label="Block"
+        label="Action"
         info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Would block in Stats. The block kill switch under Settings turns every block into log only."
-        hint="Start with Log only and watch Stats before you block."
-        issues={at('settings.block')}>
-        <Choice value={s.block as string | undefined} options={choices.block_modes} labels={blockSays} empty={unset} onChange={(x) => onChange({ ...value, settings: setField(x === 'block' ? s : without(s, 'ban'), 'block', x) })} />
+        hint={
+          s.allow === true
+            ? "Always allow wins over every block, ban, rate limit and token requirement, whatever the rule order. It still applies this rule's other settings and the CORS, locale and limits other rules set."
+            : 'Start with Log only and watch Stats before you block.'
+        }
+        issues={[...at('settings.block'), ...at('settings.allow')]}>
+        <Choice
+          value={s.allow === true ? 'allow' : (s.block as string | undefined)}
+          options={[...choices.block_modes, 'allow']}
+          labels={blockSays}
+          empty="No action: only the settings below"
+          onChange={(x) => onChange({ ...value, settings: x === 'allow' ? setField(without(s, 'block', 'ban'), 'allow', true) : setField(without(s, 'allow', ...(x === 'block' ? [] : ['ban'])), 'block', x) })}
+        />
       </Labeled>
       {s.block === 'block' && (
         <Labeled

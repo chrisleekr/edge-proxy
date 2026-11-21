@@ -293,6 +293,24 @@
             "rate_limited": "friendly-429"
           }
         }
+      },
+      {
+        "id": "office-always-allowed",
+        "expression": {
+          "combinator": "and",
+          "rules": [
+            {
+              "field": "client.ip_lists",
+              "operator": "in",
+              "value": [
+                "office"
+              ]
+            }
+          ]
+        },
+        "settings": {
+          "allow": true
+        }
       }
     ],
     "rate_limit_rules": [

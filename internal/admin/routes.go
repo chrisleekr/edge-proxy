@@ -18,7 +18,7 @@ func (s *Server) routes() {
 	s.trafficRoutes()
 	s.autopilotRoutes()
 	s.attentionRoutes()
-	s.denylistRoutes()
+	s.ipListRoutes()
 	s.uiRoutes()
 }
 

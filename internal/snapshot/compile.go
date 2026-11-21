@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -150,7 +151,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema       = 1
-	SupportedSchema = 11
+	SupportedSchema = 12
 	// MaxInflightSchema is the first schema whose edges read
 	// global.max_inflight. A config of any schema may set it; admin then
 	// publishes it only once every live edge reads that schema.
@@ -188,6 +189,10 @@ const (
 	// needs its own schema. A config of any schema may read it; admin then
 	// waits for edges that read this schema.
 	IPListsSchema = 11
+	// AllowSchema is the first schema whose edges read an access rule's allow.
+	// A config of any schema may set it; admin then waits for edges that read
+	// this schema.
+	AllowSchema = 12
 	// MaxDistinct bounds a distinct rule's limit: the 1024-bit estimate
 	// drifts beyond it.
 	MaxDistinct = 1000
@@ -359,6 +364,9 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	}
 	if ReadsField(c, expr.IPListsField) {
 		needs = max(needs, IPListsSchema)
+	}
+	if slices.ContainsFunc(c.ConfigRules, func(r ConfigRule) bool { return r.Settings.Allow }) {
+		needs = max(needs, AllowSchema)
 	}
 	templates := len(c.Global.Responses)
 	c = upgrade(c)
@@ -934,6 +942,18 @@ func (v *validator) configRules() {
 		v.ruleID(p, r.ID)
 		v.out.ConfigRules[i] = v.expression(p, r.Expression, expr.PhaseConfig)
 		v.settings(p+".settings", r.Settings)
+		if r.Settings.Allow {
+			switch {
+			case r.Settings.Block != nil:
+				v.err(p+".settings.allow", "can't be set with block: a rule either allows or blocks")
+			default:
+				if ok, wide := allowSubject(r.Expression); !ok && wide != "" {
+					v.err(p+".expression", "%s", wide)
+				} else if !ok {
+					v.err(p+".expression", `an always-allow rule must require the client IP, an IP list or a verified crawler, such as client.ip_lists in {"office"}: anything else in a request can be sent by anyone`)
+				}
+			}
+		}
 		switch {
 		case r.Settings.Block == nil:
 		case *r.Settings.Block == "block":
@@ -1024,6 +1044,7 @@ func settingNames(s Settings) []string {
 	add(s.RateLimitHeaders != nil, "ratelimit_headers")
 	add(s.Block != nil, "block")
 	add(s.Ban != nil, "ban")
+	add(s.Allow, "allow")
 	return ns
 }
 
@@ -1069,6 +1090,59 @@ func (v *validator) settings(p string, s Settings) {
 		}
 		v.period(p+".ban", *s.Ban, MaxRulePeriod)
 	}
+}
+
+// allowSubject reports whether n requires, at the top level of an "and", a
+// client the client can't forge: its IP, an IP list or a verified crawler
+// range. Anything else in a request can be sent by anyone, and an allow on
+// it would be a header-based exemption. A client IP counts only when every
+// value passes allowPrefix, since a wide range allows nearly everyone; when
+// none qualifies, problem names the first value that failed.
+func allowSubject(n expr.Node) (ok bool, problem string) {
+	n = expr.Normalize(n)
+	if n.Not || n.Combinator != "and" {
+		return false, ""
+	}
+	return allowSubjectIn(n)
+}
+
+// allowSubjectIn looks through nested "and" groups, which the parser and the
+// rule builder produce for parentheses; an "or" or negated group requires
+// none of its conditions, so it is skipped.
+func allowSubjectIn(g expr.Node) (ok bool, problem string) {
+	for _, r := range g.Rules {
+		switch {
+		case r.IsGroup():
+			if r.Not || r.Combinator != "and" {
+				continue
+			}
+			sub, p := allowSubjectIn(r)
+			ok = ok || sub
+			problem = cmp.Or(problem, p)
+		case r.Field == "ip.src" && (r.Operator == "eq" || r.Operator == "in"):
+			vals := r.Value.List
+			if r.Operator == "eq" {
+				vals = []string{r.Value.One}
+			}
+			wide := ""
+			for _, val := range vals {
+				_, msg := allowPrefix(val)
+				if strings.HasPrefix(msg, "is wider") {
+					msg += ": put wider networks in an IP list and use client.ip_lists"
+				}
+				if msg != "" {
+					wide = cmp.Or(wide, fmt.Sprintf("an always-allow rule's client IP %s %s", val, msg))
+				}
+			}
+			ok = ok || wide == ""
+			problem = cmp.Or(problem, wide)
+		case r.Field == expr.IPListsField:
+			ok = ok || r.Operator == "eq" || r.Operator == "in"
+		case r.Field == expr.VerifiedBotField:
+			ok = ok || r.Operator == "is_true"
+		}
+	}
+	return ok, problem
 }
 
 func (v *validator) rateLimitRules() {
