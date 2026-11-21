@@ -127,15 +127,15 @@ export function WarMap({ view, wall, expanded, onExpand }: { view: View; wall: b
 
   const iso = (t: number) => new Date(t).toISOString();
   const win = `from=${iso(view.from)}&to=${iso(view.to)}`;
-  const now = view.live ? 'minutes=5' : win;
-  const q = useTraffic(now, view.live);
+  // Live reads the same full minutes as the tiles, so the map and the tiles agree.
+  const q = useTraffic(win, view.live);
   // Admin rounds each request outward on its own, so the window before is built
   // from the window it answered for the shown span, not from the view; past the
   // longest period admin keeps there is none.
   const shown = q.data && !q.isPlaceholderData ? q.data : null;
   const shownFrom = shown ? Date.parse(shown.from) : 0;
   const start = shown ? shownFrom - (Date.parse(shown.to) - shownFrom) : 0;
-  const before = view.live ? 'minutes=60' : shown && kept(start) ? `from=${iso(start)}&to=${iso(shownFrom)}` : null;
+  const before = view.live ? `from=${iso(view.from - 3_600_000)}&to=${iso(view.from)}` : shown && kept(start) ? `from=${iso(start)}&to=${iso(shownFrom)}` : null;
   const qBefore = useTraffic(before, view.live);
   const qSeries = useTraffic(picked ? `${view.live ? 'minutes=60' : win}&country=${picked}` : null, view.live);
 
@@ -174,17 +174,15 @@ export function WarMap({ view, wall, expanded, onExpand }: { view: View; wall: b
   const total = countries.reduce((n, c) => n + c.requests, 0);
   const mins = minutesOf(d);
   const prior = qBefore.isPlaceholderData ? undefined : qBefore.data;
-  // Live's hour includes the 5 minutes shown, so they are taken out; a period's
-  // window before is its own, and may come from coarser rows, so only rates compare.
-  const overlap = view.live ? 1 : 0;
-  const priorMins = prior ? minutesOf(prior) - overlap * mins : 0;
+  // The window before may come from coarser rows than the one shown, so only rates compare.
+  const priorMins = prior ? minutesOf(prior) : 0;
   const priorBy = new Map(prior?.countries.map((c) => [c.country, c.requests]));
   const rate = (c: Country) => (mins > 0 ? c.requests / mins : 0);
   // How much faster than the time before, or undefined where there is nothing to compare.
   const vsOf = (c: Country) => {
     // Windows that still overlap after rounding would compare a span with itself.
-    if (!view.live && prior && Date.parse(prior.to) > Date.parse(d.from)) return undefined;
-    const was = prior && priorMins > 0 ? ((priorBy.get(c.country) ?? 0) - overlap * c.requests) / priorMins : 0;
+    if (prior && Date.parse(prior.to) > Date.parse(d.from)) return undefined;
+    const was = prior && priorMins > 0 ? (priorBy.get(c.country) ?? 0) / priorMins : 0;
     return was > 0 ? rate(c) / was : undefined;
   };
   const amountOf = (c: Country) => (view.live ? fmt(rate(c)) : short(c.requests));

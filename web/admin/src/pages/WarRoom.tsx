@@ -244,8 +244,8 @@ export function WarRoom() {
     },
     {
       label: 'Valkey checks unanswered',
-      value: live ? fmt(Math.round(failed / span)) : fmt(failed),
-      note: !topRule ? 'None' : `${topRule[1] === failed ? 'All' : topRule[1] * 2 > failed ? 'Most' : 'The largest share'} by rule ${topRule[0]}`,
+      value: live ? perMin(failed / span) : fmt(failed),
+      note: !topRule ? 'None' : `${topRule[1] === failed ? 'All' : topRule[1] * 2 > failed ? 'Most' : 'The largest share'} by rule ${topRule[0]}${live ? ', a minute on average' : ''}`,
       spark: (b: Bucket) => b.failed,
       c: tint(att, tileSignals.valkey, true),
     },

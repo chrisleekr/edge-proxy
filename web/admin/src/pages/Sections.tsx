@@ -860,9 +860,14 @@ function EdgePlaceForm({ edge }: { edge: Place }) {
   const [lat, setLat] = useState(edge ? String(edge.lat) : '');
   const [long, setLong] = useState(edge ? String(edge.long) : '');
   const [name, setName] = useState(edge?.name ?? '');
+  // The form is not remounted after a save, so whether a place is stored follows the saves.
+  const [stored, setStored] = useState(!!edge);
   const save = useMutation({
     mutationFn: (place: Place) => api('PUT', '/api/settings/traffic-map', { edge: place }),
-    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ['traffic-map'] }), qc.invalidateQueries({ queryKey: ['traffic'] })]),
+    onSuccess: (_, place) => {
+      setStored(place !== null);
+      return Promise.all([qc.invalidateQueries({ queryKey: ['traffic-map'] }), qc.invalidateQueries({ queryKey: ['traffic'] })]);
+    },
   });
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -888,7 +893,7 @@ function EdgePlaceForm({ edge }: { edge: Place }) {
             Save
           </Button>
           <Button
-            disabled={!edge || save.isPending}
+            disabled={!stored || save.isPending}
             onClick={() => {
               setLat('');
               setLong('');

@@ -27,6 +27,9 @@ const tab = (bar: string, name: string) => page.getByRole('navigation', { name: 
 
 const confirm = (action: string) => page.getByRole('dialog').getByRole('button', { name: action, exact: true }).click();
 
+// liveMap is the war room map's Live request: its last 5 full minutes, without a country.
+const liveMap = (u: URL) => u.pathname === '/api/traffic' && !u.searchParams.has('country') && Date.parse(u.searchParams.get('to') ?? '') - Date.parse(u.searchParams.get('from') ?? '') === 300_000;
+
 async function saveDraft(revision: number) {
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByRole('status').filter({ hasText: `Saved revision ${revision}` })).toBeVisible();
@@ -624,7 +627,7 @@ test('a role that reads stats reaches the war room, which shows Live then Period
   await expect(other.getByRole('button', { name: 'Ask autopilot' })).toHaveCount(0);
 
   const now = Date.now();
-  await other.route('**/api/traffic?minutes=5', (r) =>
+  await other.route(liveMap, (r) =>
     r.fulfill({
       json: {
         from: new Date(now - 240_000).toISOString(),
@@ -659,7 +662,7 @@ test('war room flow lines start at a drawn mark and the Europe inset covers worl
     { country: 'CL', requests: 100, blocked: 0, estimated: 0 },
   ];
   let edge = { lat: -33.87, long: 151.21, name: 'Sydney' };
-  await other.route('**/api/traffic?minutes=5', (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge } }));
+  await other.route(liveMap, (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge } }));
   await other.goto('/');
   await other.getByLabel('Username').fill(oncall);
   await other.getByLabel('Password').fill(password);
@@ -730,7 +733,7 @@ test('war room flow lines start at a drawn mark and the Europe inset covers worl
 test('the war room map explains no logs and no countries, marks estimates and unmapped countries, and expands and closes', async ({ browser }) => {
   const other = await (await browser.newContext()).newPage();
   let countries: { country: string; requests: number; blocked: number; estimated: number }[] = [];
-  await other.route('**/api/traffic?minutes=5', (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge: null } }));
+  await other.route(liveMap, (r) => r.fulfill({ json: { from: new Date(Date.now() - 300_000).toISOString(), to: new Date().toISOString(), countries, edge: null } }));
   await other.goto('/');
   await other.getByLabel('Username').fill(oncall);
   await other.getByLabel('Password').fill(password);
@@ -787,6 +790,8 @@ test('a settings manager places the edges on Settings, the war room map then dra
   await form.getByLabel('Place name').fill('Frankfurt');
   await form.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(form.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible();
+  // The first place saved can be cleared without reloading the page.
+  await expect(form.getByRole('button', { name: 'Clear', exact: true })).toBeEnabled();
 
   await page.goto('/traffic?view=period');
   await expect(page.getByText('Edges in Frankfurt')).toBeVisible();
@@ -796,6 +801,7 @@ test('a settings manager places the edges on Settings, the war room map then dra
   await page.goto('/settings');
   await form.getByRole('button', { name: 'Clear', exact: true }).click();
   await expect(form.getByLabel('Latitude')).toHaveValue('');
+  await expect(form.getByRole('button', { name: 'Clear', exact: true })).toBeDisabled();
   await page.goto('/traffic?view=period');
   await expect(hint).toBeVisible();
   await expect(page.getByText('Edges in Frankfurt')).toHaveCount(0);
