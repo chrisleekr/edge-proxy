@@ -104,7 +104,7 @@ ip.src.country in $eu-only
 not starts_with(http.request.uri.path, $public-paths)
 ```
 
-`in $name` matches when the field equals any value of the value list, as `in {...}` does. A pattern operator (`contains`, `starts_with`, `ends_with`, `wildcard`, `strict_wildcard`, `matches`) matches when any value matches, and its negated form when none does. A value list belongs to one field and is used only with that field, and its values are checked as that field's when the policy is saved and again where a rule uses it, with that rule's operator: a URL paths value list holding `.php` works with `ends_with` and is refused with `in`, since a path starts with `/`.
+`in $name` matches when the field equals any value of the value list, as `in {...}` does. A value list replaces the whole set, so a bare `$name` inside `{...}` is a syntax error; quote it for a literal. A pattern operator (`contains`, `starts_with`, `ends_with`, `wildcard`, `strict_wildcard`, `matches`) matches when any value matches, and its negated form when none does. A value list belongs to one field and is used only with that field, and its values are checked as that field's when the policy is saved and again where a rule uses it, with that rule's operator: a URL paths value list holding `.php` works with `ends_with` and is refused with `in`, since a path starts with `/`.
 
 | Value list kind | Field | Operators |
 |---|---|---|
