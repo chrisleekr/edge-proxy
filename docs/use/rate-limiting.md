@@ -303,6 +303,7 @@ A key part can be absent: a missing header, cookie or query argument, no verifie
 - **`fallback_ip` is the safe default.** A fallback key can never collide with a value a client chooses, so a header set to someone's IP can't land in that IP's bucket.
 - **`skip` lets a client bypass the rule** by leaving the value out. Use it only when another rule covers those requests.
 - **A `skip`ped rule takes no slot** in the 5-rule cap.
+- **`reject` refuses only from a rule that can block.** A log-only rule, or any rule while the rate-limit kill switch is on, skips a request without the key part instead.
 
 ## Several rules on one request
 
