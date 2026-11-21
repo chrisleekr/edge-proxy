@@ -377,7 +377,7 @@ function RateLimitForm({ value: v, onChange, choices, at }: { value: JsonObject;
       )}
       <Labeled
         label="Over the limit"
-        info="Block answers 429 with Retry-After. Log only lets the request through and counts it under Over limit, log only in Stats, so you can see who it would block before it blocks anyone."
+        info="Block answers 429 with Retry-After. Log only lets the request through and counts it under Logged instead of limited in Stats, so you can see who it would block before it blocks anyone."
         hint="Start with Log only and watch Stats before you block." issues={at('action')}>
         <Choice value={v.action as string | undefined} options={choices.actions} onChange={(x) => set('action', x)} />
       </Labeled>
@@ -430,7 +430,7 @@ function SettingsForm({ value, onChange, choices, config, at }: { value: JsonObj
       <p className="text-sm text-body">Anything not set here keeps the value from earlier matching rules or the defaults under Settings.</p>
       <Labeled
         label="Action"
-        info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Would block in Stats. The block kill switch under Settings turns every block into log only."
+        info="Block answers 403 with the forbidden template. Log only lets the request through and counts it under Logged instead of blocked in Stats. The block kill switch under Settings turns every block into log only."
         hint={
           s.allow === true
             ? "Always allow wins over every block, ban, rate limit and token requirement, whatever the rule order. It still applies this rule's other settings and the CORS, locale and limits other rules set."

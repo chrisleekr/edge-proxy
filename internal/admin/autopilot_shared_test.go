@@ -44,16 +44,16 @@ func (h *harness) signalDaysOn(version int64, perMinute uint64) {
 
 func sharedRule() map[string]any { return agentRule(outdated, "ja4") }
 
-// shadowMinutes stores minutes of traffic in which the rule would limit
+// shadowMinutes stores minutes of traffic in which the rule logged
 // per minute, all on the signal.
 func shadowMinutes(h *harness, pub *client, id string, minutes int, would int64) {
 	h.t.Helper()
 	h.put(minutes, 1, minute{version: pub.active().Version, requests: 10_000, signals: signalCounts("browser_outdated", uint64(would)),
-		rateLimit: []edge.RuleCounts{{ID: id, Evaluated: 1_000, WouldLimit: uint64(would)}}})
+		rateLimit: []edge.RuleCounts{{ID: id, Evaluated: 1_000, Logged: uint64(would)}}})
 }
 
 // sharedObserved has a ja4-only enforce rule observed for 6 minutes with
-// the signal at baseline a minute on the previous days, the rule would-limiting
+// the signal at baseline a minute on the previous days, the rule logging
 // 900 a minute of 10,000.
 func sharedObserved(t *testing.T, baseline uint64) (*harness, *client, string) {
 	t.Helper()
@@ -150,7 +150,7 @@ func TestAutopilotSharedKeyEnforce(t *testing.T) {
 	// top subject would be left out of a per-client rule's count.
 	t.Run("shared rule is rejected block_share when normal traffic carries the signal", func(t *testing.T) {
 		h, pub, id := sharedObserved(t, 2_000)
-		h.put(6, 1, minute{version: pub.active().Version, top: []edge.TopCount{{Rule: id, Key: "k0", Display: "ja4", WouldLimit: 900}}})
+		h.put(6, 1, minute{version: pub.active().Version, top: []edge.TopCount{{Rule: id, Key: "k0", Display: "ja4", Logged: 900}}})
 		h.tick()
 		if st := ruleState(t, h, id); st != "rejected" || lastReason(t, h, id, "rejected") != "block_share" {
 			t.Fatalf("rule %s, reason %q", st, lastReason(t, h, id, "rejected"))
@@ -159,7 +159,7 @@ func TestAutopilotSharedKeyEnforce(t *testing.T) {
 }
 
 // A baseline of nothing measured is unknown, not zero: the rule is judged on
-// its raw would-limit count, which a spread attack exceeds.
+// its raw logged count, which a spread attack exceeds.
 func TestAutopilotSharedKeyUnmeasuredBaseline(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -171,7 +171,7 @@ func TestAutopilotSharedKeyUnmeasuredBaseline(t *testing.T) {
 			}
 			h.put(60, 1, minute{requests: 10_000})
 		}},
-		{"shared rule with no signal history is judged on its raw would-limit count", func(h *harness) { h.put(60, 1, minute{requests: 10_000}) }},
+		{"shared rule with no signal history is judged on its raw logged count", func(h *harness) { h.put(60, 1, minute{requests: 10_000}) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, id := sharedObservedFrom(t, tc.seed)
@@ -189,7 +189,7 @@ func TestAutopilotSharedKeyUnmeasuredBaseline(t *testing.T) {
 
 // The days were stored under a version with no browser floor, where
 // browser_outdated could not fire, so their zeros are not normal traffic.
-// The rule is judged on its raw would-limit count and observes the full time.
+// The rule is judged on its raw logged count and observes the full time.
 func TestAutopilotSharedKeyBaselineBeforeTheFloorIsUnknown(t *testing.T) {
 	t.Run("shared rule is not bounded by days stored before the floor was set", func(t *testing.T) {
 		h, _, id := sharedObservedFrom(t, func(h *harness) { h.signalDaysOn(1, 0) })
@@ -216,7 +216,7 @@ func TestAutopilotSharedKeyBaselineBeforeTheFloorIsUnknown(t *testing.T) {
 }
 
 // Normal traffic carries browser_outdated 5 a minute and client_hints_mismatch
-// 2,000. The rule would limit 900 a minute, of 10,000.
+// 2,000. The rule logs 900 a minute, of 10,000.
 func TestAutopilotSharedKeyScopeShape(t *testing.T) {
 	seed := func(h *harness) {
 		c := signalCounts("browser_outdated", 5)

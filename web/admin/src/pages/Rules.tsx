@@ -32,7 +32,7 @@ const setting = ([k, v]: [string, Json]) => {
   if (k === 'ratelimit_headers') return v ? 'RateLimit headers' : 'no RateLimit headers';
   if (k === 'ban' && typeof v === 'string') return `bans the client IP for ${short(v)}`;
   if (k === 'allow') return v === true ? 'skips blocks, bans, rate limits and required tokens' : 'no allow';
-  if (k === 'block') return v === 'block' ? 'blocks with 403' : 'log only, would block';
+  if (k === 'block') return v === 'block' ? 'blocks with 403' : 'log only';
   if (k === 'responses' && v !== null && typeof v === 'object')
     return Object.entries(v)
       .map(([kind, t]) => `${kind.replaceAll('_', ' ')} response ${String(t)}`)

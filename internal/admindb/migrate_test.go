@@ -468,3 +468,86 @@ func TestIPListsMigrationRenamesTablesAndMovesTheGrant(t *testing.T) {
 		t.Fatalf("lists with no URL are refused: %v", err)
 	}
 }
+
+// An install with log-only counts under their old names keeps them under
+// the new one: stats keep their array order, route hours count those
+// requests as allow, anomalies, cases and notes name the new signal, and
+// audit rows are left as written.
+func TestLoggedMigrationRenamesCountsAndLeavesAuditAlone(t *testing.T) {
+	owner := migratedBefore(t, 24)
+	ctx := t.Context()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := owner.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	text := func(sql string) string {
+		t.Helper()
+		var v string
+		if err := owner.QueryRow(ctx, sql).Scan(&v); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		return v
+	}
+	const oldAudit = `{"signal": "rule_would_block", "would_limit": 3}`
+	exec(`INSERT INTO audit_events (seq, occurred_at, actor, action, key_id, hmac, details)
+		VALUES (1, now(), 'system', 'settings.notifications', 'k1', decode(repeat('00', 32), 'hex'), $1)`, oldAudit)
+	exec(`INSERT INTO edge_stats_minute (minute, version, replica, requests, edge_5xx, upstream_5xx, auth_failures, latency_ms, rate_limit, top_limited, rules) VALUES
+		(now(), 1, 'a', 10, 0, 0, 0, '{10}',
+			'[{"id":"first","evaluated":5,"limited":1},{"id":"search","evaluated":9,"limited":0,"would_limit":4},{"id":"last","evaluated":1,"failed":2}]',
+			'[{"rule":"search","key":"k2","display":"b","limited":0,"would_limit":7},{"rule":"login","key":"k1","display":"a","limited":3}]',
+			'[{"phase":"config","id":"z","matched":2,"blocked":2},{"phase":"config","id":"tools","matched":6,"would_block":6},{"phase":"request_headers","id":"a","matched":1}]')`)
+	var routeID int64
+	if err := owner.QueryRow(ctx, `INSERT INTO observed_routes (host, method, template, first_seen, last_seen) VALUES ('h', 'GET', '/x', now(), now()) RETURNING id`).Scan(&routeID); err != nil {
+		t.Fatal(err)
+	}
+	exec(`INSERT INTO observed_route_hour (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes) VALUES
+		($1, '2026-01-01 00:00+00', 12, 12, '{0,12,0,0,0,0}', '{12}', '{"allow":5,"would_block":3,"would_limit":2,"rate_limited":2}', '{}', '{}', '{}'),
+		($1, '2026-01-01 01:00+00', 4, 4, '{0,4,0,0,0,0}', '{4}', '{"would_limit":4}', '{}', '{}', '{}'),
+		($1, '2026-01-01 02:00+00', 1, 1, '{0,1,0,0,0,0}', '{1}', '{"allow":1}', '{}', '{}', '{}')`, routeID)
+	exec(`INSERT INTO anomalies (signal, rule, phase, severity, state, tripped, passed, started_at, summary, details)
+		VALUES ('rule_would_block', 'login', 'rate_limit', 'info', 'firing', 1, 0, now(), 's', '{}'), ('traffic_surge', '', 'fleet', 'info', 'firing', 1, 0, now(), 's', '{}')`)
+	autopilotRecords(t, owner)
+	exec(`UPDATE autopilot_cases SET brief = '{"kind":"anomaly","signal":"rule_would_block","rule":"login"}'`)
+	exec(`UPDATE autopilot_notes SET claim = '{"metric":"rule_would_limit","window":{"last_minutes":60},"op":">=","value":100}'`)
+	revisions := text("SELECT count(*)::text || coalesce(string_agg(fields::text, ''), '') FROM autopilot_note_revisions")
+
+	if err := Migrate(ctx, owner, testenv.AppRole); err != nil {
+		t.Fatal(err)
+	}
+
+	// jsonb equality ignores key order inside an entry; the array order is what must hold.
+	for col, want := range map[string]string{
+		"rate_limit":  `[{"id":"first","evaluated":5,"limited":1},{"id":"search","evaluated":9,"limited":0,"logged":4},{"id":"last","evaluated":1,"failed":2}]`,
+		"top_limited": `[{"rule":"search","key":"k2","display":"b","limited":0,"logged":7},{"rule":"login","key":"k1","display":"a","limited":3}]`,
+		"rules":       `[{"phase":"config","id":"z","matched":2,"blocked":2},{"phase":"config","id":"tools","matched":6,"logged":6},{"phase":"request_headers","id":"a","matched":1}]`,
+	} {
+		var same bool
+		if err := owner.QueryRow(ctx, "SELECT "+col+" = $1::jsonb FROM edge_stats_minute", want).Scan(&same); err != nil || !same {
+			t.Errorf("%s = %s, want %s, %v", col, text("SELECT "+col+"::text FROM edge_stats_minute"), want, err)
+		}
+	}
+	if got, want := text("SELECT string_agg(actions::text, ' ' ORDER BY hour) FROM observed_route_hour"),
+		`{"allow": 10, "rate_limited": 2} {"allow": 4} {"allow": 1}`; got != want {
+		t.Errorf("actions = %s, want %s", got, want)
+	}
+	if got := text("SELECT string_agg(logged_rules::text, ' ') FROM observed_route_hour"); got != "{} {} {}" {
+		t.Errorf("logged_rules = %s, want empty maps", got)
+	}
+	if got := text("SELECT string_agg(signal, ',' ORDER BY signal) FROM anomalies"); got != "rule_logged,traffic_surge" {
+		t.Errorf("anomaly signals = %s", got)
+	}
+	if got := text("SELECT brief->>'signal' FROM autopilot_cases"); got != "rule_logged" {
+		t.Errorf("case signal = %s", got)
+	}
+	if got := text("SELECT claim->>'metric' FROM autopilot_notes"); got != "rule_logged" {
+		t.Errorf("note metric = %s", got)
+	}
+	if got := text("SELECT count(*)::text || string_agg(details::text, '') FROM audit_events"); got != "1"+oldAudit {
+		t.Errorf("audit rows = %s, want the one row as written", got)
+	}
+	if got := text("SELECT count(*)::text || coalesce(string_agg(fields::text, ''), '') FROM autopilot_note_revisions"); got != revisions {
+		t.Errorf("note revisions changed: %s, was %s", got, revisions)
+	}
+}

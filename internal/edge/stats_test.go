@@ -98,9 +98,9 @@ func TestTopLimitedReported(t *testing.T) {
 	}
 }
 
-// A log-only rule over its limit lists the client as would-limit, so an
+// A log-only rule over its limit lists the client as logged, so an
 // operator sees who a new rule would hit before switching it to block.
-func TestTopWouldLimitReported(t *testing.T) {
+func TestTopLoggedReported(t *testing.T) {
 	old := sampleTop
 	sampleTop = func() bool { return true }
 	t.Cleanup(func() { sampleTop = old })
@@ -116,7 +116,7 @@ func TestTopWouldLimitReported(t *testing.T) {
 	}
 
 	top := h.srv.poller.reg.deltas()[0].TopLimited
-	if len(top) != 1 || top[0].Rule != "search-per-ip" || top[0].Display != "198.51.100.7" || top[0].Limited != 0 || top[0].WouldLimit != 2*TopSample {
+	if len(top) != 1 || top[0].Rule != "search-per-ip" || top[0].Display != "198.51.100.7" || top[0].Limited != 0 || top[0].Logged != 2*TopSample {
 		t.Fatalf("top limited %+v", top)
 	}
 }
@@ -326,13 +326,13 @@ func TestBlockOutcomesReported(t *testing.T) {
 	num := func(r map[string]any, k string) float64 { n, _ := r[k].(float64); return n }
 	got := map[string]string{}
 	for _, r := range rep.Rules {
-		got[r["id"].(string)] = fmt.Sprintf("matched=%v blocked=%v would_block=%v", num(r, "matched"), num(r, "blocked"), num(r, "would_block"))
+		got[r["id"].(string)] = fmt.Sprintf("matched=%v blocked=%v logged=%v", num(r, "matched"), num(r, "blocked"), num(r, "logged"))
 	}
 	want := map[string]string{
-		"admin-route": "matched=0 blocked=0 would_block=0",
-		"uploads":     "matched=0 blocked=0 would_block=0",
-		"tools":       "matched=3 blocked=2 would_block=0",
-		"crawlers":    "matched=2 blocked=0 would_block=2",
+		"admin-route": "matched=0 blocked=0 logged=0",
+		"uploads":     "matched=0 blocked=0 logged=0",
+		"tools":       "matched=3 blocked=2 logged=0",
+		"crawlers":    "matched=2 blocked=0 logged=2",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("rule outcomes\n got %v\nwant %v", got, want)
@@ -425,17 +425,17 @@ func TestCountSignalsAllocatesNothing(t *testing.T) {
 }
 
 // A request a block rule would have stopped but an allow let through counts
-// as lifted on that rule, not as blocked or would_block. Both an always-allow
+// as lifted on that rule, not as blocked or logged. Both an always-allow
 // rule and the client allowlist lift; a client neither covers is blocked.
 func TestLiftedOutcomesReported(t *testing.T) {
 	allowRule := snapshot.ConfigRule{ID: "office", Expression: mustParse("ip.src in {" + trustedRange + "}"), Settings: snapshot.Settings{Allow: true}}
 	cases := []struct {
-		name                string
-		config              func() *snapshot.Config
-		client              string
-		status              int
-		blocked, wouldBlock float64
-		lifted              float64
+		name            string
+		config          func() *snapshot.Config
+		client          string
+		status          int
+		blocked, logged float64
+		lifted          float64
 	}{
 		{"always-allow rule lifts a block", func() *snapshot.Config {
 			c := allowlistConfig(1)
@@ -460,8 +460,8 @@ func TestLiftedOutcomesReported(t *testing.T) {
 					got = r
 				}
 			}
-			if got.Blocked != uint64(tc.blocked) || got.WouldBlock != uint64(tc.wouldBlock) || got.Lifted != uint64(tc.lifted) {
-				t.Fatalf("blocked %d would_block %d lifted %d, want %v %v %v", got.Blocked, got.WouldBlock, got.Lifted, tc.blocked, tc.wouldBlock, tc.lifted)
+			if got.Blocked != uint64(tc.blocked) || got.Logged != uint64(tc.logged) || got.Lifted != uint64(tc.lifted) {
+				t.Fatalf("blocked %d logged %d lifted %d, want %v %v %v", got.Blocked, got.Logged, got.Lifted, tc.blocked, tc.logged, tc.lifted)
 			}
 		})
 	}

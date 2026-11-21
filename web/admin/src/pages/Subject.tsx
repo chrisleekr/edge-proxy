@@ -11,16 +11,16 @@ export function Subject({ display }: { display: string }) {
   // A key of several parts, such as an IP and a header, joins them with
   // spaces. Stats links the whole key, Find a single part.
   const mine = (t: { display: string }) => t.display === display || t.display.split(' ').includes(display);
-  const rules = new Map<string, { rule: string; limited: number; would_limit: number }>();
+  const rules = new Map<string, { rule: string; limited: number; logged: number }>();
   for (const row of r.rows)
     for (const t of row.top_limited ?? []) {
       if (!mine(t)) continue;
-      const e = rules.get(t.rule) ?? { rule: t.rule, limited: 0, would_limit: 0 };
+      const e = rules.get(t.rule) ?? { rule: t.rule, limited: 0, logged: 0 };
       e.limited += t.limited;
-      e.would_limit += t.would_limit ?? 0;
+      e.logged += t.logged ?? 0;
       rules.set(t.rule, e);
     }
-  const total = (row: Row) => (row.top_limited ?? []).filter(mine).reduce((n, t) => n + t.limited + (t.would_limit ?? 0), 0);
+  const total = (row: Row) => (row.top_limited ?? []).filter(mine).reduce((n, t) => n + t.limited + (t.logged ?? 0), 0);
   return (
     <Page
       title={display}
@@ -37,9 +37,9 @@ export function Subject({ display }: { display: string }) {
               <Spark rows={r.rows} from={r.from} to={r.to} value={total} />
               Requests over a limit {r.phrase}, a sampled estimate.
             </p>
-            <Table head={['Rule', 'Blocked (estimate)', 'Over limit, log only (estimate)']} num={[1, 2]}>
+            <Table head={['Rule', 'Blocked (estimate)', 'Logged instead of limited (estimate)']} num={[1, 2]}>
               {[...rules.values()]
-                .sort((a, b) => b.limited + b.would_limit - a.limited - a.would_limit)
+                .sort((a, b) => b.limited + b.logged - a.limited - a.logged)
                 .map((x) => (
                   <tr key={x.rule}>
                     <td className="font-mono">
@@ -52,7 +52,7 @@ export function Subject({ display }: { display: string }) {
                       )}
                     </td>
                     <td className="text-right tabular-nums">{count(x.limited)}</td>
-                    <td className="text-right tabular-nums">{count(x.would_limit)}</td>
+                    <td className="text-right tabular-nums">{count(x.logged)}</td>
                   </tr>
                 ))}
             </Table>

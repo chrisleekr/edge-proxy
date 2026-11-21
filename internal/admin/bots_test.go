@@ -473,8 +473,8 @@ func TestGuardAbortsACanaryWhoseBlockRuleOverBlocks(t *testing.T) {
 	status(t, pub.do("POST", "/api/publish", map[string]any{"message": "block tools on 10%", "canary_percent": 10}, "If-Match", pub.revision()), 201)
 	h.advance(6 * time.Minute)
 	h.live("edge-a", 1, 2)
-	h.putOutcomes(1, 5, 1, 10_000, `[{"phase":"config","id":"tools","matched":100,"would_block":100}]`) // 1% would block
-	h.putOutcomes(2, 5, 1, 1_000, `[{"phase":"config","id":"tools","matched":300,"blocked":300}]`)      // 30% blocked
+	h.putOutcomes(1, 5, 1, 10_000, `[{"phase":"config","id":"tools","matched":100,"logged":100}]`) // 1% logged
+	h.putOutcomes(2, 5, 1, 1_000, `[{"phase":"config","id":"tools","matched":300,"blocked":300}]`) // 30% blocked
 	if err := h.s.runGuard(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestGuardJudgesABlockRuleByWhatItLogged(t *testing.T) {
 			status(t, pub.do("POST", "/api/publish", map[string]any{"message": "block tools on 10%", "canary_percent": 10}, "If-Match", pub.revision()), 201)
 			h.advance(6 * time.Minute)
 			h.live("edge-a", 1, 2)
-			h.putOutcomes(1, 5, 1, 10_000, `[{"phase":"config","id":"tools","matched":1000,"would_block":1000}]`) // 10% would block
+			h.putOutcomes(1, 5, 1, 10_000, `[{"phase":"config","id":"tools","matched":1000,"logged":1000}]`) // 10% logged
 			h.putOutcomes(2, 5, 1, 1_000, fmt.Sprintf(`[{"phase":"config","id":"tools","matched":%d,"blocked":%d}]`, tc.blocked, tc.blocked))
 			if err := h.s.runGuard(t.Context()); err != nil {
 				t.Fatal(err)
@@ -570,7 +570,7 @@ func TestGuardJudgesAnEditedBlockRuleByWhatItBlocked(t *testing.T) {
 	}
 }
 
-// rule_block_spike and rule_would_block watch config rules that block as
+// rule_block_spike and rule_logged watch config rules that block as
 // they watch rate-limit rules, so a block rule that starts refusing far
 // more, or a log-only one that would refuse someone, notifies.
 func TestNotifyBlockSignalsCoverConfigRules(t *testing.T) {
@@ -578,7 +578,7 @@ func TestNotifyBlockSignalsCoverConfigRules(t *testing.T) {
 		name, baseline, window, signal, rule string
 	}{
 		{"a block rule blocks far more", `[{"phase":"config","id":"tools","matched":100,"blocked":1}]`, `[{"phase":"config","id":"tools","matched":100,"blocked":30}]`, "rule_block_spike", "tools"},
-		{"a log-only block rule would block", `[{"phase":"config","id":"crawlers","matched":10}]`, `[{"phase":"config","id":"crawlers","matched":10,"would_block":3}]`, "rule_would_block", "crawlers"},
+		{"a log-only block rule logs", `[{"phase":"config","id":"crawlers","matched":10}]`, `[{"phase":"config","id":"crawlers","matched":10,"logged":3}]`, "rule_logged", "crawlers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			am := newFakeAlertmanager(t)

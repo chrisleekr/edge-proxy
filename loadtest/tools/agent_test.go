@@ -117,7 +117,7 @@ func TestAgentPlansEnforceForItsSensor(t *testing.T) {
 			append(reads("ap-search-per-ip-15"), enforce(search, search.FirstTry, "ap-search-per-ip-15"), enforce(search, search.Block, "ap-search-per-ip-15"))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			brief := map[string]any{"kind": "anomaly", "signal": "rule_would_block", "rule": tc.rule, "summary": map[string]any{"untrusted": "would block 3 addresses"}}
+			brief := map[string]any{"kind": "anomaly", "signal": "rule_logged", "rule": tc.rule, "summary": map[string]any{"untrusted": "logged 3 addresses"}}
 			got, verdict := testPlan.steps("anomaly", brief, l)
 			if verdict != "attack" {
 				t.Errorf("verdict %q, want attack", verdict)
@@ -149,8 +149,8 @@ func TestAgentAnswersOtherCasesBenign(t *testing.T) {
 	}{
 		{"a review", "review", map[string]any{"kind": "review", "question": "Review the autopilot rules"}},
 		{"a person's question", "investigate", map[string]any{"kind": "investigate", "question": "Is someone guessing passwords?"}},
-		{"an anomaly on a person's rule", "anomaly", map[string]any{"kind": "anomaly", "signal": "rule_would_block", "rule": "login"}},
-		{"an anomaly on an autopilot rule the plan does not name", "anomaly", map[string]any{"kind": "anomaly", "signal": "rule_would_block", "rule": "ap-checkout-9"}},
+		{"an anomaly on a person's rule", "anomaly", map[string]any{"kind": "anomaly", "signal": "rule_logged", "rule": "login"}},
+		{"an anomaly on an autopilot rule the plan does not name", "anomaly", map[string]any{"kind": "anomaly", "signal": "rule_logged", "rule": "ap-checkout-9"}},
 		{"an anomaly on no rule", "anomaly", map[string]any{"kind": "anomaly", "signal": "status_5xx", "rule": ""}},
 		{"a signal surge naming another signal", "anomaly", map[string]any{"kind": "anomaly", "signal": "signal_surge", "rule": "", "summary": map[string]any{"untrusted": "ua_missing: 40.0% of requests"}}},
 	} {

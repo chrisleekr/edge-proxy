@@ -161,11 +161,11 @@ const signals: { name: string; label: string; scope: Scope; fields: Threshold[];
     trips: (s) => `Trips when a rate limit rule, or an access rule set to block, blocks over ${times(num(s, 'factor'))} its baseline share of the requests it checks and over ${pct(num(s, 'floor'))}.`,
   },
   {
-    name: 'rule_would_block',
-    label: 'Log-only rule would block',
+    name: 'rule_logged',
+    label: 'Log-only rule logged requests',
     scope: blocking,
-    fields: [least('Minimum requests it would block')],
-    trips: (s) => `Trips when a rule that isn't blocking (set to log only, or under the kill switch) would block at least ${counted(s, 'request')}.`,
+    fields: [least('Minimum requests it logged')],
+    trips: (s) => `Trips when a rule that isn't blocking (set to log only, or under the kill switch) logs at least ${counted(s, 'request')} it would have refused.`,
   },
   {
     name: 'rule_fail_mode',

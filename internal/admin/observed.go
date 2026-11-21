@@ -12,6 +12,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,7 +43,7 @@ const (
 	maxPatternSegs = 32
 	// maxShape bounds a query shape; longer ones are summed under otherKey.
 	maxShape = 256
-	// otherKey sums counts past a cap. No rule ID, query key or decision
+	// otherKey sums counts past a cap. No rule ID, query key or action
 	// can be "*".
 	otherKey = "*"
 	// lateLine: a line's own time is used for its hour within this window,
@@ -84,19 +85,29 @@ func (s *Server) observedRoutes() {
 
 // accessLine is the part of an edge access line routes use.
 type accessLine struct {
-	Time     time.Time `json:"time"`
-	Msg      string    `json:"msg"`
-	Method   string    `json:"http.request.method"`
-	Host     string    `json:"server.address"`
-	Path     string    `json:"url.path"`
-	Status   int       `json:"http.response.status_code"`
-	Decision string    `json:"edge.decision"`
+	Time   time.Time `json:"time"`
+	Msg    string    `json:"msg"`
+	Method string    `json:"http.request.method"`
+	Host   string    `json:"server.address"`
+	Path   string    `json:"url.path"`
+	Status int       `json:"http.response.status_code"`
+	Action string    `json:"edge.action"`
 	// Country is the viewer's country as the edge logs it from its trusted
 	// source.
-	Country       string   `json:"client.geo.country_iso_code"`
-	DurationMS    float64  `json:"duration_ms"`
-	QueryKeys     []string `json:"edge.query_keys"`
-	Version       int64    `json:"edge.config_version"`
+	Country    string   `json:"client.geo.country_iso_code"`
+	DurationMS float64  `json:"duration_ms"`
+	QueryKeys  []string `json:"edge.query_keys"`
+	Version    int64    `json:"edge.config_version"`
+	// DecidedBy is the rule that refused the request, or the always-allow rule
+	// that let it through.
+	DecidedBy    string        `json:"edge.decided_by"`
+	MatchedRules []matchedRule `json:"edge.matched_rules"`
+	// LoggedRules are the log-only rules that matched and let the request go.
+	LoggedRules []string `json:"edge.logged_rules"`
+	// What an edge that still sends edge.decision instead of edge.action logs;
+	// legacy turns it into the fields above.
+	// ponytail: delete with legacy once no edge sends edge.decision.
+	Decision      string   `json:"edge.decision"`
 	ConfigRules   []string `json:"edge.config_rules"`
 	RateLimitRule string   `json:"edge.rate_limit_rule"`
 	// SampleRate is set on allowed lines the edge logged at a rate below 1.
@@ -105,17 +116,67 @@ type accessLine struct {
 	UpstreamErrorKind string `json:"edge.upstream_error_kind"`
 }
 
+// matchedRule holds only what route counts read: the access rules a line
+// matched.
+type matchedRule struct {
+	Rule string `json:"rule"`
+	Type string `json:"type"`
+}
+
+// legacy turns a line with edge.decision and no edge.action into the current
+// fields, which log shippers can still deliver after an edge upgrade. Such an
+// edge names the log-only rule only for would_limit, in edge.rate_limit_rule;
+// its would_block line names no rule, so it counts as allow with no logged
+// rule.
+// ponytail: delete once no edge sends edge.decision.
+func (l *accessLine) legacy() {
+	if l.Action != "" || l.Decision == "" {
+		return
+	}
+	l.Action = l.Decision
+	for _, id := range l.ConfigRules {
+		l.MatchedRules = append(l.MatchedRules, matchedRule{Rule: id, Type: "access"})
+	}
+	switch l.Decision {
+	case "would_block":
+		l.Action = "allow"
+	case "would_limit":
+		l.Action = "allow"
+		if l.RateLimitRule != "" {
+			l.LoggedRules = []string{l.RateLimitRule}
+		}
+	case "rate_limited":
+		l.DecidedBy = l.RateLimitRule
+	}
+}
+
 // usable reports whether the line describes a request on a route. Text
 // containing NUL is refused: Postgres rejects it in jsonb and would fail
 // the whole flush.
 func (l *accessLine) usable() bool {
-	text := append([]string{l.Method, l.Host, l.Path, l.Decision, l.RateLimitRule}, l.ConfigRules...)
+	text := append([]string{l.Method, l.Host, l.Path, l.Action, l.DecidedBy}, l.LoggedRules...)
+	for _, m := range l.MatchedRules {
+		text = append(text, m.Rule)
+	}
 	text = append(text, l.QueryKeys...)
-	return l.Msg == "access" && !notRoutes[l.Decision] &&
+	return l.Msg == "access" && !notRoutes[l.Action] &&
 		l.Method != "" && len(l.Method) <= 16 && strings.IndexFunc(l.Method, func(r rune) bool { return r <= ' ' || r >= 0x7f }) < 0 &&
 		l.Host != "" && len(l.Host) <= 253 && strings.HasPrefix(l.Path, "/") && len(l.Path) <= 4096 &&
-		l.Status >= 0 && l.Status < 600 && l.DurationMS >= 0 && len(l.Decision) <= 64 && l.SampleRate >= 0 && l.SampleRate <= 1 &&
+		l.Status >= 0 && l.Status < 600 && l.DurationMS >= 0 && len(l.Action) <= 64 && l.SampleRate >= 0 && l.SampleRate <= 1 &&
 		!slices.ContainsFunc(text, func(v string) bool { return strings.ContainsRune(v, 0) })
+}
+
+// compact cuts a usable line down to what aggregation reads, because a whole
+// request body of lines is held at once and each matched_rules entry is 48
+// bytes even when the JSON object was `{}`.
+func (l *accessLine) compact() {
+	ids := l.ConfigRules[:0]
+	for _, m := range l.MatchedRules {
+		if m.Type == "access" {
+			ids = append(ids, m.Rule)
+		}
+	}
+	l.ConfigRules, l.MatchedRules = ids, nil
 }
 
 // maxLineWeight bounds how many requests one sampled line can stand for.
@@ -128,7 +189,7 @@ var weightDraw = rand.Float64
 // sampled reports whether the line stands for more than one request: the
 // edge logs only a share of allowed, non-5xx requests when sampling.
 func (l *accessLine) sampled() bool {
-	return l.SampleRate > 0 && l.SampleRate < 1 && l.Decision == "allow" && l.Status < 500
+	return l.SampleRate > 0 && l.SampleRate < 1 && l.Action == "allow" && l.Status < 500
 }
 
 // weight is how many requests the line stands for: 1/rate for a sampled
@@ -214,6 +275,7 @@ func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *princip
 			if json.Unmarshal(b, &l) != nil || l.Msg != "access" {
 				skipped++
 			} else {
+				l.legacy()
 				w := l.weight() // drawn once: routes and traffic must agree
 				// Traffic counts requests the edge refused for a malformed
 				// request line too: they make no route but they came from
@@ -222,6 +284,7 @@ func (s *Server) ingestAccess(w http.ResponseWriter, r *http.Request, _ *princip
 					traffic = append(traffic, t)
 				}
 				if l.usable() {
+					l.compact()
 					lines = append(lines, routeLine{l, w})
 				} else {
 					skipped++
@@ -429,8 +492,9 @@ type routeTotals struct {
 	codes               map[int]int64 // by status code; usable lines are below 600
 	causes              map[string]int64
 	latency             []int64
-	decisions, config   map[string]int64
+	actions, config     map[string]int64
 	rateLimit, shapes   map[string]int64
+	logged              map[string]int64
 	first, last         time.Time
 }
 
@@ -446,7 +510,7 @@ func newRouteAggregator() *routeAggregator {
 
 func newRouteTotals(first time.Time) *routeTotals {
 	return &routeTotals{latency: make([]int64, len(edge.LatencyBoundsMS)+1), first: first, last: first, codes: map[int]int64{}, causes: map[string]int64{},
-		decisions: map[string]int64{}, config: map[string]int64{}, rateLimit: map[string]int64{}, shapes: map[string]int64{}}
+		actions: map[string]int64{}, config: map[string]int64{}, rateLimit: map[string]int64{}, logged: map[string]int64{}, shapes: map[string]int64{}}
 }
 
 func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, w int64, now time.Time) {
@@ -480,13 +544,15 @@ func (a *routeAggregator) add(hour time.Time, k routeKey, l *accessLine, w int64
 		i++
 	}
 	t.latency[i] += w
-	addCapped(t.decisions, l.Decision, w, maxRuleKeys)
+	addCapped(t.actions, l.Action, w, maxRuleKeys)
 	for _, id := range l.ConfigRules {
 		addCapped(t.config, id, w, maxRuleKeys)
 	}
-	// A would_limit line names a log-only rule that limited nothing.
-	if l.RateLimitRule != "" && l.Decision != "would_limit" {
-		addCapped(t.rateLimit, l.RateLimitRule, w, maxRuleKeys)
+	if l.Action == "rate_limited" && l.DecidedBy != "" {
+		addCapped(t.rateLimit, l.DecidedBy, w, maxRuleKeys)
+	}
+	for _, id := range l.LoggedRules {
+		addCapped(t.logged, id, w, maxRuleKeys)
 	}
 	keys := make([]string, len(l.QueryKeys))
 	for i, q := range l.QueryKeys {
@@ -572,16 +638,17 @@ func (s *Server) flushRoutes(ctx context.Context) error {
 				ON CONFLICT (host, method, template) DO UPDATE SET last_seen = greatest(observed_routes.last_seen, EXCLUDED.last_seen),
 					errors_only = observed_routes.errors_only AND EXCLUDED.errors_only
 				RETURNING id)
-			INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes, estimated, status_codes, upstream_errors)
-			SELECT id, $6, $7, $8, $9::bigint[], $10::bigint[], $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $17::jsonb, $18::jsonb FROM r
+			INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, actions, config_rules, rate_limit_rules, query_shapes, estimated, status_codes, upstream_errors, logged_rules)
+			SELECT id, $6, $7, $8, $9::bigint[], $10::bigint[], $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $17::jsonb, $18::jsonb, $19::jsonb FROM r
 			ON CONFLICT (route_id, hour) DO UPDATE SET requests = h.requests + EXCLUDED.requests, versioned = h.versioned + EXCLUDED.versioned,
 				estimated = h.estimated + EXCLUDED.estimated, status_codes = add_counts(h.status_codes, EXCLUDED.status_codes, 600),
 				upstream_errors = add_counts(h.upstream_errors, EXCLUDED.upstream_errors, 20),
 				status = add_counts(h.status, EXCLUDED.status), latency_ms = add_counts(h.latency_ms, EXCLUDED.latency_ms),
-				decisions = add_counts(h.decisions, EXCLUDED.decisions, 200), config_rules = add_counts(h.config_rules, EXCLUDED.config_rules, 200),
+				actions = add_counts(h.actions, EXCLUDED.actions, 200), config_rules = add_counts(h.config_rules, EXCLUDED.config_rules, 200),
+				logged_rules = add_counts(h.logged_rules, EXCLUDED.logged_rules, 200),
 				rate_limit_rules = add_counts(h.rate_limit_rules, EXCLUDED.rate_limit_rules, 200), query_shapes = add_counts(h.query_shapes, EXCLUDED.query_shapes, 20)`,
 			k.route.host, k.route.method, k.route.template, t.first, t.last,
-			k.hour, t.requests, t.versioned, t.status[:], t.latency, t.decisions, t.config, t.rateLimit, t.shapes, t.estimated, t.errorsOnly(), t.codes, t.causes)
+			k.hour, t.requests, t.versioned, t.status[:], t.latency, t.actions, t.config, t.rateLimit, t.shapes, t.estimated, t.errorsOnly(), t.codes, t.causes, t.logged)
 	}
 	if err := tx.SendBatch(ctx, b).Close(); err != nil {
 		return fmt.Errorf("route flush dropped %d route hours: %w", len(held), err)
@@ -666,7 +733,7 @@ func (t *routeTotals) merge(o *routeTotals) {
 	for i := range t.latency {
 		t.latency[i] += o.latency[i]
 	}
-	for _, p := range [][2]map[string]int64{{t.decisions, o.decisions}, {t.config, o.config}, {t.rateLimit, o.rateLimit}} {
+	for _, p := range [][2]map[string]int64{{t.actions, o.actions}, {t.config, o.config}, {t.rateLimit, o.rateLimit}, {t.logged, o.logged}} {
 		for k, n := range p[1] {
 			addCapped(p[0], k, n, maxRuleKeys)
 		}
@@ -703,7 +770,8 @@ type routeStats struct {
 	ErrorsOnly     bool             `json:"errors_only"`
 	Status         []int64          `json:"status"`
 	LatencyMS      []int64          `json:"latency_ms_buckets"`
-	Decisions      map[string]int64 `json:"decisions"`
+	Actions        map[string]int64 `json:"actions"`
+	LoggedRules    map[string]int64 `json:"logged_rules"`
 	ConfigRules    map[string]int64 `json:"config_rules"`
 	RateLimitRules map[string]int64 `json:"rate_limit_rules"`
 	QueryShapes    map[string]int64 `json:"query_shapes"`
@@ -713,14 +781,15 @@ type routeStats struct {
 
 const routeStatsSelect = `SELECT r.id, r.host, r.method, r.template, r.first_seen, r.last_seen, r.errors_only,
 	sum(h.requests)::bigint, sum(h.versioned)::bigint, sum(h.estimated)::bigint, sum_counts(h.status), sum_counts(h.latency_ms),
-	add_counts(sum_counts(h.decisions), '{}', 200), add_counts(sum_counts(h.config_rules), '{}', 200),
-	add_counts(sum_counts(h.rate_limit_rules), '{}', 200), add_counts(sum_counts(h.query_shapes), '{}', 20)
+	add_counts(sum_counts(h.actions), '{}', 200), add_counts(sum_counts(h.config_rules), '{}', 200),
+	add_counts(sum_counts(h.rate_limit_rules), '{}', 200), add_counts(sum_counts(h.query_shapes), '{}', 20),
+	add_counts(sum_counts(h.logged_rules), '{}', 200)
 	FROM observed_routes r JOIN observed_route_hour h ON h.route_id = r.id`
 
 func scanRouteStats(row pgx.CollectableRow) (routeStats, error) {
 	var r routeStats
 	err := row.Scan(&r.ID, &r.Host, &r.Method, &r.Template, &r.FirstSeen, &r.LastSeen, &r.ErrorsOnly, &r.Requests, &r.Versioned, &r.Estimated,
-		&r.Status, &r.LatencyMS, &r.Decisions, &r.ConfigRules, &r.RateLimitRules, &r.QueryShapes)
+		&r.Status, &r.LatencyMS, &r.Actions, &r.ConfigRules, &r.RateLimitRules, &r.QueryShapes, &r.LoggedRules)
 	r.P50MS, r.P95MS = quantileMS(r.LatencyMS, 0.5), quantileMS(r.LatencyMS, 0.95)
 	return r, err
 }
@@ -744,18 +813,74 @@ func quantileMS(buckets []int64, q float64) float64 {
 	return 0
 }
 
-// since reads ?hours= (default 24, at most the retention) as the start of
-// the range, on an hour boundary.
-func (s *Server) since(r *http.Request) (time.Time, error) {
+// parseSpan reads ?from= and ?to= (RFC 3339). ok is false when neither is
+// given, so callers fall back to ?hours=.
+func parseSpan(q url.Values) (from, to time.Time, ok bool, err error) {
+	if !q.Has("from") && !q.Has("to") {
+		return from, to, false, nil
+	}
+	bad := fail(http.StatusBadRequest, "from and to must be RFC 3339 times with from before to, and not given with hours")
+	if !q.Has("from") || !q.Has("to") || q.Has("hours") {
+		return from, to, false, bad
+	}
+	var e1, e2 error
+	from, e1 = time.Parse(time.RFC3339, q.Get("from"))
+	to, e2 = time.Parse(time.RFC3339, q.Get("to"))
+	if e1 != nil || e2 != nil || !from.Before(to) {
+		return from, to, false, bad
+	}
+	return from.UTC(), to.UTC(), true, nil
+}
+
+// ceil rounds up to a multiple of d, so a span's end stays inside its window.
+func ceil(t time.Time, d time.Duration) time.Time {
+	if f := t.Truncate(d); !f.Equal(t) {
+		return f.Add(d)
+	}
+	return t
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+func earlierOf(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// span reads the range as whole hours, from inclusive and to exclusive: either
+// ?hours= (default 24, at most the retention) ending with the current hour,
+// or ?from= and ?to= rounded outward and clamped to retention and the current
+// hour. A span wholly outside that is empty (from == to), not an error.
+func (s *Server) span(r *http.Request) (from, to time.Time, err error) {
+	q := r.URL.Query()
+	end := s.now().UTC().Truncate(time.Hour).Add(time.Hour)
+	oldest := end.Add(-time.Duration(retentionDays*24) * time.Hour)
+	f, t, ok, err := parseSpan(q)
+	if err != nil {
+		return from, to, err
+	}
+	if ok {
+		// Clamped at both ends so a span wholly after now stays empty at end.
+		from = earlierOf(laterOf(f.Truncate(time.Hour), oldest), end)
+		to = earlierOf(ceil(t, time.Hour), end)
+		return from, laterOf(from, to), nil
+	}
 	hours := 24
-	if v := r.URL.Query().Get("hours"); v != "" {
+	if v := q.Get("hours"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > retentionDays*24 {
-			return time.Time{}, fail(http.StatusBadRequest, fmt.Sprintf("hours must be 1 to %d", retentionDays*24))
+			return from, to, fail(http.StatusBadRequest, fmt.Sprintf("hours must be 1 to %d", retentionDays*24))
 		}
 		hours = n
 	}
-	return s.now().UTC().Truncate(time.Hour).Add(-time.Duration(hours-1) * time.Hour), nil
+	return end.Add(-time.Duration(hours) * time.Hour), end, nil
 }
 
 // routeSuggestion proposes a pattern for many sibling routes.
@@ -770,7 +895,7 @@ type routeSuggestion struct {
 const minSiblings = 20
 
 func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *principal) error {
-	since, err := s.since(r)
+	since, until, err := s.span(r)
 	if err != nil {
 		return err
 	}
@@ -780,7 +905,7 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 			return fail(http.StatusBadRequest, "limit must be a positive integer")
 		}
 	}
-	rows, err := s.db.Query(r.Context(), routeStatsSelect+` WHERE h.hour >= $1 GROUP BY r.id ORDER BY sum(h.requests) DESC, r.id`, since)
+	rows, err := s.db.Query(r.Context(), routeStatsSelect+` WHERE h.hour >= $1 AND h.hour < $2 GROUP BY r.id ORDER BY sum(h.requests) DESC, r.id`, since, until)
 	if err != nil {
 		return err
 	}
@@ -790,6 +915,7 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 	}
 	out := struct {
 		Since       time.Time         `json:"since"`
+		Until       time.Time         `json:"until"`
 		Routes      []routeStats      `json:"routes"`
 		NotGrouped  int64             `json:"not_grouped"`
 		Logged      int64             `json:"logged_requests"`
@@ -800,7 +926,7 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 		More      int `json:"more"`
 		MaxRoutes int `json:"max_routes"`
 		MaxErrors int `json:"max_error_routes"`
-	}{Since: since, Routes: []routeStats{}, MaxRoutes: maxRoutes, MaxErrors: maxErrorRoutes}
+	}{Since: since, Until: until, Routes: []routeStats{}, MaxRoutes: maxRoutes, MaxErrors: maxErrorRoutes}
 	for _, rs := range all {
 		out.Logged += rs.Versioned
 		out.Estimated += rs.Estimated
@@ -810,7 +936,7 @@ func (s *Server) listObserved(w http.ResponseWriter, r *http.Request, _ *princip
 		}
 		out.Routes = append(out.Routes, rs)
 	}
-	if err := s.db.QueryRow(r.Context(), "SELECT coalesce(sum(requests), 0)::bigint FROM edge_stats_minute WHERE minute >= $1", since).Scan(&out.Reported); err != nil {
+	if err := s.db.QueryRow(r.Context(), "SELECT coalesce(sum(requests), 0)::bigint FROM edge_stats_minute WHERE minute >= $1 AND minute < $2", since, until).Scan(&out.Reported); err != nil {
 		return err
 	}
 	pats, err := s.routePatterns(r.Context())
@@ -879,7 +1005,7 @@ func (s *Server) getObserved(w http.ResponseWriter, r *http.Request, _ *principa
 	if err != nil {
 		return err
 	}
-	since, err := s.since(r)
+	since, until, err := s.span(r)
 	if err != nil {
 		return err
 	}
@@ -887,7 +1013,7 @@ func (s *Server) getObserved(w http.ResponseWriter, r *http.Request, _ *principa
 	if err != nil {
 		return err
 	}
-	rows, err := s.db.Query(r.Context(), routeStatsSelect+` WHERE r.id = $1 AND h.hour >= $2 GROUP BY r.id`, id, since)
+	rows, err := s.db.Query(r.Context(), routeStatsSelect+` WHERE r.id = $1 AND h.hour >= $2 AND h.hour < $3 GROUP BY r.id`, id, since, until)
 	if err != nil {
 		return err
 	}
@@ -899,9 +1025,9 @@ func (s *Server) getObserved(w http.ResponseWriter, r *http.Request, _ *principa
 		Hour     time.Time        `json:"hour"`
 		Requests int64            `json:"requests"`
 		Status   []int64          `json:"status"`
-		Decision map[string]int64 `json:"decisions"`
+		Actions  map[string]int64 `json:"actions"`
 	}
-	rows, err = s.db.Query(r.Context(), `SELECT hour, requests, status, decisions FROM observed_route_hour WHERE route_id = $1 AND hour >= $2 ORDER BY hour`, id, since)
+	rows, err = s.db.Query(r.Context(), `SELECT hour, requests, status, actions FROM observed_route_hour WHERE route_id = $1 AND hour >= $2 AND hour < $3 ORDER BY hour`, id, since, until)
 	if err != nil {
 		return err
 	}
@@ -917,9 +1043,10 @@ func (s *Server) getObserved(w http.ResponseWriter, r *http.Request, _ *principa
 		StatusCodes    map[int]int64    `json:"status_codes"`
 		UpstreamErrors map[string]int64 `json:"upstream_errors"`
 		Since          time.Time        `json:"since"`
+		Until          time.Time        `json:"until"`
 		Series         []point          `json:"series"`
-	}{Since: since, Series: orEmpty(series)}
-	if err := s.db.QueryRow(r.Context(), "SELECT coalesce(sum_counts(status_codes), '{}'), coalesce(sum_counts(upstream_errors), '{}') FROM observed_route_hour WHERE route_id = $1 AND hour >= $2", id, since).
+	}{Since: since, Until: until, Series: orEmpty(series)}
+	if err := s.db.QueryRow(r.Context(), "SELECT coalesce(sum_counts(status_codes), '{}'), coalesce(sum_counts(upstream_errors), '{}') FROM observed_route_hour WHERE route_id = $1 AND hour >= $2 AND hour < $3", id, since, until).
 		Scan(&out.StatusCodes, &out.UpstreamErrors); err != nil {
 		return err
 	}
@@ -928,7 +1055,7 @@ func (s *Server) getObserved(w http.ResponseWriter, r *http.Request, _ *principa
 	} else {
 		// Seen before the range, quiet within it.
 		out.routeStats = routeStats{ID: id, Host: k.host, Method: k.method, Template: k.template, Status: []int64{},
-			LatencyMS: []int64{}, Decisions: map[string]int64{}, ConfigRules: map[string]int64{}, RateLimitRules: map[string]int64{}, QueryShapes: map[string]int64{}}
+			LatencyMS: []int64{}, Actions: map[string]int64{}, LoggedRules: map[string]int64{}, ConfigRules: map[string]int64{}, RateLimitRules: map[string]int64{}, QueryShapes: map[string]int64{}}
 		if err := s.db.QueryRow(r.Context(), "SELECT first_seen, last_seen FROM observed_routes WHERE id = $1", id).Scan(&out.FirstSeen, &out.LastSeen); err != nil {
 			return err
 		}
@@ -1074,16 +1201,17 @@ func mergeIntoPattern(ctx context.Context, tx pgx.Tx, pat routePattern) (int, er
 		if err != nil {
 			return 0, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, decisions, config_rules, rate_limit_rules, query_shapes, estimated, status_codes, upstream_errors)
-			SELECT $1, hour, sum(requests), sum(versioned), sum_counts(status), sum_counts(latency_ms), add_counts(sum_counts(decisions), '{}', 200),
+		_, err = tx.Exec(ctx, `INSERT INTO observed_route_hour AS h (route_id, hour, requests, versioned, status, latency_ms, actions, config_rules, rate_limit_rules, query_shapes, estimated, status_codes, upstream_errors, logged_rules)
+			SELECT $1, hour, sum(requests), sum(versioned), sum_counts(status), sum_counts(latency_ms), add_counts(sum_counts(actions), '{}', 200),
 				add_counts(sum_counts(config_rules), '{}', 200), add_counts(sum_counts(rate_limit_rules), '{}', 200), add_counts(sum_counts(query_shapes), '{}', 20), sum(estimated),
-				sum_counts(status_codes), sum_counts(upstream_errors)
+				sum_counts(status_codes), sum_counts(upstream_errors), add_counts(sum_counts(logged_rules), '{}', 200)
 			FROM observed_route_hour WHERE route_id = ANY($2) GROUP BY hour
 			ON CONFLICT (route_id, hour) DO UPDATE SET requests = h.requests + EXCLUDED.requests, versioned = h.versioned + EXCLUDED.versioned,
 				estimated = h.estimated + EXCLUDED.estimated, status_codes = add_counts(h.status_codes, EXCLUDED.status_codes, 600),
 				upstream_errors = add_counts(h.upstream_errors, EXCLUDED.upstream_errors, 20),
 				status = add_counts(h.status, EXCLUDED.status), latency_ms = add_counts(h.latency_ms, EXCLUDED.latency_ms),
-				decisions = add_counts(h.decisions, EXCLUDED.decisions, 200), config_rules = add_counts(h.config_rules, EXCLUDED.config_rules, 200),
+				actions = add_counts(h.actions, EXCLUDED.actions, 200), config_rules = add_counts(h.config_rules, EXCLUDED.config_rules, 200),
+				logged_rules = add_counts(h.logged_rules, EXCLUDED.logged_rules, 200),
 				rate_limit_rules = add_counts(h.rate_limit_rules, EXCLUDED.rate_limit_rules, 200), query_shapes = add_counts(h.query_shapes, EXCLUDED.query_shapes, 20)`,
 			tid, ids)
 		if err != nil {

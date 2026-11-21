@@ -624,8 +624,8 @@ function LiveCounts({ r, id }: { r: Range; id: string }) {
     <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-body">
       <span>Over its limit {r.phrase}:</span>
       <span className="flex items-center gap-1.5">
-        <Spark rows={r.rows} from={r.from} to={r.to} value={(x) => ruleCounts([x], id).would_limit} />
-        {count(c.would_limit)} while logging
+        <Spark rows={r.rows} from={r.from} to={r.to} value={(x) => ruleCounts([x], id).limitLogged} />
+        {count(c.limitLogged)} logged
       </span>
       <span className="flex items-center gap-1.5">
         <Spark rows={r.rows} from={r.from} to={r.to} value={(x) => ruleCounts([x], id).limited} />
@@ -1426,7 +1426,7 @@ function ExcludeDialog({ r, onClose }: { r: RuleView; onClose: () => void }) {
     for (const t of row.top_limited ?? []) {
       if (t.rule !== r.id) continue;
       const ip = t.display.split(' ')[0]!;
-      clients.set(ip, (clients.get(ip) ?? 0) + t.limited + (t.would_limit ?? 0));
+      clients.set(ip, (clients.get(ip) ?? 0) + t.limited + (t.logged ?? 0));
     }
   const top = [...clients].sort((a, b) => b[1] - a[1]).slice(0, 5);
   const [subject, setSubject] = useState('');

@@ -609,12 +609,38 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 			Exact      bool
 			Phases     []string
 			Deprecated bool
+			ListKind   string   `json:"list_kind"`
+			ListOps    []string `json:"list_ops"`
+			ListExact  bool     `json:"list_exact"`
 		}
 		Operators []op
 	}](t, ed.do("GET", "/api/expr/schema", nil))
 	avail, exact, deprecated := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, f := range schema.Fields {
 		avail[f.Name], exact[f.Name], deprecated[f.Name] = f.Available, f.Exact, f.Deprecated
+	}
+	// The rule editor offers a value list only for a field that holds one, with the
+	// operators that take it.
+	for _, tc := range []struct {
+		field, kind string
+		exact       bool
+		ops         int
+	}{{"http.user_agent", "User agents", false, 11}, {"ip.src.country", "Countries", true, 2}, {"ip.src", "", false, 0}, {"client.ip_lists", "", false, 0}} {
+		i := slices.IndexFunc(schema.Fields, func(f struct {
+			Name       string
+			Available  bool
+			Exact      bool
+			Phases     []string
+			Deprecated bool
+			ListKind   string   `json:"list_kind"`
+			ListOps    []string `json:"list_ops"`
+			ListExact  bool     `json:"list_exact"`
+		}) bool {
+			return f.Name == tc.field
+		})
+		if f := schema.Fields[i]; f.ListKind != tc.kind || f.ListExact != tc.exact || len(f.ListOps) != tc.ops {
+			t.Fatalf("schema value list for %s = %q exact %v ops %v", tc.field, f.ListKind, f.ListExact, f.ListOps)
+		}
 	}
 	// The builder hides client.denylisted in favour of client.ip_lists; rules
 	// that already use it still run.

@@ -48,9 +48,9 @@ type versionStats struct {
 	outcomes   []ruleOutcome
 	outcomeIDs []RuleOutcome
 	nConfig    int
-	// wouldTop tracks log-only (shadow) limits apart from top, so log-only
+	// loggedTop tracks log-only (shadow) limits apart from top, so log-only
 	// rules never evict the subjects real limits report.
-	wouldTop topKeys
+	loggedTop topKeys
 
 	// last holds the counts at the previous report, so reports carry deltas.
 	// Only the reporter goroutine touches it.
@@ -152,7 +152,7 @@ type StatsCounts struct {
 }
 
 type ruleStats struct {
-	evaluated, limited, wouldLimit, failed atomic.Uint64
+	evaluated, limited, logged, failed atomic.Uint64
 	// capped counts requests the rule matched but the per-request cap
 	// skipped. Reported, so admin can show a rule pushed past the cap.
 	capped atomic.Uint64
@@ -163,37 +163,41 @@ type ruleStats struct {
 
 // ruleOutcomeNames are the outcome labels of edge_ratelimit_rule_total, in
 // the order ruleStats.load returns them.
-var ruleOutcomeNames = [...]string{"evaluated", "limited", "would_limit", "failed", "capped", "expired"}
+var ruleOutcomeNames = [...]string{"evaluated", "limited", "logged", "failed", "capped", "expired"}
 
 const numRuleOutcomes = len(ruleOutcomeNames)
 
 func (r *ruleStats) load() [numRuleOutcomes]uint64 {
-	return [...]uint64{r.evaluated.Load(), r.limited.Load(), r.wouldLimit.Load(), r.failed.Load(), r.capped.Load(), r.expired.Load()}
+	return [...]uint64{r.evaluated.Load(), r.limited.Load(), r.logged.Load(), r.failed.Load(), r.capped.Load(), r.expired.Load()}
 }
 
-// RuleCounts are one rule's counts. WouldLimit is a shadow rule (or any rule
+// RuleCounts are one rule's counts. Logged is a shadow rule (or any rule
 // under the kill switch) over its limit; Failed is a call that took the
 // rule's fail_mode; Capped is a match the per-request cap skipped.
 type RuleCounts struct {
-	ID         string `json:"id"`
-	Evaluated  uint64 `json:"evaluated"`
-	Limited    uint64 `json:"limited"`
-	WouldLimit uint64 `json:"would_limit"`
-	Failed     uint64 `json:"failed"`
-	Capped     uint64 `json:"capped,omitempty"`
+	ID        string `json:"id"`
+	Evaluated uint64 `json:"evaluated"`
+	Limited   uint64 `json:"limited"`
+	Logged    uint64 `json:"logged"`
+	// LegacyLogged reads the count an edge not yet upgraded sends as
+	// would_limit, so admin can fold it into Logged. This edge never sets it.
+	// ponytail: delete once no edge sends would_limit.
+	LegacyLogged uint64 `json:"would_limit,omitempty"`
+	Failed       uint64 `json:"failed"`
+	Capped       uint64 `json:"capped,omitempty"`
 }
 
 // Counters lists every count in r, like Totals.Counters.
 func (r *RuleCounts) Counters() []*uint64 {
-	return []*uint64{&r.Evaluated, &r.Limited, &r.WouldLimit, &r.Failed, &r.Capped}
+	return []*uint64{&r.Evaluated, &r.Limited, &r.Logged, &r.Failed, &r.Capped}
 }
 
 // ruleOutcome counts the requests one config or request-header rule matched
 // and how they ended. It fills a cache line, so adds to a hot rule don't
 // contend with its neighbours'.
 type ruleOutcome struct {
-	matched, edge5xx, upstream5xx, authFailures, blocked, wouldBlock, lifted atomic.Uint64
-	_                                                                        [8]byte
+	matched, edge5xx, upstream5xx, authFailures, blocked, logged, lifted atomic.Uint64
+	_                                                                    [8]byte
 }
 
 // RuleOutcome is how the requests one config or request-header rule matched
@@ -205,10 +209,14 @@ type RuleOutcome struct {
 	Edge5xx      uint64 `json:"edge_5xx"`
 	Upstream5xx  uint64 `json:"upstream_5xx"`
 	AuthFailures uint64 `json:"auth_failures"`
-	// Blocked and WouldBlock count the requests this config rule's block
+	// Blocked and Logged count the requests this config rule's block
 	// setting decided, as block and as log.
-	Blocked    uint64 `json:"blocked"`
-	WouldBlock uint64 `json:"would_block"`
+	Blocked uint64 `json:"blocked"`
+	Logged  uint64 `json:"logged"`
+	// LegacyLogged reads the count an edge not yet upgraded sends as
+	// would_block, so admin can fold it into Logged. This edge never sets it.
+	// ponytail: delete once no edge sends would_block.
+	LegacyLogged uint64 `json:"would_block,omitempty"`
 	// Lifted counts the requests whose block or log setting from this rule an
 	// allow lifted.
 	Lifted uint64 `json:"lifted"`
@@ -216,7 +224,7 @@ type RuleOutcome struct {
 
 // Counters lists every count in r, like Totals.Counters.
 func (r *RuleOutcome) Counters() []*uint64 {
-	return []*uint64{&r.Matched, &r.Edge5xx, &r.Upstream5xx, &r.AuthFailures, &r.Blocked, &r.WouldBlock, &r.Lifted}
+	return []*uint64{&r.Matched, &r.Edge5xx, &r.Upstream5xx, &r.AuthFailures, &r.Blocked, &r.Logged, &r.Lifted}
 }
 
 func (o *ruleOutcome) add(status int, fromUpstream bool) {
@@ -261,7 +269,7 @@ func (s *versionStats) block(i int, blocked bool) {
 	if blocked {
 		s.outcomes[i].blocked.Add(1)
 	} else {
-		s.outcomes[i].wouldBlock.Add(1)
+		s.outcomes[i].logged.Add(1)
 	}
 }
 
@@ -312,13 +320,13 @@ func (s *versionStats) counts() StatsCounts {
 	}
 	for i := range s.rules {
 		r := &s.rules[i]
-		c.RateLimit = append(c.RateLimit, RuleCounts{ID: s.ruleIDs[i], Evaluated: r.evaluated.Load(), Limited: r.limited.Load(), WouldLimit: r.wouldLimit.Load(), Failed: r.failed.Load(),
+		c.RateLimit = append(c.RateLimit, RuleCounts{ID: s.ruleIDs[i], Evaluated: r.evaluated.Load(), Limited: r.limited.Load(), Logged: r.logged.Load(), Failed: r.failed.Load(),
 			Capped: r.capped.Load()})
 	}
 	for i := range s.outcomes {
 		o, r := &s.outcomes[i], s.outcomeIDs[i]
 		r.Matched, r.Edge5xx, r.Upstream5xx, r.AuthFailures = o.matched.Load(), o.edge5xx.Load(), o.upstream5xx.Load(), o.authFailures.Load()
-		r.Blocked, r.WouldBlock, r.Lifted = o.blocked.Load(), o.wouldBlock.Load(), o.lifted.Load()
+		r.Blocked, r.Logged, r.Lifted = o.blocked.Load(), o.logged.Load(), o.lifted.Load()
 		c.Rules = append(c.Rules, r)
 	}
 	return c
@@ -350,8 +358,8 @@ func (s *versionStats) delta() StatsCounts {
 	}
 	s.last = now
 	d.TopLimited = s.top.drain()
-	for _, t := range s.wouldTop.drain() {
-		t.WouldLimit, t.Limited = t.Limited, 0
+	for _, t := range s.loggedTop.drain() {
+		t.Logged, t.Limited = t.Limited, 0
 		d.TopLimited = append(d.TopLimited, t)
 	}
 	return d
@@ -380,16 +388,20 @@ type topKeys struct {
 	m  map[string]*TopCount
 }
 
-// TopCount is one subject. Limited and WouldLimit (log-only rules) are
+// TopCount is one subject. Limited and Logged (log-only rules) are
 // estimated from the sample. Err is the count it inherited when it took an
 // evicted subject's slot: its own count is at least the estimate less Err.
 type TopCount struct {
-	Rule       string `json:"rule"`
-	Key        string `json:"key"`
-	Display    string `json:"display"`
-	Limited    uint64 `json:"limited"`
-	WouldLimit uint64 `json:"would_limit,omitempty"`
-	Err        uint64 `json:"err,omitempty"`
+	Rule    string `json:"rule"`
+	Key     string `json:"key"`
+	Display string `json:"display"`
+	Limited uint64 `json:"limited"`
+	Logged  uint64 `json:"logged,omitempty"`
+	// LegacyLogged reads the count an edge not yet upgraded sends as
+	// would_limit, so admin can fold it into Logged. This edge never sets it.
+	// ponytail: delete once no edge sends would_limit.
+	LegacyLogged uint64 `json:"would_limit,omitempty"`
+	Err          uint64 `json:"err,omitempty"`
 }
 
 func (t *topKeys) add(key, rule, display string) {

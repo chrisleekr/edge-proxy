@@ -83,7 +83,7 @@ func defaultNotify() NotifySettings {
 			"rule_upstream_5xx_ratio": share("warning", 2, 0.05, 100, 10),
 			"rule_auth_failure_ratio": share("warning", 2, 0.1, 100, 10),
 			"rule_block_spike":        n("warning", 3, 0.01, 100),
-			"rule_would_block":        n("info", 0, 0, 1),
+			"rule_logged":             n("info", 0, 0, 1),
 			"rule_fail_mode":          n("critical", 0, 0, 1),
 			"rule_subject_dominates":  {Mode: "notify", Severity: "warning", MaxShare: 0.5, MinRequests: 100},
 			// The autopilot's own events, found from its state, not traffic.
@@ -186,9 +186,9 @@ var notifyChecks = map[string]notifyCheck{
 		return wr.Evaluated >= s.MinRequests && now > max(s.Floor, s.Factor*before),
 			fmt.Sprintf("Blocked %s of the requests it checked in the last %s, against %s in the %s before", pct(now), w.length(), pct(before), b.length())
 	}),
-	"rule_would_block": minOnly.on(blockPhases, func(s NotifySignal, w, _ *span, id string) (bool, string) {
-		n := w.blocking(id).WouldLimit
-		return n >= s.MinRequests, fmt.Sprintf("Would have blocked %s in the last %s: it is set to log only, or the kill switch is on", requests(n), w.length())
+	"rule_logged": minOnly.on(blockPhases, func(s NotifySignal, w, _ *span, id string) (bool, string) {
+		n := w.blocking(id).Logged
+		return n >= s.MinRequests, fmt.Sprintf("Logged %s it would have refused in the last %s: it is set to log only, or the kill switch is on", requests(n), w.length())
 	}),
 	"rule_fail_mode": minOnly.on(limitOnly, func(s NotifySignal, w, _ *span, id string) (bool, string) {
 		n := w.limit(id).Failed
@@ -352,6 +352,32 @@ func (n NotifySettings) signalFor(id, name string) NotifySignal {
 	return n.Signals[name]
 }
 
+// renameNotifySignals moves overrides saved under rule_would_block to
+// rule_logged. Without it they would stop applying and fail the next save
+// as an unknown signal. It is a settings change, so it writes an audit row,
+// and it writes nothing once there is nothing left to rename.
+func (s *Server) renameNotifySignals(ctx context.Context) error {
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		now := s.now()
+		signals, err := tx.Exec(ctx, `UPDATE settings SET updated_at = $1, value = jsonb_set(value, '{signals}',
+				(value->'signals') - 'rule_would_block' || jsonb_build_object('rule_logged', value->'signals'->'rule_would_block'))
+			WHERE key = 'notifications' AND value->'signals' ? 'rule_would_block'`, now)
+		if err != nil {
+			return err
+		}
+		rules, err := tx.Exec(ctx, `UPDATE settings SET updated_at = $1, value = jsonb_set(value, '{rules}', (
+				SELECT coalesce(jsonb_object_agg(id, CASE WHEN o ? 'rule_would_block'
+					THEN (o - 'rule_would_block') || jsonb_build_object('rule_logged', o->'rule_would_block') ELSE o END), '{}')
+				FROM jsonb_each(value->'rules') r(id, o)))
+			WHERE key = 'notifications' AND jsonb_path_exists(value, '$.rules.*.rule_would_block')`, now)
+		if err != nil || signals.RowsAffected()+rules.RowsAffected() == 0 {
+			return err
+		}
+		return admindb.Audit(ctx, tx, s.cfg.Audit, s.now, admindb.Event{Actor: "system:migrate", Action: "settings.renamed",
+			Target: "notifications", Details: map[string]any{"from": "rule_would_block", "to": "rule_logged"}})
+	})
+}
+
 func loadNotify(ctx context.Context, q querier) (NotifySettings, error) {
 	n := defaultNotify()
 	var b []byte
@@ -495,7 +521,7 @@ func (s *span) limit(id string) edge.RuleCounts {
 // the minutes and versions that list it.
 func (s *span) blocking(id string) edge.RuleCounts {
 	if o := s.outcomes[id]; o != nil && o.Phase == string(expr.PhaseConfig) {
-		return edge.RuleCounts{ID: id, Evaluated: s.live[id], Limited: o.Blocked, WouldLimit: o.WouldBlock}
+		return edge.RuleCounts{ID: id, Evaluated: s.live[id], Limited: o.Blocked, Logged: o.Logged}
 	}
 	return s.limit(id)
 }
@@ -1010,7 +1036,7 @@ func (a triagedAnomaly) withheld(handles, opens bool, now time.Time) string {
 	switch {
 	case a.NotifiedAt != nil || a.Phase == autopilotPhase:
 		return ""
-	// An autopilot rule's would-block and dominant-subject anomalies are its
+	// An autopilot rule's logged and dominant-subject anomalies are its
 	// own input: it opens a case from them and notifies what it concludes.
 	// A critical one is sent at once.
 	case opens && strings.HasPrefix(a.Rule, overlayPrefix) && a.Severity != "critical" && slices.Contains(overlaySignals, a.Signal):
@@ -1174,7 +1200,7 @@ var signalTitles = map[string]string{
 	"rule_upstream_5xx_ratio":    "More 5xx from the upstream on a rule",
 	"rule_auth_failure_ratio":    "More failed token checks on a rule",
 	"rule_block_spike":           "Rule blocking more",
-	"rule_would_block":           "Log-only rule would block",
+	"rule_logged":                "Log-only rule logged requests",
 	"rule_fail_mode":             "Valkey down",
 	"rule_subject_dominates":     "One client gets most of a rule's blocks",
 	"autopilot_enforced":         "An autopilot rule is blocking",

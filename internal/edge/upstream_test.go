@@ -90,7 +90,7 @@ func TestHTTPSUpstreamWithoutACertificateForTheHostLogsTheTLSErrorOnTheAccessLin
 				t.Error("a client-chosen Host produced a warn line")
 			}
 			line := h.logs.lines("access")[0]
-			if msg, _ := line["edge.upstream_error"].(string); line["edge.decision"] != "upstream_tls" || !strings.Contains(msg, "tls") || line["edge.upstream_error_kind"] != "tls" {
+			if msg, _ := line["edge.upstream_error"].(string); line["edge.action"] != "upstream_tls" || !strings.Contains(msg, "tls") || line["edge.upstream_error_kind"] != "tls" {
 				t.Errorf("access line %v, want the TLS error with kind tls", line)
 			}
 		})
@@ -269,8 +269,8 @@ func TestUpstreamFailureKinds(t *testing.T) {
 			edgeError(t, h.do("GET", "/", nil), 502, "bad_gateway")
 			waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
 			line := h.logs.lines("access")[0]
-			if line["edge.decision"] != "upstream_error" {
-				t.Fatalf("decision %v, want upstream_error", line["edge.decision"])
+			if line["edge.action"] != "upstream_error" {
+				t.Fatalf("action %v, want upstream_error", line["edge.action"])
 			}
 			if msg, _ := line["edge.upstream_error"].(string); msg == "" || len(msg) > 512 {
 				t.Errorf("edge.upstream_error = %q, want the error message, at most 512 bytes", msg)
@@ -403,7 +403,7 @@ func TestMalformedUpstreamHeaderIsLoggedWithoutItsValue(t *testing.T) {
 	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
 	line := h.logs.lines("access")[0]
 	msg, _ := line["edge.upstream_error"].(string)
-	if line["edge.decision"] != "upstream_error" || !strings.Contains(msg, "malformed MIME header line") {
+	if line["edge.action"] != "upstream_error" || !strings.Contains(msg, "malformed MIME header line") {
 		t.Fatalf("access line %v, want the malformed header cause", line)
 	}
 	if strings.Contains(h.logs.String(), "secret-session-token") {

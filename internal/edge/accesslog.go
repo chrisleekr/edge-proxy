@@ -25,20 +25,19 @@ import (
 // accessRecord is copied out of the request, so the writer goroutine never
 // touches request memory.
 type accessRecord struct {
-	method, host, path, query, requestID, cohort, decision, rateLimitRule, auth, allowlist string
-	userAgent, country, ja4                                                                string
-	status                                                                                 int
-	client                                                                                 netip.Addr
-	version, asn                                                                           int64
-	hasASN, upstream                                                                       bool
-	signals                                                                                uint16
-	configRules                                                                            []string
-	ipLists                                                                                []string
-	duration                                                                               time.Duration
-	traceID                                                                                trace.TraceID
-	spanID                                                                                 trace.SpanID
-	upErr                                                                                  error
-	cause                                                                                  upstreamCause
+	method, host, path, query, requestID, cohort, action, decidedBy, auth, allowlist string
+	userAgent, country, ja4                                                          string
+	status                                                                           int
+	client                                                                           netip.Addr
+	version, asn                                                                     int64
+	hasASN, upstream                                                                 bool
+	signals                                                                          uint16
+	ipLists                                                                          []string
+	duration                                                                         time.Duration
+	traceID                                                                          trace.TraceID
+	spanID                                                                           trace.SpanID
+	upErr                                                                            error
+	cause                                                                            upstreamCause
 
 	// The fields below are what browsers and CDNs send. Strings are kept as
 	// they are, since the request's strings are immutable; emit trims them.
@@ -55,12 +54,20 @@ type accessRecord struct {
 	// banDropped means the table was full and the trap's ban was not kept.
 	ban        ratelimit.Ban
 	banDropped bool
-	// ver names the rate-limit rules by their index.
-	ver   *version
-	rlIdx [maxRateLimitCalls + maxCountRules]int
-	nRL   int
-	// lifted: an allow cleared a block, so the line is always written.
-	lifted bool
+	// ver names the rules by their index, and the writer reads their
+	// settings from it. matched and hdrRules are copies: the request's
+	// buffers are reused. blockIdx is the access rule whose block won the
+	// merge, including one an allow lifted, or -1.
+	ver      *version
+	matched  []int
+	hdrRules []int
+	blockIdx int
+	rlIdx    [maxRateLimitCalls + maxCountRules]int
+	rlOut    [maxRateLimitCalls + maxCountRules]rlResult
+	nRL      int
+	// logged: a log-only rule matched. lifted: an allow lifted a block.
+	// blocked: an access rule's block refused the request.
+	logged, lifted, blocked bool
 }
 
 // loggedHeader is a request header an access line carries, as attr.
@@ -108,30 +115,45 @@ func newAccessLog(log *slog.Logger, m *metrics, sample float64, size int, cdn []
 	return &accessLog{ch: make(chan accessRecord, size), log: log, m: m, sample: sample, headers: logged(slices.Concat(browserHeaders[:], cdn)...)}
 }
 
-// decisionOf names how the edge answered: allow, or the rejection reason.
-// An access rule's would_block outranks would_limit, so a decision that
-// existed before log-only rate limits keeps its name.
-func decisionOf(st *reqState) string {
-	switch {
-	case st.rejected:
+// actionOf names what the edge did: allow, or why it refused the request.
+// What a log-only rule would have done is in that rule's matched_rules entry.
+func actionOf(st *reqState) string {
+	if st.rejected {
 		return reasonNames[st.reason]
-	case st.wouldBlock:
-		return "would_block"
-	case st.wouldLimit:
-		return "would_limit"
 	}
 	return "allow"
 }
 
-func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, decision string) {
-	// Allowed requests are sampled; rejections, 5xx and a block an allow
-	// lifted (a refusal that did not happen) are always logged.
-	if decision == "allow" && st.set.lifted == "" && st.sw.status < 500 && logDraw() >= a.sample {
+// decidedBy names the rule that blocked or allowed the request, or "" when
+// no rule did, such as an upstream timeout.
+func decidedBy(st *reqState) string {
+	if st.ver == nil {
+		return ""
+	}
+	if !st.rejected {
+		return st.set.allowRule
+	}
+	switch st.reason {
+	case reasonBlocked:
+		return st.ver.c.Config.ConfigRules[st.set.blockRule].ID
+	case reasonBanned:
+		return st.ban.Rule
+	case reasonRateLimited, reasonRateLimitKey, reasonRateLimitUnavailable:
+		return st.rlRule
+	}
+	return ""
+}
+
+func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, action, by string) {
+	// Allowed requests are sampled. Rejections, 5xx, a block an allow lifted
+	// and a log-only rule's match (refusals that did not happen) are always
+	// logged, so a rule can be checked before it is switched to block.
+	if action == "allow" && st.set.lifted == "" && !st.logged && st.sw.status < 500 && logDraw() >= a.sample {
 		return
 	}
 	rec := accessRecord{
-		method: r.Method, requestID: st.requestID, cohort: st.cohort, decision: decision,
-		status: st.sw.status, client: st.client.ip, duration: elapsed, rateLimitRule: st.rlRule, auth: authNames[st.auth],
+		method: r.Method, requestID: st.requestID, cohort: st.cohort, action: action, decidedBy: by,
+		status: st.sw.status, client: st.client.ip, duration: elapsed, auth: authNames[st.auth],
 		allowlist: st.set.allowlist, path: st.fields.path, host: r.Host,
 		// Parsed for key names by the writer, off the request path. Values
 		// can carry tokens and are never logged.
@@ -150,9 +172,6 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 		sc := st.span.SpanContext()
 		rec.traceID, rec.spanID = sc.TraceID(), sc.SpanID()
 	}
-	if decision == "would_limit" {
-		rec.rateLimitRule = st.wlRule
-	}
 	rec.ja3, rec.continent, rec.viewerVersion, rec.ssl, rec.hasSSL = st.client.ja3, st.client.continent, st.client.version, st.client.ssl, st.client.hasSSL
 	if st.fields.localeSet {
 		rec.locale = st.fields.locale
@@ -169,13 +188,16 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 		rec.hdr[i], _ = first(r.Header[h.key])
 	}
 	rec.referer, _ = first(r.Header["Referer"])
-	rec.lifted = st.set.lifted != ""
-	rec.ver, rec.rlIdx, rec.nRL = st.ver, st.rlIdx, st.nRL
+	rec.logged, rec.lifted = st.logged, st.set.lifted != ""
+	rec.blocked = st.rejected && st.reason == reasonBlocked
+	rec.ver, rec.rlIdx, rec.rlOut, rec.nRL = st.ver, st.rlIdx, st.rlOut, st.nRL
 	rec.ban, rec.banDropped = st.ban, st.banDropped
+	rec.blockIdx = -1
 	if st.ver != nil {
 		rec.version = st.ver.c.Config.Version
-		for _, i := range st.matched {
-			rec.configRules = append(rec.configRules, st.ver.c.Config.ConfigRules[i].ID)
+		rec.matched, rec.hdrRules = slices.Clone(st.matched), slices.Clone(st.hdrMatch)
+		if st.set.block != "" || rec.lifted {
+			rec.blockIdx = st.set.blockRule
 		}
 	}
 	select {
@@ -297,7 +319,7 @@ func (a *accessLog) emit(rec accessRecord) {
 		slog.String("url.path", rec.path),
 		slog.Int("http.response.status_code", rec.status),
 		slog.String("request_id", rec.requestID),
-		slog.String("edge.decision", rec.decision),
+		slog.String("edge.action", rec.action),
 		slog.Bool("edge.upstream_answered", rec.upstream),
 		slog.Float64("duration_ms", float64(rec.duration)/float64(time.Millisecond)),
 	}
@@ -314,11 +336,17 @@ func (a *accessLog) emit(rec accessRecord) {
 	if rec.allowlist != "" {
 		attrs = append(attrs, slog.String("edge.allowlist", rec.allowlist))
 	}
-	if rec.rateLimitRule != "" {
-		attrs = append(attrs, slog.String("edge.rate_limit_rule", rec.rateLimitRule))
+	if rec.decidedBy != "" {
+		attrs = append(attrs, slog.String("edge.decided_by", rec.decidedBy))
+	}
+	if m := matchedRules(rec); len(m) > 0 {
+		attrs = append(attrs, slog.Any("edge.matched_rules", m))
+		if l := loggedRules(m); len(l) > 0 {
+			attrs = append(attrs, slog.Any("edge.logged_rules", l))
+		}
 	}
 	// The writer formats the times, off the request path.
-	if rec.decision == "banned" {
+	if rec.action == "banned" {
 		attrs = append(attrs, slog.String("edge.ban.rule", rec.ban.Rule), slog.String("edge.ban.since", time.UnixMilli(rec.ban.Start).UTC().Format(time.RFC3339)),
 			slog.String("edge.ban.host", hostOnly(rec.ban.Host)), slog.String("edge.ban.path", rec.ban.Path))
 	}
@@ -330,7 +358,7 @@ func (a *accessLog) emit(rec accessRecord) {
 	}
 	// A sampled line stands for 1/rate requests; readers scale by it. Lines
 	// that are always written stand for one.
-	if a.sample < 1 && rec.decision == "allow" && rec.status < 500 && !rec.lifted {
+	if a.sample < 1 && rec.action == "allow" && rec.status < 500 && !rec.lifted && !rec.logged {
 		attrs = append(attrs, slog.Float64("edge.sample_rate", a.sample))
 	}
 	if rec.client.IsValid() {
@@ -382,13 +410,6 @@ func (a *accessLog) emit(rec accessRecord) {
 	if rec.authSub != "" {
 		attrs = append(attrs, slog.String("edge.auth_sub", cut(rec.authSub, maxHeaderValue)))
 	}
-	if rec.nRL > 0 {
-		names := make([]string, rec.nRL)
-		for i, idx := range rec.rlIdx[:rec.nRL] {
-			names[i] = rec.ver.rules[idx].ID
-		}
-		attrs = append(attrs, slog.Any("edge.rate_limit_rules", names))
-	}
 	for i, h := range a.headers {
 		if rec.hdr[i] != "" {
 			attrs = append(attrs, slog.String(h.attr, cut(rec.hdr[i], maxHeaderValue)))
@@ -404,7 +425,97 @@ func (a *accessLog) emit(rec accessRecord) {
 		attrs = append(attrs, slog.String("edge.upstream_error", upstreamErrorText(rec.upErr)), slog.String("edge.upstream_error_kind", UpstreamCauses[rec.cause-1]))
 	}
 	if rec.version != 0 {
-		attrs = append(attrs, slog.Int64("edge.config_version", rec.version), slog.String("edge.cohort", rec.cohort), slog.Any("edge.config_rules", rec.configRules))
+		attrs = append(attrs, slog.Int64("edge.config_version", rec.version), slog.String("edge.cohort", rec.cohort))
 	}
 	a.log.LogAttrs(context.Background(), slog.LevelInfo, "access", attrs...)
+}
+
+// ruleEntry is one matched rule on the access line: what it did, and for a
+// rate-limit rule its count.
+type ruleEntry struct {
+	Rule         string `json:"rule"`
+	Type         string `json:"type"`
+	Result       string `json:"result"`
+	Left         *int64 `json:"left,omitempty"`
+	RetryAfter   int    `json:"retry_after,omitempty"`
+	BlockedUntil string `json:"blocked_until,omitempty"`
+}
+
+// matchedRules lists the request's access, rate-limit and header rules in
+// the order the edge ran them. It runs in the writer goroutine.
+func matchedRules(rec accessRecord) []ruleEntry {
+	if rec.ver == nil {
+		return nil
+	}
+	cfg := rec.ver.c.Config
+	out := make([]ruleEntry, 0, len(rec.matched)+rec.nRL+len(rec.hdrRules))
+	for _, i := range rec.matched {
+		s := cfg.ConfigRules[i].Settings
+		e := ruleEntry{Rule: cfg.ConfigRules[i].ID, Type: "access", Result: "matched"}
+		switch {
+		case s.Allow:
+			e.Result = "allowed"
+		case s.Block == nil:
+		case i != rec.blockIdx || rec.lifted:
+			e.Result = "overridden"
+		case rec.blocked:
+			e.Result = "blocked"
+		default:
+			// Its block setting won and was log, or the kill switch made it log.
+			e.Result = "logged"
+		}
+		out = append(out, e)
+	}
+	for k, idx := range rec.rlIdx[:rec.nRL] {
+		out = append(out, rateLimitEntry(&rec.ver.rules[idx], rec.rlOut[k], cfg.KillSwitch.RateLimit))
+	}
+	for _, i := range rec.hdrRules {
+		out = append(out, ruleEntry{Rule: cfg.RequestHeaderRules[i].ID, Type: "headers", Result: "matched"})
+	}
+	return out
+}
+
+// loggedRules names the rules that would have refused the request but only
+// log. Log stores can't match two fields of one list entry, so this search
+// gets its own flat list.
+func loggedRules(m []ruleEntry) []string {
+	var out []string
+	for _, e := range m {
+		if e.Result == "logged" {
+			out = append(out, e.Rule)
+		}
+	}
+	return out
+}
+
+// rateLimitEntry is what one rate-limit rule found for the request.
+func rateLimitEntry(r *ratelimit.Rule, o rlResult, kill bool) ruleEntry {
+	e := ruleEntry{Rule: r.ID, Type: "rate_limit"}
+	switch o.state {
+	case rlError:
+		e.Result = "error"
+		return e
+	case rlCountPending:
+		e.Result = "not_counted"
+		return e
+	}
+	switch {
+	case o.Allowed:
+		e.Result = "under"
+	case r.Shadow || kill:
+		e.Result = "logged"
+	case o.state == rlCounted:
+		// The response was already sent; the penalty blocks the next requests.
+		e.Result = "over"
+	default:
+		e.Result = "blocked"
+	}
+	e.Left = &o.Remaining
+	if !o.Allowed && e.Result != "over" {
+		e.RetryAfter = seconds(o.Retry)
+	}
+	if o.Blocked > 0 {
+		e.BlockedUntil = time.UnixMilli(o.Blocked).UTC().Format(time.RFC3339)
+	}
+	return e
 }

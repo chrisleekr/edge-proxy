@@ -294,8 +294,8 @@ func TestMalformedChunkedBody(t *testing.T) {
 	resp, _, _ := raw(t, h.front.Listener.Addr().String(), "POST / HTTP/1.1\r\n"+viewer+"Transfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n")
 	edgeError(t, resp, 400, "bad_request")
 	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
-	if got := h.logs.lines("access")[0]["edge.decision"]; got != "body_invalid" {
-		t.Errorf("edge.decision = %v, want body_invalid", got)
+	if got := h.logs.lines("access")[0]["edge.action"]; got != "body_invalid" {
+		t.Errorf("edge.action = %v, want body_invalid", got)
 	}
 	if got := upstreamErrors(t, h.srv.store.load().active.stats.counts()); len(got) != 0 {
 		t.Errorf("upstream_errors %v, want none", got)
@@ -317,8 +317,8 @@ func TestClientGoneMidUpload(t *testing.T) {
 	}
 	conn.Close()
 	waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
-	if got := h.logs.lines("access")[0]["edge.decision"]; got != "client_gone" {
-		t.Errorf("edge.decision = %v, want client_gone", got)
+	if got := h.logs.lines("access")[0]["edge.action"]; got != "client_gone" {
+		t.Errorf("edge.action = %v, want client_gone", got)
 	}
 	if got := h.srv.m.rejected[reasonBodyInvalid].Load(); got != 0 {
 		t.Errorf("body_invalid counted %d times, want 0", got)

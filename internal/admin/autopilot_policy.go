@@ -373,7 +373,7 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 	if err != nil {
 		return "", nil, 0, err
 	}
-	var fleet, evaluated, would, heavy, recent uint64
+	var fleet, evaluated, logged, heavy, recent uint64
 	scope := sharedScope(ar.Rule)
 	// Subjects are checked only when the key starts with ip, which propose
 	// puts first: the display's first part is then the address the edge
@@ -387,12 +387,12 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 	recentFrom := now.Add(-observe)
 	for _, r := range rows {
 		fleet += r.Requests
-		top := map[string]uint64{} // would-limit estimates per subject, summed across replicas
+		top := map[string]uint64{} // logged estimates per subject, summed across replicas
 		for _, t := range r.TopLimited {
 			if t.Rule != ar.ID {
 				continue
 			}
-			top[t.Key] += t.WouldLimit - min(t.Err, t.WouldLimit) // at least this many
+			top[t.Key] += t.Logged - min(t.Err, t.Logged) // at least this many
 			if p, ok := subjectPrefix(t.Display); checkIP && ok && !seen[p] {
 				seen[p] = true
 				subjects = append(subjects, p)
@@ -403,28 +403,28 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 				continue
 			}
 			evaluated += rc.Evaluated
-			would += rc.WouldLimit
+			logged += rc.Logged
 			if !r.Minute.Before(recentFrom.Truncate(time.Minute)) {
-				recent += rc.WouldLimit
+				recent += rc.Logged
 			}
 			if scope == nil {
-				heavy += heavyIn(rc.WouldLimit, top)
+				heavy += heavyIn(rc.Logged, top)
 			}
 		}
 	}
 	// The budget is for collateral: the attackers, each a heavy share of a
 	// minute, are left out over the window, as the guard leaves them out.
-	collateral := withoutHeavy(would, heavy)
+	collateral := withoutHeavy(logged, heavy)
 	var bound sharedBound
 	if scope != nil {
 		// A shared bucket has no heavy subject to leave out, and most of
 		// its count is the attack: the signal's normal traffic bounds the
 		// collateral instead.
 		from := ar.LiveSince.Truncate(time.Minute)
-		if bound, err = s.newSharedBound(ctx, q, scope, ar.ID, rows, from, now, func(rc edge.RuleCounts) uint64 { return rc.WouldLimit }); err != nil {
+		if bound, err = s.newSharedBound(ctx, q, scope, ar.ID, rows, from, now, func(rc edge.RuleCounts) uint64 { return rc.Logged }); err != nil {
 			return "", nil, 0, err
 		}
-		collateral = bound.collateral(would)
+		collateral = bound.collateral(logged)
 	}
 	share := ratio(collateral, fleet)
 	// Stored for the per-rule guard, which compares limited requests with
@@ -432,10 +432,10 @@ func (s *Server) enforceCheck(ctx context.Context, q querier, set AutopilotSetti
 	// rule's guard compares raw counts.
 	shadow := ratio(collateral, evaluated)
 	if scope != nil {
-		shadow = ratio(would, evaluated)
+		shadow = ratio(logged, evaluated)
 	}
-	numbers := map[string]any{"fleet_requests": fleet, "evaluated": evaluated, "would_limit": would, "collateral_would_limit": collateral, "recent_would_limit": recent,
-		"share": share, "shadow_ratio": shadow, "raw_shadow_ratio": ratio(would, evaluated), "max_block_share": maxShare}
+	numbers := map[string]any{"fleet_requests": fleet, "evaluated": evaluated, "logged": logged, "collateral_logged": collateral, "recent_logged": recent,
+		"share": share, "shadow_ratio": shadow, "raw_shadow_ratio": ratio(logged, evaluated), "max_block_share": maxShare}
 	if scope != nil {
 		bound.add(numbers)
 	}

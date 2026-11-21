@@ -47,14 +47,14 @@ const tools = [
 ];
 const contract = { prompt, prompt_sha256: sha(prompt), tools, tools_sha256: sha(JSON.stringify(tools)), output_schema: { type: 'object' } };
 
-const brief = { kind: 'anomaly', signal: 'rule_would_block', rule: 'ap-login-401-17', summary: { untrusted: 'login-401 would block 3 addresses' } };
+const brief = { kind: 'anomaly', signal: 'rule_logged', rule: 'ap-login-401-17', summary: { untrusted: 'login-401 logged 3 addresses' } };
 const caseAnswer = { case_id: 7, kind: 'anomaly', brief };
 const stats = {
   rule: 'ap-login-401-17',
   minutes: 60,
   step_minutes: 1,
-  series: [{ minute: '2026-10-29T01:00:00Z', evaluated: 900, would_limit: 41 }],
-  top_subjects: { untrusted: [{ subject: '203.0.113.7', would_limit: 40 }] },
+  series: [{ minute: '2026-10-29T01:00:00Z', evaluated: 900, logged: 41 }],
+  top_subjects: { untrusted: [{ subject: '203.0.113.7', logged: 40 }] },
 };
 const enforce = { action: 'enforce', name: 'login-401-block', cites: 'ap-login-401-17', rationale: 'Forty failed logins a minute from one address' };
 const accepted = { proposal_id: 31, accepted: true, rule_id: 'ap-login-401-block-31', reasons: [], checks: [] };

@@ -96,7 +96,7 @@ export function claimWords(s: Scope, c: Claim) {
     upstream_5xx: '5xx answers from the upstream',
     rule_evaluated: `requests ${where} checked`,
     rule_limited: `requests ${where} blocked with 429`,
-    rule_would_limit: `requests ${where} found over its limit, log only`,
+    rule_logged: `requests ${where} logged instead of limited`,
     rule_subjects: `clients ${where} found over its limit`,
     subject_limited: `requests from ${c.subject} ${where} found over its limit`,
     route_requests: `requests to ${where}`,

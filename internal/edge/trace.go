@@ -36,7 +36,7 @@ func (e *Edge) startSpan(st *reqState, r *http.Request) {
 }
 
 // endSpan records the request's outcome with the access log's field names.
-func endSpan(st *reqState, r *http.Request, decision string) {
+func endSpan(st *reqState, r *http.Request, action, by string) {
 	if st.span == nil {
 		return
 	}
@@ -55,7 +55,7 @@ func endSpan(st *reqState, r *http.Request, decision string) {
 			attribute.String("url.path", st.fields.path),
 			attribute.Int("http.response.status_code", st.sw.status),
 			attribute.String("request_id", st.requestID),
-			attribute.String("edge.decision", decision),
+			attribute.String("edge.action", action),
 		)
 		if st.client.ip.IsValid() {
 			attrs = append(attrs, attribute.String("client.address", st.client.ip.String()))
@@ -63,8 +63,8 @@ func endSpan(st *reqState, r *http.Request, decision string) {
 		if st.ver != nil {
 			attrs = append(attrs, attribute.Int64("edge.config_version", st.ver.c.Config.Version), attribute.String("edge.cohort", st.cohort))
 		}
-		if st.rlRule != "" {
-			attrs = append(attrs, attribute.String("edge.rate_limit_rule", st.rlRule))
+		if by != "" {
+			attrs = append(attrs, attribute.String("edge.decided_by", by))
 		}
 		if a := authNames[st.auth]; a != "" {
 			attrs = append(attrs, attribute.String("edge.auth", a))

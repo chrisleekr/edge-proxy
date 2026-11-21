@@ -30,7 +30,7 @@ func allowlistConfig(version int64, entries ...string) *snapshot.Config {
 
 // ruleReport is what the edge reports for config rule id since the last
 // report: how often it blocked and would have blocked.
-func ruleReport(t *testing.T, h *harness, id string) (blocked, wouldBlock float64) {
+func ruleReport(t *testing.T, h *harness, id string) (blocked, logged float64) {
 	t.Helper()
 	b, err := json.Marshal(h.srv.poller.reg.deltas()[0])
 	if err != nil {
@@ -45,10 +45,10 @@ func ruleReport(t *testing.T, h *harness, id string) (blocked, wouldBlock float6
 	for _, r := range rep.Rules {
 		if r["id"] == id {
 			blocked, _ = r["blocked"].(float64)
-			wouldBlock, _ = r["would_block"].(float64)
+			logged, _ = r["logged"].(float64)
 		}
 	}
-	return blocked, wouldBlock
+	return blocked, logged
 }
 
 // valkeyKeys lists the Valkey keys that contain part.
@@ -68,22 +68,22 @@ func valkeyKeys(t *testing.T, part string) []string {
 
 // A client on the allowlist is not blocked by a config rule, neither one
 // that blocks nor one that only logs, and is not counted as blocked or as
-// would-block. Everyone else is judged as before.
+// logged. Everyone else is judged as before.
 func TestTrustedClientSkipsConfigBlocks(t *testing.T) {
 	cases := []struct {
-		name     string
-		mode     string
-		client   string
-		status   int
-		decision string
-		blocked  float64
+		name    string
+		mode    string
+		client  string
+		status  int
+		action  string
+		blocked float64
 		// The rule's own report: requests it blocked and would have blocked.
-		ruleBlocked, ruleWouldBlock float64
+		ruleBlocked, ruleLogged float64
 	}{
 		{"trusted client on a block rule", "block", "198.51.100.7:1", 200, "allow", 0, 0, 0},
 		{"other client on a block rule", "block", otherClient, 403, "blocked", 1, 1, 0},
 		{"trusted client on a log rule", "log", "198.51.100.7:1", 200, "allow", 0, 0, 0},
-		{"other client on a log rule", "log", otherClient, 200, "would_block", 0, 0, 1},
+		{"other client on a log rule", "log", otherClient, 200, "allow", 0, 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,14 +97,14 @@ func TestTrustedClientSkipsConfigBlocks(t *testing.T) {
 				t.Fatalf("status %d, want %d", resp.StatusCode, tc.status)
 			}
 			waitFor(t, func() bool { return len(h.logs.lines("access")) == 1 })
-			if got := h.logs.lines("access")[0]["edge.decision"]; got != tc.decision {
-				t.Fatalf("decision %v, want %s", got, tc.decision)
+			if got := h.logs.lines("access")[0]["edge.action"]; got != tc.action {
+				t.Fatalf("action %v, want %s", got, tc.action)
 			}
 			if got := h.metrics()[`edge_rejected_total{reason="blocked"}`]; got != tc.blocked {
 				t.Fatalf("blocked count %v, want %v", got, tc.blocked)
 			}
-			if b, w := ruleReport(t, h, "tools"); b != tc.ruleBlocked || w != tc.ruleWouldBlock {
-				t.Fatalf("rule report blocked %v would_block %v, want %v and %v", b, w, tc.ruleBlocked, tc.ruleWouldBlock)
+			if b, w := ruleReport(t, h, "tools"); b != tc.ruleBlocked || w != tc.ruleLogged {
+				t.Fatalf("rule report blocked %v logged %v, want %v and %v", b, w, tc.ruleBlocked, tc.ruleLogged)
 			}
 		})
 	}
@@ -392,10 +392,10 @@ func TestTrustedClientIsLoggedAndCounted(t *testing.T) {
 		}
 		waitFor(t, func() bool { return len(h.logs.lines("access")) == 3 })
 		lines := h.logs.lines("access")
-		want := []struct{ decision, allowlist any }{{"allow", trustedRange}, {"backstop", trustedRange}, {"allow", nil}}
+		want := []struct{ action, allowlist any }{{"allow", trustedRange}, {"backstop", trustedRange}, {"allow", nil}}
 		for i, w := range want {
-			if lines[i]["edge.decision"] != w.decision || lines[i]["edge.allowlist"] != w.allowlist {
-				t.Fatalf("line %d: decision %v allowlist %v, want %v %v", i, lines[i]["edge.decision"], lines[i]["edge.allowlist"], w.decision, w.allowlist)
+			if lines[i]["edge.action"] != w.action || lines[i]["edge.allowlist"] != w.allowlist {
+				t.Fatalf("line %d: action %v allowlist %v, want %v %v", i, lines[i]["edge.action"], lines[i]["edge.allowlist"], w.action, w.allowlist)
 			}
 		}
 		m := h.metrics()
@@ -413,7 +413,7 @@ func TestTrustedClientIsLoggedAndCounted(t *testing.T) {
 		h.statuses(1, "GET", "/", "User-Agent", "curl/8.5.0", "CloudFront-Viewer-Address", otherClient)
 		waitFor(t, func() bool { return len(h.logs.lines("access")) >= 1 })
 		lines := h.logs.lines("access")
-		if _, ok := lines[0]["edge.allowlist"]; len(lines) != 1 || ok || lines[0]["edge.decision"] != "blocked" {
+		if _, ok := lines[0]["edge.allowlist"]; len(lines) != 1 || ok || lines[0]["edge.action"] != "blocked" {
 			t.Fatalf("access lines = %v", lines)
 		}
 		if got := h.metrics()["edge_allowlisted_total"]; got != 1 {

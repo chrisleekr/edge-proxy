@@ -1,7 +1,7 @@
 // Six attacks against the autopilot, with the scripted agent (tools agent)
 // answering its cases from loadtest/tools/autopilot-plan.json. For each of
 // the first five a sensor watches its route; the attack makes the sensor
-// would-block, which opens a case; the agent enforces a block rule citing the
+// log, which opens a case; the agent enforces a block rule citing the
 // sensor; the rule blocks the attack and not the background, and expires once
 // the attack stops. The sixth has no sensor and no rule: a fleet on one browser
 // fingerprint, which opens a case through the signal_surge notification, and

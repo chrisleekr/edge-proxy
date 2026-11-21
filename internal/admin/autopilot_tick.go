@@ -27,13 +27,13 @@ var (
 	reviewEvery = 24 * time.Hour
 )
 
-// anomalySignals open a case when they fire. A sensor's would-block or
+// anomalySignals open a case when they fire. A sensor's logged requests or
 // dominant subject is the autopilot's own early warning; on a person's
 // rule it is already handled by that rule.
 var anomalySignals = []string{"traffic_surge", "auth_failure_ratio", "rule_auth_failure_ratio", "rule_match_surge", "signal_surge"}
 
 // overlaySignals are the signals on an autopilot rule that open a case.
-var overlaySignals = []string{"rule_would_block", "rule_subject_dominates"}
+var overlaySignals = []string{"rule_logged", "rule_subject_dominates"}
 
 // runAutopilot is the leader's autopilot job: it releases lapsed leases,
 // cancels stale cases, opens new ones while a runner is connected, and

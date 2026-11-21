@@ -252,7 +252,7 @@ func (s *Server) cohortWhere(ctx context.Context, q querier, cond string, args .
 				c.rules[ro.ID] = sum
 			}
 			c.configRules[ro.ID] = true
-			addRule(sum, edge.RuleCounts{Evaluated: r.Requests, Limited: ro.Blocked, WouldLimit: ro.WouldBlock})
+			addRule(sum, edge.RuleCounts{Evaluated: r.Requests, Limited: ro.Blocked, Logged: ro.Logged})
 		}
 	}
 	// Heavy subjects and their allowance come only out of the per-client
@@ -386,7 +386,7 @@ func evaluate(g GuardSettings, sub, base *cohort, changed map[string]bool, adopt
 			// estimate taken while the rule was only logging.
 			shadow := 0.0
 			if b != nil {
-				shadow = ratio(b.WouldLimit, b.Evaluated)
+				shadow = ratio(b.Logged, b.Evaluated)
 				// A config rule is judged by the larger of what it logged and
 				// what it blocked in the active version: blocking that share
 				// is the intent, even above max_ratio, whether the rule logged

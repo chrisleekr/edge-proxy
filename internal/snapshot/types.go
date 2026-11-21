@@ -181,7 +181,7 @@ type Settings struct {
 	BodyLimit        *int64            `json:"body_limit,omitempty"`
 	UpstreamTimeout  *Duration         `json:"upstream_timeout,omitempty"`
 	RateLimitHeaders *bool             `json:"ratelimit_headers,omitempty"`
-	// Block is block or log: answer 403 forbidden, or only log would_block.
+	// Block is block or log: answer 403 forbidden, or only log it.
 	Block *string `json:"block,omitempty"`
 	// Ban refuses every later request from the client IP on this edge for
 	// this long. Only with block "block".

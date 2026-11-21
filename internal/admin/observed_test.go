@@ -40,12 +40,34 @@ func (c *client) post(lines ...string) *http.Response {
 // access is one edge access line, as the edge writes it, with overrides.
 func access(method, host, path string, extra ...any) string {
 	m := map[string]any{"msg": "access", "level": "INFO", "http.request.method": method, "server.address": host, "url.path": path,
-		"http.response.status_code": 200, "edge.decision": "allow", "duration_ms": 3.2, "edge.config_version": 1, "edge.config_rules": []string{}}
+		"http.response.status_code": 200, "edge.action": "allow", "duration_ms": 3.2, "edge.config_version": 1}
 	for i := 0; i+1 < len(extra); i += 2 {
-		m[extra[i].(string)] = extra[i+1]
+		if extra[i+1] == nil { // a nil value removes the field, to build an older edge's line
+			delete(m, extra[i].(string))
+		} else {
+			m[extra[i].(string)] = extra[i+1]
+		}
 	}
 	b, _ := json.Marshal(m)
 	return string(b)
+}
+
+// accessRules are the matched_rules of access rules that matched.
+func accessRules(ids ...string) []map[string]string { return accessRulesResult("matched", ids...) }
+
+// accessRulesResult is accessRules with the result the edge logged for each.
+func accessRulesResult(result string, ids ...string) []map[string]string {
+	out := []map[string]string{}
+	for _, id := range ids {
+		out = append(out, map[string]string{"rule": id, "type": "access", "result": result})
+	}
+	return out
+}
+
+// oldAccess is the line an edge that still sends edge.decision logs: it and
+// its rule fields in place of edge.action and the rest.
+func oldAccess(method, host, path string, extra ...any) string {
+	return access(method, host, path, append([]any{"edge.action", nil}, extra...)...)
 }
 
 type routeList struct {
@@ -93,21 +115,21 @@ func TestRouteIngestNeedsTheShipperToken(t *testing.T) {
 }
 
 // Access lines are grouped by host, method and path template, with their
-// statuses, decisions, rules and query shapes. Lines that aren't about a
+// statuses, actions, rules and query shapes. Lines that aren't about a
 // route are skipped and counted.
 func TestRoutesAreGroupedFromAccessLines(t *testing.T) {
 	h, pub := published(t)
 	h.putStats(1, 3, 2, 0, 0, []int64{2}, "[]", "[]") // the edges reported 6 requests
 	resp := h.shipper().post(
 		access("GET", "api.example.com", "/users/42", "edge.query_keys", []string{"page", "sort"}),
-		access("GET", "api.example.com", "/users/7", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login", "duration_ms", 0.4),
+		access("GET", "api.example.com", "/users/7", "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login", "duration_ms", 0.4),
 		access("GET", "api.example.com", "/users/550e8400-e29b-41d4-a716-446655440000/orders"),
-		access("GET", "api.example.com", "/users/550e8400-e29b-41d4-a716-446655440000/orders", "http.response.status_code", 503, "edge.decision", "upstream_error", "duration_ms", 400),
-		access("POST", "api.example.com", "/admin/login", "edge.config_rules", []string{"admin-route"}),
+		access("GET", "api.example.com", "/users/550e8400-e29b-41d4-a716-446655440000/orders", "http.response.status_code", 503, "edge.action", "upstream_error", "duration_ms", 400),
+		access("POST", "api.example.com", "/admin/login", "edge.matched_rules", accessRules("admin-route")),
 		"",
 		`not json`,
 		`{"msg":"snapshot loaded","level":"INFO"}`,
-		access("GET", "evil.example", "/%2e%2e/etc/passwd", "edge.decision", "path", "http.response.status_code", 400),
+		access("GET", "evil.example", "/%2e%2e/etc/passwd", "edge.action", "path", "http.response.status_code", 400),
 		access("GET", "api.example.com", "no-slash"),
 		access("GET", "api.example.com\u0000", "/"),
 	)
@@ -120,7 +142,7 @@ func TestRoutesAreGroupedFromAccessLines(t *testing.T) {
 	}
 	users := find(l, "GET", "api.example.com", "/users/{id}")
 	if users == nil || users.Requests != 2 || users.Status[2] != 1 || users.Status[4] != 1 ||
-		users.Decisions["allow"] != 1 || users.Decisions["rate_limited"] != 1 || users.RateLimitRules["login"] != 1 ||
+		users.Actions["allow"] != 1 || users.Actions["rate_limited"] != 1 || users.RateLimitRules["login"] != 1 ||
 		users.QueryShapes["page&sort"] != 1 || users.QueryShapes[""] != 1 || users.P50MS != 1 || users.P95MS != 5 {
 		t.Fatalf("users route = %+v", users)
 	}
@@ -139,14 +161,123 @@ func TestRoutesAreGroupedFromAccessLines(t *testing.T) {
 	h.wantMetrics(`admin_log_lines_total{result="accepted"} 6`, `admin_log_lines_total{result="rejected"} 5`)
 }
 
-// A would_limit line is a request that went through: its decision is counted,
-// but the log-only rule it names is not shown as limiting the route.
-func TestWouldLimitLineIsNotCountedAsLimited(t *testing.T) {
+// The same request logged by an older edge and by a current one gives the
+// same route counts: a would_limit or would_block line is a request that
+// went through, counted as allow and never as limiting the route, a
+// would_limit line puts its log-only rule in logged_rules, and a
+// rate_limited line names its rule. An older edge's would_block line names
+// no rule, so it has no current-edge twin.
+func TestOlderAndCurrentLinesGiveTheSameRouteCounts(t *testing.T) {
+	cases := []struct {
+		name    string
+		old     string
+		current string
+		actions map[string]int64
+		logged  map[string]int64
+		limited map[string]int64
+		config  map[string]int64
+	}{
+		{"log-only rate limit",
+			oldAccess("GET", "api.example.com", "/users/42", "edge.decision", "would_limit", "edge.rate_limit_rule", "login"),
+			access("GET", "api.example.com", "/users/42", "edge.logged_rules", []string{"login"}),
+			map[string]int64{"allow": 1}, map[string]int64{"login": 1}, map[string]int64{}, map[string]int64{}},
+		{"log-only access rule",
+			"",
+			access("GET", "api.example.com", "/users/42", "edge.logged_rules", []string{"tools"}, "edge.matched_rules", accessRulesResult("logged", "tools")),
+			map[string]int64{"allow": 1}, map[string]int64{"tools": 1}, map[string]int64{}, map[string]int64{"tools": 1}},
+		{"older edge's log-only access rule is allowed with no logged rule",
+			oldAccess("GET", "api.example.com", "/users/42", "edge.decision", "would_block", "edge.config_rules", []string{"tools"}),
+			"",
+			map[string]int64{"allow": 1}, map[string]int64{}, map[string]int64{}, map[string]int64{"tools": 1}},
+		{"enforced rate limit",
+			oldAccess("GET", "api.example.com", "/users/42", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login"),
+			access("GET", "api.example.com", "/users/42", "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login"),
+			map[string]int64{"rate_limited": 1}, map[string]int64{}, map[string]int64{"login": 1}, map[string]int64{}},
+		// Route rate_limit_rules counts only the rule that answered 429.
+		{"rate limit store unavailable",
+			"",
+			access("GET", "api.example.com", "/users/42", "edge.action", "rate_limit_unavailable", "edge.decided_by", "login"),
+			map[string]int64{"rate_limit_unavailable": 1}, map[string]int64{}, map[string]int64{}, map[string]int64{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := map[string]string{"older edge": tc.old, "current edge": tc.current}
+			if tc.old == "" {
+				delete(lines, "older edge")
+			}
+			if tc.current == "" {
+				delete(lines, "current edge")
+			}
+			for name, line := range lines {
+				h, pub := published(t)
+				status(t, h.shipper().post(line), http.StatusAccepted)
+				users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
+				if users == nil || !maps.Equal(users.Actions, tc.actions) || !maps.Equal(users.LoggedRules, tc.logged) || !maps.Equal(users.RateLimitRules, tc.limited) || !maps.Equal(users.ConfigRules, tc.config) {
+					t.Fatalf("%s: %+v; want actions %v, logged rules %v, rate-limit rules %v, access rules %v", name, users, tc.actions, tc.logged, tc.limited, tc.config)
+				}
+			}
+		})
+	}
+}
+
+// Only access rules count into a route's config_rules: the matched_rules
+// of other types, and entries a shipper sent as empty objects, are not rules
+// the route was handled by.
+func TestRouteConfigRulesCountOnlyAccessMatches(t *testing.T) {
 	h, pub := published(t)
-	status(t, h.shipper().post(access("GET", "api.example.com", "/users/42", "edge.decision", "would_limit", "edge.rate_limit_rule", "login")), http.StatusAccepted)
+	mixed := []map[string]string{
+		{"rule": "tools", "type": "access", "result": "matched"},
+		{"rule": "login", "type": "rate_limit", "result": "under"},
+		{"rule": "tag", "type": "headers", "result": "matched"},
+		{}, {},
+		{"rule": "orders", "type": "access", "result": "matched"},
+	}
+	status(t, h.shipper().post(
+		access("GET", "api.example.com", "/users/1", "edge.matched_rules", mixed),
+		access("GET", "api.example.com", "/users/2", "edge.matched_rules", mixed[:2]),
+	), http.StatusAccepted)
 	users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
-	if users == nil || users.Decisions["would_limit"] != 1 || len(users.RateLimitRules) != 0 {
-		t.Fatalf("users route = %+v", users)
+	if users == nil || !maps.Equal(users.ConfigRules, map[string]int64{"tools": 2, "orders": 1}) {
+		t.Fatalf("users route = %+v, want access rules tools 2 and orders 1 only", users)
+	}
+}
+
+// A route no log-only rule logged still has actions and logged_rules as
+// empty objects, never null: the UI reads logged_rules[rule] unchecked.
+func TestRouteStatsAreObjectsNotNull(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/users/42")), http.StatusAccepted)
+	users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
+	raw := func(path string) map[string]json.RawMessage {
+		return decode[map[string]json.RawMessage](t, pub.do("GET", path, nil))
+	}
+	list := decode[struct {
+		Routes []map[string]json.RawMessage `json:"routes"`
+	}](t, pub.do("GET", "/api/observed-routes", nil))
+	for name, m := range map[string]map[string]json.RawMessage{"list": list.Routes[0], "detail": raw(fmt.Sprint("/api/observed-routes/", users.ID))} {
+		if string(m["logged_rules"]) != "{}" || string(m["actions"]) != `{"allow":1}` {
+			t.Errorf("%s: logged_rules %s, actions %s", name, m["logged_rules"], m["actions"])
+		}
+	}
+	// A route seen before the range and quiet within it has the same shape.
+	quiet := raw(fmt.Sprint("/api/observed-routes/", users.ID, "?from=", h.now().Add(-72*time.Hour).UTC().Format(time.RFC3339), "&to=", h.now().Add(-48*time.Hour).UTC().Format(time.RFC3339)))
+	if string(quiet["logged_rules"]) != "{}" || string(quiet["actions"]) != "{}" {
+		t.Errorf("quiet route: logged_rules %s, actions %s", quiet["logged_rules"], quiet["actions"])
+	}
+}
+
+// A rule ID with NUL in it, in any field a line names rules in, is refused
+// before Postgres rejects the whole flush.
+func TestLineWithNULInARuleIsRefused(t *testing.T) {
+	h, _ := published(t)
+	resp := h.shipper().post(
+		access("GET", "api.example.com", "/a", "edge.logged_rules", []string{"x\u0000"}),
+		access("GET", "api.example.com", "/b", "edge.decided_by", "x\u0000"),
+		access("GET", "api.example.com", "/c", "edge.matched_rules", accessRules("x\u0000")),
+		access("GET", "api.example.com", "/d"),
+	)
+	if got := decode[map[string]int](t, resp); got["accepted"] != 1 || got["skipped"] != 3 {
+		t.Fatalf("ingest = %v", got)
 	}
 }
 
@@ -160,7 +291,7 @@ func TestSampledLinesCountForTheirShare(t *testing.T) {
 	resp := h.shipper().post(
 		access("GET", "api.example.com", "/users/1", "edge.sample_rate", 0.25),
 		access("GET", "api.example.com", "/users/2", "edge.sample_rate", 0.25),
-		access("GET", "api.example.com", "/users/3", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login"),
+		access("GET", "api.example.com", "/users/3", "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login"),
 		access("GET", "api.example.com", "/users/4", "edge.sample_rate", 2.0),
 	)
 	if got := decode[map[string]int](t, resp); got["accepted"] != 3 || got["skipped"] != 1 {
@@ -169,7 +300,7 @@ func TestSampledLinesCountForTheirShare(t *testing.T) {
 	l := h.routes(pub)
 	users := find(l, "GET", "api.example.com", "/users/{id}")
 	if users == nil || users.Requests != 9 || users.Estimated != 8 || users.Status[2] != 8 || users.Status[4] != 1 ||
-		users.Decisions["allow"] != 8 || users.Decisions["rate_limited"] != 1 || users.QueryShapes[""] != 9 || l.Logged != 9 || l.Estimated != 8 {
+		users.Actions["allow"] != 8 || users.Actions["rate_limited"] != 1 || users.QueryShapes[""] != 9 || l.Logged != 9 || l.Estimated != 8 {
 		t.Fatalf("users route = %+v, list = %+v", users, l)
 	}
 
@@ -193,7 +324,7 @@ func TestRouteDetailCountsStatusCodes(t *testing.T) {
 	h, pub := published(t)
 	status(t, h.shipper().post(
 		access("GET", "api.example.com", "/users/1", "edge.sample_rate", 0.5),
-		access("GET", "api.example.com", "/users/2", "http.response.status_code", 502, "edge.decision", "upstream_error"),
+		access("GET", "api.example.com", "/users/2", "http.response.status_code", 502, "edge.action", "upstream_error"),
 		access("GET", "api.example.com", "/users/3", "http.response.status_code", 503),
 		access("GET", "api.example.com", "/users/4", "http.response.status_code", 503),
 	), http.StatusAccepted)
@@ -211,7 +342,7 @@ func TestRouteDetailCountsStatusCodes(t *testing.T) {
 func TestRouteDetailCountsUpstreamErrorKinds(t *testing.T) {
 	h, pub := published(t)
 	failed := func(path, kind string) string {
-		return access("GET", "api.example.com", path, "http.response.status_code", 502, "edge.decision", "upstream_error",
+		return access("GET", "api.example.com", path, "http.response.status_code", 502, "edge.action", "upstream_error",
 			"edge.upstream_answered", false, "edge.upstream_error", "dial tcp: connect: failure", "edge.upstream_error_kind", kind)
 	}
 	status(t, h.shipper().post(
@@ -292,7 +423,7 @@ func TestErrorOnlyRoutesAreKeptApart(t *testing.T) {
 	maxErrorRoutes = 1
 	t.Cleanup(func() { maxErrorRoutes = 500 })
 	sh := h.shipper()
-	limited := access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login")
+	limited := access("POST", "api.example.com", "/login", "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login")
 	status(t, sh.post(limited, limited, access("GET", "api.example.com", "/wp-login.php", "http.response.status_code", 404)), http.StatusAccepted)
 	l := h.routes(pub)
 	login := find(l, "POST", "api.example.com", "/login")
@@ -411,7 +542,7 @@ func TestPatternsGroupSiblingRoutes(t *testing.T) {
 		lines = append(lines, access("GET", "api.example.com", fmt.Sprintf("/blog/post-%c", 'a'+i)))
 	}
 	lines = append(lines, access("GET", "api.example.com", "/blog/post-a", "http.response.status_code", 404),
-		access("GET", "api.example.com", "/blog/post-b", "http.response.status_code", 502, "edge.decision", "upstream_error",
+		access("GET", "api.example.com", "/blog/post-b", "http.response.status_code", 502, "edge.action", "upstream_error",
 			"edge.upstream_answered", false, "edge.upstream_error", "dial tcp: connect: failure", "edge.upstream_error_kind", "refused"))
 	status(t, sh.post(lines...), http.StatusAccepted)
 	l := h.routes(pub)
@@ -782,4 +913,102 @@ func FuzzTemplatePath(f *testing.F) {
 			t.Fatalf("templatePath(%q) = %q", path, got)
 		}
 	})
+}
+
+// A route list for a span leaves out hours after its end and reports the
+// whole hours it read.
+func TestObservedRoutesForASpanExcludeLaterHours(t *testing.T) {
+	h, pub := published(t)
+	hour := h.now().UTC().Truncate(time.Hour).Add(-5 * time.Hour)
+	at := func(d time.Duration) string { return hour.Add(d).Format(time.RFC3339Nano) }
+	status(t, h.shipper().post(
+		access("GET", "api.example.com", "/inside", "time", at(10*time.Minute)),
+		access("GET", "api.example.com", "/later", "time", at(70*time.Minute)),
+	), http.StatusAccepted)
+	h.routes(pub)
+	// Reported stats count only the minutes inside the window, not the hour after.
+	ago := func(d time.Duration) int {
+		return int(h.now().UTC().Truncate(time.Minute).Sub(hour.Add(d)) / time.Minute)
+	}
+	h.statsMinute(1, ago(10*time.Minute), 7, "[]", "[]")
+	h.statsMinute(1, ago(70*time.Minute), 100, "[]", "[]")
+	got := decode[struct {
+		Since    time.Time    `json:"since"`
+		Until    time.Time    `json:"until"`
+		Routes   []routeStats `json:"routes"`
+		Reported int64        `json:"reported_requests"`
+	}](t, pub.do("GET", "/api/observed-routes?from="+rfc(hour.Add(20*time.Minute))+"&to="+rfc(hour.Add(30*time.Minute)), nil))
+	if len(got.Routes) != 1 || got.Routes[0].Template != "/inside" {
+		t.Fatalf("routes = %+v, want only /inside", got.Routes)
+	}
+	if !got.Since.Equal(hour) || !got.Until.Equal(hour.Add(time.Hour)) {
+		t.Fatalf("since, until = %v, %v, want the whole hour", got.Since, got.Until)
+	}
+	if got.Reported != 7 {
+		t.Fatalf("reported = %d, want only the 7 inside the window", got.Reported)
+	}
+}
+
+// A span ending hours after now still reports the current hour as its end.
+func TestObservedRoutesForASpanEndingAfterNowEndAtTheCurrentHour(t *testing.T) {
+	h, pub := published(t)
+	got := decode[struct {
+		Until time.Time `json:"until"`
+	}](t, pub.do("GET", "/api/observed-routes?from="+rfc(h.now().Add(-time.Hour))+"&to="+rfc(h.now().Add(5*time.Hour)), nil))
+	if want := h.now().UTC().Truncate(time.Hour).Add(time.Hour); !got.Until.Equal(want) {
+		t.Fatalf("until = %v, want %v", got.Until, want)
+	}
+}
+
+// A span wholly before retention or wholly after now lists no routes, is never
+// inverted and never reports hours that have not started.
+func TestObservedRoutesForASpanOutsideRetentionOrAfterNowAreEmpty(t *testing.T) {
+	h, pub := published(t)
+	status(t, h.shipper().post(access("GET", "api.example.com", "/now")), http.StatusAccepted)
+	h.routes(pub)
+	oldest := h.now().UTC().Truncate(time.Hour).Add(time.Hour - time.Duration(retentionDays*24)*time.Hour)
+	for name, q := range map[string]string{
+		"wholly before retention": "from=" + rfc(oldest.Add(-48*time.Hour)) + "&to=" + rfc(oldest.Add(-24*time.Hour)),
+		"wholly after now":        "from=" + rfc(h.now().Add(2*time.Hour)) + "&to=" + rfc(h.now().Add(3*time.Hour)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := decode[struct {
+				Since  time.Time    `json:"since"`
+				Until  time.Time    `json:"until"`
+				Routes []routeStats `json:"routes"`
+			}](t, pub.do("GET", "/api/observed-routes?"+q, nil))
+			end := h.now().UTC().Truncate(time.Hour).Add(time.Hour)
+			if len(got.Routes) != 0 || !got.Since.Equal(got.Until) || got.Until.After(end) {
+				t.Fatalf("since, until, routes = %v, %v, %+v, want an empty window ending by %v", got.Since, got.Until, got.Routes, end)
+			}
+		})
+	}
+}
+
+// from and to are a span, so they cannot be mixed with hours.
+func TestObservedRoutesRefuseASpanWithHours(t *testing.T) {
+	h, pub := published(t)
+	status(t, pub.do("GET", "/api/observed-routes?hours=3&from="+rfc(h.now().Add(-5*time.Hour))+"&to="+rfc(h.now().Add(-4*time.Hour)), nil), http.StatusBadRequest)
+}
+
+// A route's detail for a span has the same bounds as the list.
+func TestObservedRouteDetailForASpanExcludesLaterHours(t *testing.T) {
+	h, pub := published(t)
+	hour := h.now().UTC().Truncate(time.Hour).Add(-5 * time.Hour)
+	at := func(d time.Duration) string { return hour.Add(d).Format(time.RFC3339Nano) }
+	status(t, h.shipper().post(
+		access("GET", "api.example.com", "/users/1", "time", at(10*time.Minute)),
+		access("GET", "api.example.com", "/users/2", "time", at(70*time.Minute), "http.response.status_code", 503),
+	), http.StatusAccepted)
+	users := find(h.routes(pub), "GET", "api.example.com", "/users/{id}")
+	got := decode[struct {
+		Until       time.Time     `json:"until"`
+		StatusCodes map[int]int64 `json:"status_codes"`
+		Series      []struct {
+			Hour time.Time `json:"hour"`
+		} `json:"series"`
+	}](t, pub.do("GET", fmt.Sprint("/api/observed-routes/", users.ID, "?from=", rfc(hour), "&to=", rfc(hour.Add(time.Hour))), nil))
+	if !maps.Equal(got.StatusCodes, map[int]int64{200: 1}) || len(got.Series) != 1 || !got.Until.Equal(hour.Add(time.Hour)) {
+		t.Fatalf("detail = %+v, want one hour with one 200", got)
+	}
 }

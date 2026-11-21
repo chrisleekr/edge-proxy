@@ -166,7 +166,7 @@ function totals(rows: Row[]) {
       id: string;
       evaluated: number;
       limited: number;
-      would_limit: number;
+      logged: number;
       failed: number;
     }
   >();
@@ -176,10 +176,10 @@ function totals(rows: Row[]) {
         id: c.id,
         evaluated: 0,
         limited: 0,
-        would_limit: 0,
+        logged: 0,
         failed: 0,
       };
-      for (const k of ['evaluated', 'limited', 'would_limit', 'failed'] as const) t[k] += c[k];
+      for (const k of ['evaluated', 'limited', 'logged', 'failed'] as const) t[k] += c[k];
       rules.set(c.id, t);
     }
   return [...rules.values()];
@@ -352,7 +352,7 @@ function Attention({ d, can }: { d: Data; can: (p: string) => boolean }) {
       if (at?.rule.action === 'log' && !at.kill) {
         const t = shadow.get(c.id) ?? { id: c.id, evaluated: 0, over: 0, penalty: false };
         t.evaluated += c.evaluated;
-        t.over += c.would_limit;
+        t.over += c.logged;
         t.penalty ||= !!at.rule.penalty;
         shadow.set(c.id, t);
       }
@@ -384,11 +384,11 @@ function Attention({ d, can }: { d: Data; can: (p: string) => boolean }) {
   for (const r of configsLoading ? [] : [...over.filter((x) => !ackedKeys.has(`shadow:${x.id}`)).slice(0, 3), ...over.filter((x) => ackedKeys.has(`shadow:${x.id}`))])
     items.push({
       key: `shadow:${r.id}`,
-      say: `Rule ${r.id} is over its limit while set to log only`,
+      say: `Rule ${r.id} logged requests over its limit`,
       tone: 'neutral',
       text: (
         <>
-          While set to log only, rule <code className="font-medium text-heading">{r.id}</code> checked {count(r.evaluated)} requests in the {d.span}. {count(r.over)} of them ({pct(r.over, r.evaluated)}) were over its limit and let through. Every request is counted, not sampled; set to block, those requests would have got a 429
+          While set to log only, rule <code className="font-medium text-heading">{r.id}</code> checked {count(r.evaluated)} requests in the {d.span}. {count(r.over)} of them ({pct(r.over, r.evaluated)}) were over its limit, let through and logged. Every request is counted, not sampled; set to block, those requests would have got a 429
           {r.penalty ? ', and its penalty would have blocked more after them.' : '.'}
         </>
       ),
@@ -623,8 +623,8 @@ function Traffic({ r }: { r: Range }) {
 function Limiting({ r }: { r: Range }) {
   const { rows } = r;
   const rules = totals(rows)
-    .filter((r) => r.limited + r.would_limit > 0)
-    .sort((a, b) => b.limited + b.would_limit - a.limited - a.would_limit)
+    .filter((r) => r.limited + r.logged > 0)
+    .sort((a, b) => b.limited + b.logged - a.limited - a.logged)
     .slice(0, 5);
   const clients = new Map<string, { display: string; rule: string; n: number }>();
   for (const r of rows)
@@ -634,7 +634,7 @@ function Limiting({ r }: { r: Range }) {
         rule: t.rule,
         n: 0,
       };
-      e.n += t.limited + (t.would_limit ?? 0);
+      e.n += t.limited + (t.logged ?? 0);
       clients.set(t.rule + t.key, e);
     }
   const top = [...clients.values()].sort((a, b) => b.n - a.n).slice(0, 5);
@@ -643,13 +643,13 @@ function Limiting({ r }: { r: Range }) {
     <Panel
       title={`Rate limiting, ${r.title}`}
       link={['Stats', '/stats']}
-      info="Blocked counts requests a rule answered with 429. Over limit, log only counts requests a log only rule found over its limit and let through. Both count every request, not a sample; clients are estimated from samples each edge keeps."
+      info="Blocked counts requests a rule answered with 429. Logged instead of limited counts requests a log only rule found over its limit and let through. Both count every request, not a sample; clients are estimated from samples each edge keeps."
     >
       {r.q.data && rules.length === 0 ? (
         <p className="text-body">No rule blocked a request, or found one over its limit, {r.phrase}.</p>
       ) : (
         <div className="grid gap-6 sm:grid-cols-2">
-          <List title="Rules" items={rules.map((r) => [r.id, r.limited ? `${count(r.limited)} blocked` : `${count(r.would_limit)} over limit, log only`])} />
+          <List title="Rules" items={rules.map((r) => [r.id, r.limited ? `${count(r.limited)} blocked` : `${count(r.logged)} logged instead of limited`])} />
           <List title="Clients" items={top.map((t) => [t.display, `${count(t.n)} · ${t.rule}`])} />
           {unranked.length > 0 && (
             <div className="sm:col-span-2">

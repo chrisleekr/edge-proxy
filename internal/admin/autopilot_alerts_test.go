@@ -63,28 +63,28 @@ func loginSurge(h *harness) {
 // everything while no runner is connected, and every verdict but benign
 // info.
 func TestNotifyWithholdsWhatTheAutopilotWorks(t *testing.T) {
-	t.Run("a sensor's would-block is not sent while a runner is connected, nor its resolve", func(t *testing.T) {
+	t.Run("a sensor's rule_logged anomaly is not sent while a runner is connected, nor its resolve", func(t *testing.T) {
 		h, pub, agent, am := alertHarness(t, 1)
 		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
 		ruleMinutes(h, pub, 5, 1_000, 100, 0, 5, id, "[]")
 		h.check()
-		if w := withheldOf(t, pub, "rule_would_block"); w != "own_rule" {
+		if w := withheldOf(t, pub, "rule_logged"); w != "own_rule" {
 			t.Fatalf("withheld %q", w)
 		}
 		h.advance(6 * time.Minute)
 		agent.seen()
 		h.check()
-		if got := am.sent("rule_would_block"); got != nil {
+		if got := am.sent("rule_logged"); got != nil {
 			t.Fatalf("sent %+v", got)
 		}
 	})
-	t.Run("a sensor's would-block is sent when no runner is connected", func(t *testing.T) {
+	t.Run("a sensor's rule_logged anomaly is sent when no runner is connected", func(t *testing.T) {
 		h, pub, agent, am := alertHarness(t, 1)
 		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
 		h.advance(3 * time.Minute)
 		ruleMinutes(h, pub, 5, 1_000, 100, 0, 5, id, "[]")
 		h.check()
-		if got := am.sent("rule_would_block"); len(got) == 0 || got[0].Labels["rule"] != id {
+		if got := am.sent("rule_logged"); len(got) == 0 || got[0].Labels["rule"] != id {
 			t.Fatalf("sent %+v", got)
 		}
 	})
@@ -222,17 +222,17 @@ func TestNotifyWithAnomalyInvestigationOff(t *testing.T) {
 			t.Fatalf("sent %+v, firing %d", got, firing(h, "rule_match_surge"))
 		}
 	})
-	t.Run("a sensor's would-block is sent at once while a runner is connected", func(t *testing.T) {
+	t.Run("a sensor's rule_logged anomaly is sent at once while a runner is connected", func(t *testing.T) {
 		h, pub, agent, am := alertHarness(t, 1)
 		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
 		pub.setAutopilot(off)
 		ruleMinutes(h, pub, 5, 1_000, 100, 0, 5, id, "[]")
 		h.check()
-		if w := withheldOf(t, pub, "rule_would_block"); w != "" {
+		if w := withheldOf(t, pub, "rule_logged"); w != "" {
 			t.Fatalf("withheld %q", w)
 		}
-		if got := am.sent("rule_would_block"); len(got) == 0 || got[0].Labels["rule"] != id || firing(h, "rule_would_block") != 1 {
-			t.Fatalf("sent %+v, firing %d", got, firing(h, "rule_would_block"))
+		if got := am.sent("rule_logged"); len(got) == 0 || got[0].Labels["rule"] != id || firing(h, "rule_logged") != 1 {
+			t.Fatalf("sent %+v, firing %d", got, firing(h, "rule_logged"))
 		}
 		h.tick()
 		var cases int
@@ -273,7 +273,7 @@ func TestAutopilotSensorCases(t *testing.T) {
 		}
 		return n
 	}
-	t.Run("a sensor's would-block within max_ttl of a benign case on it opens no case", func(t *testing.T) {
+	t.Run("a sensor's logged requests within max_ttl of a benign case on it opens no case", func(t *testing.T) {
 		h, pub, agent, _ := alertHarness(t, 1)
 		id := liveRule(t, h, pub, agent, proposal("add_sensor", "login-watch", loginRule()))
 		ruleMinutes(h, pub, 5, 1_000, 100, 0, 5, id, "[]")

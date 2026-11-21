@@ -264,7 +264,7 @@ func TestNotifyBlockSpikeCountsOnlyLiveMinutes(t *testing.T) {
 func TestNotifySignals(t *testing.T) {
 	outdated := func(n uint64) []uint64 { return signalCounts("browser_outdated", n) }
 	login := func(evaluated, limited, would, failed uint64) []edge.RuleCounts {
-		return []edge.RuleCounts{{ID: "login", Evaluated: evaluated, Limited: limited, WouldLimit: would, Failed: failed}}
+		return []edge.RuleCounts{{ID: "login", Evaluated: evaluated, Limited: limited, Logged: would, Failed: failed}}
 	}
 	admin := func(matched, upstream5xx uint64) []edge.RuleOutcome {
 		return []edge.RuleOutcome{{Phase: "config", ID: "admin-route", Matched: matched, Upstream5xx: upstream5xx}}
@@ -281,7 +281,7 @@ func TestNotifySignals(t *testing.T) {
 		{"a rule stops matching", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)}, minute{requests: 1000, rateLimit: login(0, 0, 0, 0)}, "rule_stopped_matching", "login"},
 		{"a rule the edges stop reporting fires rule_stopped_matching", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)}, minute{requests: 1000}, "rule_stopped_matching", "login"},
 		{"a rule blocks far more", minute{requests: 1000, rateLimit: login(100, 1, 0, 0)}, minute{requests: 1000, rateLimit: login(100, 30, 0, 0)}, "rule_block_spike", "login"},
-		{"a log-only rule goes over its limit", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)}, minute{requests: 1000, rateLimit: login(100, 0, 3, 0)}, "rule_would_block", "login"},
+		{"a log-only rule goes over its limit", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)}, minute{requests: 1000, rateLimit: login(100, 0, 3, 0)}, "rule_logged", "login"},
 		{"Valkey stops answering a rule", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)}, minute{requests: 1000, rateLimit: login(100, 0, 0, 100)}, "rule_fail_mode", "login"},
 		{"one client gets most blocks", minute{requests: 1000, rateLimit: login(100, 0, 0, 0)},
 			minute{requests: 1000, rateLimit: login(100, 30, 0, 0), top: []edge.TopCount{{Rule: "login", Key: "k1", Display: "198.51.100.7", Limited: 32}}}, "rule_subject_dominates", "login"},
@@ -309,14 +309,14 @@ func TestNotifySignals(t *testing.T) {
 // happened rather than naming the rule's setting.
 func TestNotifySummariesCountRequests(t *testing.T) {
 	login := func(would, failed uint64) []edge.RuleCounts {
-		return []edge.RuleCounts{{ID: "login", Evaluated: 100, WouldLimit: would, Failed: failed}}
+		return []edge.RuleCounts{{ID: "login", Evaluated: 100, Logged: would, Failed: failed}}
 	}
 	for _, tc := range []struct {
 		name, signal, want string
 		window             minute
 	}{
-		{"one request would have been blocked", "rule_would_block", "Would have blocked 1 request in the last", minute{requests: 1000, rateLimit: login(1, 0)}},
-		{"two requests would have been blocked", "rule_would_block", "Would have blocked 2 requests in the last", minute{requests: 1000, rateLimit: login(2, 0)}},
+		{"one request logged instead of refused", "rule_logged", "Logged 1 request it would have refused in the last", minute{requests: 1000, rateLimit: login(1, 0)}},
+		{"two requests logged instead of refused", "rule_logged", "Logged 2 requests it would have refused in the last", minute{requests: 1000, rateLimit: login(2, 0)}},
 		{"Valkey did not answer for one request", "rule_fail_mode", "Valkey did not answer for 1 request in the last", minute{requests: 1000, rateLimit: login(0, 1)}},
 		{"Valkey did not answer for many requests", "rule_fail_mode", "Valkey did not answer for 100 requests in the last", minute{requests: 1000, rateLimit: login(0, 100)}},
 	} {
@@ -603,14 +603,14 @@ func TestNotifyRuleOverride(t *testing.T) {
 	n := decode[NotifySettings](t, pub.do("GET", "/api/settings/notifications", nil))
 	n.FireAfter = 1
 	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
-	would := minute{requests: 1000, rateLimit: []edge.RuleCounts{{ID: "login", Evaluated: 100, WouldLimit: 5}}}
+	would := minute{requests: 1000, rateLimit: []edge.RuleCounts{{ID: "login", Evaluated: 100, Logged: 5}}}
 	h.put(65, 1, would)
 	h.check()
-	if a := h.anomalies(pub); len(a) != 1 || a[0].Signal != "rule_would_block" || a[0].State != "firing" || am.last()[0].Labels["rule"] != "login" || am.last()[0].Labels["phase"] != "rate_limit" {
+	if a := h.anomalies(pub); len(a) != 1 || a[0].Signal != "rule_logged" || a[0].State != "firing" || am.last()[0].Labels["rule"] != "login" || am.last()[0].Labels["phase"] != "rate_limit" {
 		t.Fatalf("anomalies %+v sent %+v", a, am.last())
 	}
 
-	n.Rules = map[string]map[string]NotifySignal{"login": {"rule_would_block": {Mode: "off"}}}
+	n.Rules = map[string]map[string]NotifySignal{"login": {"rule_logged": {Mode: "off"}}}
 	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
 	h.advance(time.Minute)
 	h.put(1, 1, would)
@@ -619,7 +619,7 @@ func TestNotifyRuleOverride(t *testing.T) {
 		t.Fatalf("override off left %+v", a)
 	}
 	// Severity can be raised for one rule too.
-	n.Rules["login"]["rule_would_block"] = NotifySignal{Mode: "notify", Severity: "critical", MinRequests: 1}
+	n.Rules["login"]["rule_logged"] = NotifySignal{Mode: "notify", Severity: "critical", MinRequests: 1}
 	status(t, pub.do("PUT", "/api/settings/notifications", n), 204)
 	h.advance(time.Minute)
 	h.put(1, 1, would)

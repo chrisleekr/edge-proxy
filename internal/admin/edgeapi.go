@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -175,6 +176,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, _ *principal) (e
 	if err := decodeOne(json.NewDecoder(http.MaxBytesReader(w, r.Body, maxReport)), &rep, "invalid report"); err != nil {
 		return err
 	}
+	foldLegacy(&rep)
 	if rep.Instance == "" || len(rep.Instance) > 128 || len(rep.Versions) > 8 {
 		return fail(http.StatusUnprocessableEntity, "instance must be 1 to 128 characters, with at most 8 versions")
 	}
@@ -226,13 +228,41 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, _ *principal) (e
 	return writeJSON(w, http.StatusOK, a)
 }
 
+// foldLegacy adds the log-only counts an edge that still sends would_limit and
+// would_block into Logged. The report is decoded leniently,
+// so without it those counts would be dropped silently during the rollout.
+// A sum past the largest count saturates, so countsOK refuses it.
+// ponytail: delete once no edge sends would_limit or would_block.
+func foldLegacy(rep *edge.StatsReport) {
+	fold := func(logged, legacy *uint64) {
+		if s := *logged + *legacy; s >= *logged {
+			*logged = s
+		} else {
+			*logged = math.MaxUint64
+		}
+		*legacy = 0
+	}
+	for i := range rep.Versions {
+		v := &rep.Versions[i]
+		for j := range v.RateLimit {
+			fold(&v.RateLimit[j].Logged, &v.RateLimit[j].LegacyLogged)
+		}
+		for j := range v.TopLimited {
+			fold(&v.TopLimited[j].Logged, &v.TopLimited[j].LegacyLogged)
+		}
+		for j := range v.Rules {
+			fold(&v.Rules[j].Logged, &v.Rules[j].LegacyLogged)
+		}
+	}
+}
+
 func countsOK(c edge.StatsCounts) bool {
 	n := c.Counters()
 	for i := range c.RateLimit {
 		n = append(n, c.RateLimit[i].Counters()...)
 	}
 	for i := range c.TopLimited {
-		n = append(n, &c.TopLimited[i].Limited, &c.TopLimited[i].WouldLimit, &c.TopLimited[i].Err)
+		n = append(n, &c.TopLimited[i].Limited, &c.TopLimited[i].Logged, &c.TopLimited[i].Err)
 	}
 	for i := range c.Rules {
 		n = append(n, c.Rules[i].Counters()...)
@@ -390,7 +420,7 @@ func (a *aggregator) add(now time.Time, counts []edge.StatsCounts) {
 		for _, t := range c.TopLimited {
 			if e := m.top[t.Key]; e != nil {
 				e.Limited += t.Limited
-				e.WouldLimit += t.WouldLimit
+				e.Logged += t.Logged
 				e.Err += t.Err
 			} else if len(m.top) < maxTopPerMinute {
 				tc := t
@@ -463,7 +493,7 @@ func (s *Server) flush(ctx context.Context, now time.Time) error {
 		for _, t := range m.top {
 			top = append(top, t)
 		}
-		slices.SortFunc(top, func(a, b *edge.TopCount) int { return cmp.Compare(b.Limited+b.WouldLimit, a.Limited+a.WouldLimit) })
+		slices.SortFunc(top, func(a, b *edge.TopCount) int { return cmp.Compare(b.Limited+b.Logged, a.Limited+a.Logged) })
 		// codes is a struct, so it encodes as an object even with no codes;
 		// causes is never nil, for the same reason.
 		causes := m.causes
@@ -767,7 +797,7 @@ func topPerRule(top []edge.TopCount, limit int) []edge.TopCount {
 }
 
 // topBySubject sums subjects by rule and key and keeps the limit with the
-// most limited and would-limit requests.
+// most limited and logged requests.
 func topBySubject(top []edge.TopCount, limit int) []edge.TopCount {
 	type subject struct{ rule, key string }
 	sums := map[subject]*edge.TopCount{}
@@ -775,7 +805,7 @@ func topBySubject(top []edge.TopCount, limit int) []edge.TopCount {
 		k := subject{t.Rule, t.Key}
 		if e := sums[k]; e != nil {
 			e.Limited += t.Limited
-			e.WouldLimit += t.WouldLimit
+			e.Logged += t.Logged
 			e.Err += t.Err
 		} else {
 			sums[k] = &t
@@ -786,7 +816,7 @@ func topBySubject(top []edge.TopCount, limit int) []edge.TopCount {
 		out = append(out, *t)
 	}
 	slices.SortFunc(out, func(a, b edge.TopCount) int {
-		return cmp.Or(cmp.Compare(b.Limited+b.WouldLimit, a.Limited+a.WouldLimit), cmp.Compare(a.Rule, b.Rule), cmp.Compare(a.Key, b.Key))
+		return cmp.Or(cmp.Compare(b.Limited+b.Logged, a.Limited+a.Logged), cmp.Compare(a.Rule, b.Rule), cmp.Compare(a.Key, b.Key))
 	})
 	return out[:min(len(out), limit)]
 }

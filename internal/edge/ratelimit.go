@@ -49,6 +49,23 @@ func (e *Edge) backstop(st *reqState) bool {
 	return false
 }
 
+// rlResult is one check's answer, kept for the access line. The rule's
+// settings are in the version, so only the request's answer is copied.
+type rlResult struct {
+	ratelimit.Result
+	state rlState
+}
+
+// rlState says where a check's Result came from.
+type rlState uint8
+
+const (
+	rlAnswered     rlState = iota // Valkey, the local store or the penalty cache answered
+	rlError                       // Valkey failed, fail_mode open or closed, so there is no count
+	rlCountPending                // a count rule, counted after the response
+	rlCounted                     // a count rule that counted this response's status
+)
+
 // rlCheck is one rule step 8 evaluates for this request.
 type rlCheck struct {
 	rule *ratelimit.Rule
@@ -203,6 +220,12 @@ func (st *reqState) check(v *version, i int) (c rlCheck, ok, rej bool) {
 		case ratelimit.MissingSkip:
 			return c, false, false
 		case ratelimit.MissingReject:
+			// A rule that only logs never refuses, and without its key it
+			// has nothing to count.
+			if r.Shadow || v.c.Config.KillSwitch.RateLimit {
+				return c, false, false
+			}
+			st.rlRule = r.ID
 			return c, false, true
 		}
 		sub = ratelimit.FallbackSubject(buf[:0], st.client.ip)
@@ -250,14 +273,15 @@ func (e *Edge) countResponse(st *reqState, status int) {
 		if !tracked {
 			e.m.localUntracked.Add(1)
 		}
+		st.counted(c.idx, r)
 		if r.Allowed {
 			continue
 		}
 		if shadow {
-			v.stats.rules[c.idx].wouldLimit.Add(1)
-			st.markWouldLimit(c.rule.ID)
+			v.stats.rules[c.idx].logged.Add(1)
+			st.logged = true
 			if sampleTop() {
-				v.stats.wouldTop.add(c.key, c.rule.ID, st.display(c))
+				v.stats.loggedTop.add(c.key, c.rule.ID, st.display(c))
 			}
 			continue
 		}
@@ -269,6 +293,17 @@ func (e *Edge) countResponse(st *reqState, status int) {
 		// rules have no other enforcement. Availability first; the drop is counted.
 		if !e.penalties.Block(c.key, until) {
 			e.m.penaltyDropped.Add(1)
+		}
+	}
+}
+
+// counted stores a count rule's answer at the rule's place in rlOut. A
+// request checks at most a dozen rules, so a scan is cheaper than an index.
+func (st *reqState) counted(idx int, r ratelimit.Result) {
+	for k, i := range st.rlIdx[:st.nRL] {
+		if i == idx {
+			st.rlOut[k].Result, st.rlOut[k].state = r, rlCounted
+			return
 		}
 	}
 }
@@ -309,9 +344,16 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 		c := &checks[i]
 		rs := &st.ver.stats.rules[c.idx]
 		rs.evaluated.Add(1)
+		out := &st.rlOut[st.nRL]
 		st.rlIdx[st.nRL] = c.idx
 		st.nRL++
 		shadow := c.rule.Shadow || kill
+		*out = rlResult{}
+		// A count rule is counted after the response, unless a cached penalty
+		// already refused it.
+		if c.rule.Count && c.o.Allowed {
+			out.state = rlCountPending
+		}
 		if c.o.Err != nil {
 			rs.failed.Add(1)
 			if errors.Is(c.o.Err, ratelimit.ErrBreakerOpen) {
@@ -321,8 +363,15 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 			}
 			switch c.rule.FailMode {
 			case ratelimit.FailOpen:
+				out.state = rlError
 				continue
 			case ratelimit.FailClosed:
+				out.state = rlError
+				// The first rule that fails closed answers the 503, unless a
+				// limited rule answers 429 instead.
+				if !shadow && !limited && !unavailable {
+					st.rlRule = c.rule.ID
+				}
 				unavailable = unavailable || !shadow
 				continue
 			}
@@ -336,6 +385,7 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 				e.m.localUntracked.Add(1)
 			}
 		}
+		out.Result = c.o.Result
 		if !shadow && st.set.rateLimitHeaders && !c.rule.Count {
 			st.addRateLimitHeaders(c)
 		}
@@ -343,10 +393,10 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 			continue
 		}
 		if shadow {
-			rs.wouldLimit.Add(1)
-			st.markWouldLimit(c.rule.ID)
+			rs.logged.Add(1)
+			st.logged = true
 			if sampleTop() {
-				st.ver.stats.wouldTop.add(c.key, c.rule.ID, st.display(c))
+				st.ver.stats.loggedTop.add(c.key, c.rule.ID, st.display(c))
 			}
 			continue
 		}
@@ -374,14 +424,6 @@ func (e *Edge) decide(st *reqState, checks []rlCheck, kill bool, now int64) bool
 		return false
 	}
 	return true
-}
-
-// markWouldLimit records a log-only rule over its limit, so the access line
-// is always written. The first rule is the one named.
-func (st *reqState) markWouldLimit(id string) {
-	if !st.wouldLimit {
-		st.wouldLimit, st.wlRule = true, id
-	}
 }
 
 // localParams divides a rule across the fleet for fail_mode local: each

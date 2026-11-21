@@ -5,9 +5,9 @@
     "brief": {
       "kind": "anomaly",
       "rule": "ap-catalog-per-user-2",
-      "signal": "rule_would_block",
+      "signal": "rule_logged",
       "summary": {
-        "untrusted": "Would have blocked 390 requests in the last 5 minutes: it is set to log only, or the kill switch is on"
+        "untrusted": "Logged 390 requests it would have refused in the last 5 minutes: it is set to log only, or the kill switch is on"
       }
     },
     "run_id": 4,
@@ -118,9 +118,9 @@
         "brief": {
           "kind": "anomaly",
           "rule": "ap-catalog-per-user-2",
-          "signal": "rule_would_block",
+          "signal": "rule_logged",
           "summary": {
-            "untrusted": "Would have blocked 390 requests in the last 5 minutes: it is set to log only, or the kill switch is on"
+            "untrusted": "Logged 390 requests it would have refused in the last 5 minutes: it is set to log only, or the kill switch is on"
           }
         },
         "case_id": 4,
@@ -284,7 +284,7 @@
               "failed": 0,
               "id": "ap-catalog-per-user-2",
               "limited": 0,
-              "would_limit": 390
+              "logged": 390
             },
             "fleet_requests": 21544,
             "minute": "2026-10-28T22:47:00Z"
@@ -295,7 +295,7 @@
               "failed": 0,
               "id": "ap-catalog-per-user-2",
               "limited": 0,
-              "would_limit": 1099
+              "logged": 1099
             },
             "fleet_requests": 53020,
             "minute": "2026-10-28T22:48:00Z"
@@ -306,7 +306,7 @@
               "failed": 0,
               "id": "ap-catalog-per-user-2",
               "limited": 0,
-              "would_limit": 500
+              "logged": 500
             },
             "fleet_requests": 22127,
             "minute": "2026-10-28T22:49:00Z"
@@ -320,7 +320,7 @@
               "key": "rl:distinct:60000:ap-catalog-per-user-2:3c52d0debd70676:{2yqc26INzfBml5pYN_Dkjw}",
               "limited": 0,
               "rule": "ap-catalog-per-user-2",
-              "would_limit": 1920
+              "logged": 1920
             }
           ]
         }
@@ -546,7 +546,7 @@
       {
         "name": "get_autopilot_state",
         "permission": "autopilot.read",
-        "description": "Mode, budgets and what they use, connected runners, and the live autopilot rules with state and expiry.",
+        "description": "Mode, budgets and what they use, connected runners, the live autopilot rules with state and expiry, and the active exclusions.",
         "input_schema": {
           "additionalProperties": false,
           "properties": {},
@@ -588,7 +588,7 @@
       {
         "name": "describe_fields",
         "permission": "config.read",
-        "description": "Expression fields, rate-limit key kinds and algorithms the edge accepts.",
+        "description": "Expression fields, rate-limit key kinds and algorithms the edge accepts, the CDN headers the edge logs (schema.cdn_headers) and the headers the live policy trusts (cdn_trusted), which also holds listed source headers such as cf-ipcountry that rules read only through their field (ip.src.country); a rule on an untrusted header is client-controlled.",
         "input_schema": {
           "additionalProperties": false,
           "properties": {},
@@ -617,7 +617,7 @@
       {
         "name": "get_rule_stats",
         "permission": "stats.read",
-        "description": "Evaluated, limited, would_limit, failed and capped per minute for one rate-limit rule, in hourly steps past 360 minutes, and its 50 most-limited subjects.",
+        "description": "Evaluated, limited, logged, failed and capped per minute for one rate-limit rule, in hourly steps past 360 minutes, and its 50 most-limited subjects.",
         "input_schema": {
           "additionalProperties": false,
           "properties": {
@@ -652,10 +652,21 @@
       {
         "name": "list_routes",
         "permission": "stats.read",
-        "description": "Routes observed in access logs, with requests, status classes, decisions and rules.",
+        "description": "Routes observed in access logs over the last hours (default 24), busiest first, at most limit (default 50), with requests, status classes, actions and rules; more counts the routes left out.",
         "input_schema": {
           "additionalProperties": false,
-          "properties": {},
+          "properties": {
+            "hours": {
+              "maximum": 720,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "limit": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "evidence": true
@@ -944,7 +955,7 @@
         "evidence": false
       }
     ],
-    "tools_sha256": "2ae0b43cf930c740e142a38c403a6ff15b3d6108d3a5c57433a0e94ed76f3ae6",
+    "tools_sha256": "f47278a3619a2a29e47b85fcb4cc7a29e5bb06c48c68649d18c47272cdc2ce00",
     "output_schema": {
       "type": "object",
       "required": [

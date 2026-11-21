@@ -116,6 +116,11 @@ func serve(ctx context.Context, ui fs.FS, getenv func(string) string, log *slog.
 	s := NewServer(cfg, db, log)
 	s.edgeDB = edgeDB
 	s.tracing = tp
+	if err := s.renameNotifySignals(ctx); err != nil {
+		_ = l.Close()
+		_ = in.Close()
+		return fmt.Errorf("rename notification signals: %w", err)
+	}
 	if err := bootstrap(ctx, db, s, log); err != nil {
 		_ = l.Close()
 		_ = in.Close()

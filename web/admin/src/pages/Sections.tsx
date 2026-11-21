@@ -616,7 +616,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
             />
             <Check
               label="Disable blocking by access rules"
-              hint="Every access rule set to block only logs: Stats still shows what it would block, but none gets a 403."
+              hint="Every access rule set to block only logs: Stats still counts what it logs, but none gets a 403."
               checked={ks.block ?? false}
               onChange={() => toggle('block')}
             />

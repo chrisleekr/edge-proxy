@@ -77,10 +77,10 @@ var mcpTools = []mcpTool{
 	{"describe_fields", "config.read", "Expression fields, rate-limit key kinds and algorithms the edge accepts, the CDN headers the edge logs (schema.cdn_headers) and the headers the live policy trusts (cdn_trusted), which also holds listed source headers such as cf-ipcountry that rules read only through their field (ip.src.country); a rule on an untrusted header is client-controlled.", object(nil)},
 	{"get_stats", "stats.read", "Per-minute fleet, rule, status code and upstream cause counts. Windows over 360 minutes come in hourly steps.",
 		object(map[string]any{"minutes": minutesProp})},
-	{"get_rule_stats", "stats.read", "Evaluated, limited, would_limit, failed and capped per minute for one rate-limit rule, in hourly steps past 360 minutes, and its 50 most-limited subjects.",
+	{"get_rule_stats", "stats.read", "Evaluated, limited, logged, failed and capped per minute for one rate-limit rule, in hourly steps past 360 minutes, and its 50 most-limited subjects.",
 		object(map[string]any{"rule": map[string]any{"type": "string"}, "minutes": minutesProp}, "rule")},
 	{"list_anomalies", "stats.read", "Open and recent anomalies the notification checks found.", object(nil)},
-	{"list_routes", "stats.read", "Routes observed in access logs over the last hours (default 24), busiest first, at most limit (default 50), with requests, status classes, decisions and rules; more counts the routes left out.",
+	{"list_routes", "stats.read", "Routes observed in access logs over the last hours (default 24), busiest first, at most limit (default 50), with requests, status classes, actions and rules; more counts the routes left out.",
 		object(map[string]any{"hours": map[string]any{"type": "integer", "minimum": 1, "maximum": retentionDays * 24}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": mcpMaxRoutes}})},
 	{"get_route", "stats.read", "One observed route with its hourly series.", object(map[string]any{"id": map[string]any{"type": "integer"}}, "id")},
 	{"check_subject", "stats.read", "Whether an IP is in a verified crawler range or a protected subject.",
@@ -757,7 +757,7 @@ func (s *Server) ruleStatsTool(ctx context.Context, args json.RawMessage) (any, 
 	}
 	since := s.now().Add(-time.Duration(m) * time.Minute)
 	rows, err := s.db.Query(ctx, `SELECT b, sum(requests)::bigint, coalesce(sum((e->>'evaluated')::bigint), 0)::bigint, coalesce(sum((e->>'limited')::bigint), 0)::bigint,
-		coalesce(sum((e->>'would_limit')::bigint), 0)::bigint, coalesce(sum((e->>'failed')::bigint), 0)::bigint, coalesce(sum((e->>'capped')::bigint), 0)::bigint
+		coalesce(sum((e->>'logged')::bigint), 0)::bigint, coalesce(sum((e->>'failed')::bigint), 0)::bigint, coalesce(sum((e->>'capped')::bigint), 0)::bigint
 		FROM (SELECT date_bin($3::interval, minute, timestamptz 'epoch') b, requests,
 			(SELECT x FROM jsonb_array_elements(rate_limit) x WHERE x->>'id' = $2 LIMIT 1) e FROM edge_stats_minute WHERE minute >= $1) m
 		GROUP BY b HAVING count(e) > 0 ORDER BY b`, since, in.Rule, step)
@@ -771,21 +771,21 @@ func (s *Server) ruleStatsTool(ctx context.Context, args json.RawMessage) (any, 
 	}
 	series, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (bucket, error) {
 		b := bucket{Rule: edge.RuleCounts{ID: in.Rule}}
-		err := row.Scan(&b.Minute, &b.Fleet, &b.Rule.Evaluated, &b.Rule.Limited, &b.Rule.WouldLimit, &b.Rule.Failed, &b.Rule.Capped)
+		err := row.Scan(&b.Minute, &b.Fleet, &b.Rule.Evaluated, &b.Rule.Limited, &b.Rule.Logged, &b.Rule.Failed, &b.Rule.Capped)
 		return b, err
 	})
 	if err != nil {
 		return nil, err
 	}
 	rows, err = s.db.Query(ctx, `SELECT k, d, l, w FROM (SELECT t->>'key' k, max(t->>'display') d, sum((t->>'limited')::bigint)::bigint l,
-		coalesce(sum((t->>'would_limit')::bigint), 0)::bigint w FROM edge_stats_minute, jsonb_array_elements(top_limited) t
+		coalesce(sum((t->>'logged')::bigint), 0)::bigint w FROM edge_stats_minute, jsonb_array_elements(top_limited) t
 		WHERE minute >= $1 AND t->>'rule' = $2 GROUP BY 1) s ORDER BY l + w DESC, k LIMIT 50`, since, in.Rule)
 	if err != nil {
 		return nil, err
 	}
 	top, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (edge.TopCount, error) {
 		t := edge.TopCount{Rule: in.Rule}
-		err := row.Scan(&t.Key, &t.Display, &t.Limited, &t.WouldLimit)
+		err := row.Scan(&t.Key, &t.Display, &t.Limited, &t.Logged)
 		return t, err
 	})
 	if err != nil {
