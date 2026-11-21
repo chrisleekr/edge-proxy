@@ -282,22 +282,24 @@ type countryTraffic struct {
 	Estimated int64  `json:"estimated"`
 }
 
-// getTraffic sums countries over the last ?minutes= (live, 1 to 60) or
-// ?hours= (a period, as for routes). With neither it is the last 24 hours.
+// getTraffic sums countries over the last ?minutes= (live, 1 to 60), or
+// ?hours= or ?from= and ?to= (a period, as for routes). With none it is the
+// last 24 hours.
 func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal) error {
 	q := r.URL.Query()
 	table, col := "traffic_hour", "hour"
-	var from time.Time
+	var from, to time.Time
 	if q.Has("minutes") {
 		n, err := strconv.Atoi(q.Get("minutes"))
 		if err != nil || n < 1 || n > liveMinutes || q.Has("hours") {
 			return fail(http.StatusBadRequest, "minutes must be 1 to 60, and not given with hours")
 		}
 		table, col = "traffic_minute", "minute"
-		from = s.now().UTC().Truncate(time.Minute).Add(-time.Duration(n-1) * time.Minute)
+		end := s.now().UTC().Truncate(time.Minute).Add(time.Minute)
+		from, to = end.Add(-time.Duration(n)*time.Minute), end
 	} else {
 		var err error
-		if from, _, err = s.span(r); err != nil {
+		if from, to, err = s.span(r); err != nil {
 			return err
 		}
 	}
@@ -306,7 +308,7 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 		return err
 	}
 	rows, err := s.db.Query(r.Context(), `SELECT country, sum(requests)::bigint, sum(blocked)::bigint, sum(estimated)::bigint
-		FROM `+table+` WHERE `+col+` >= $1 GROUP BY country ORDER BY 2 DESC, 1`, from)
+		FROM `+table+` WHERE `+col+` >= $1 AND `+col+` < $2 GROUP BY country ORDER BY 2 DESC, 1`, from, to)
 	if err != nil {
 		return err
 	}
@@ -316,7 +318,7 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 		To        time.Time        `json:"to"`
 		Countries []countryTraffic `json:"countries"`
 		Edge      *geoPoint        `json:"edge"`
-	}{From: from, To: s.now().UTC(), Countries: []countryTraffic{}, Edge: settings.Edge}
+	}{From: from, To: earlierOf(to, s.now().UTC()), Countries: []countryTraffic{}, Edge: settings.Edge}
 	for rows.Next() {
 		var c countryTraffic
 		if err := rows.Scan(&c.Country, &c.Requests, &c.Blocked, &c.Estimated); err != nil {

@@ -220,6 +220,11 @@ func (st *reqState) check(v *version, i int) (c rlCheck, ok, rej bool) {
 		case ratelimit.MissingSkip:
 			return c, false, false
 		case ratelimit.MissingReject:
+			// A rule that only logs never refuses, and without its key it
+			// has nothing to count.
+			if r.Shadow || v.c.Config.KillSwitch.RateLimit {
+				return c, false, false
+			}
 			st.rlRule = r.ID
 			return c, false, true
 		}

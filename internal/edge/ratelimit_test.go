@@ -225,7 +225,9 @@ func TestOnMissingKey(t *testing.T) {
 		r.OnMissingKey = mode
 		return r
 	}
-	c.RateLimitRules = []snapshot.RateLimitRule{mk("/skip", "skip"), mk("/fallback", "fallback_ip"), mk("/reject", "reject")}
+	logOnly := mk("/reject-log", "reject")
+	logOnly.Action = "log"
+	c.RateLimitRules = []snapshot.RateLimitRule{mk("/skip", "skip"), mk("/fallback", "fallback_ip"), mk("/reject", "reject"), logOnly}
 	h.load(envelope(c))
 	cases := []struct {
 		name    string
@@ -238,6 +240,7 @@ func TestOnMissingKey(t *testing.T) {
 		{"fallback_ip limits requests without the header by IP", "/fallback", nil, []int{200, 429}},
 		{"fallback_ip keys requests with the header on it", "/fallback", []string{"X-Tenant", "a"}, []int{200, 429}},
 		{"reject answers 400 without the header", "/reject", nil, []int{400}},
+		{"a log-only reject rule lets requests without the header through", "/reject-log", nil, []int{200, 200}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,6 +252,15 @@ func TestOnMissingKey(t *testing.T) {
 	if h.srv.m.rejected[reasonRateLimitKey].Load() != 1 {
 		t.Fatal("missing-key rejection not counted")
 	}
+	t.Run("the kill switch stops reject from refusing a request without the header", func(t *testing.T) {
+		k := testConfig(2)
+		k.RateLimitRules = c.RateLimitRules
+		k.KillSwitch.RateLimit = true
+		h.load(envelope(k))
+		if got := h.statuses(1, "GET", "/reject"); !eqInts(got, 200) {
+			t.Fatalf("got %v, want [200]", got)
+		}
+	})
 }
 
 // Requests share a bucket exactly when every key characteristic matches.

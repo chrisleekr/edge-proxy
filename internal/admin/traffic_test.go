@@ -255,6 +255,14 @@ func TestTrafficRangeEdges(t *testing.T) {
 	t.Run("a line 30 hours old is in the last 31 hours", func(t *testing.T) {
 		wantCountries(t, h.traffic(vera, "?hours=31"), countryView{"AA", 1, 0, 0}, countryView{"AB", 1, 0, 0}, countryView{"AC", 1, 0, 0})
 	})
+	t.Run("a window from 31 to 29 hours ago holds only the line 30 hours old and ends at its own end", func(t *testing.T) {
+		at := func(d time.Duration) string { return h.now().Add(-d).UTC().Format(time.RFC3339) }
+		got := h.traffic(vera, "?from="+at(31*time.Hour)+"&to="+at(29*time.Hour))
+		wantCountries(t, got, countryView{"AC", 1, 0, 0})
+		if want := h.now().Add(-29 * time.Hour).Truncate(time.Hour).Add(time.Hour); !got.To.Equal(want) {
+			t.Fatalf("to = %v, want %v", got.To, want)
+		}
+	})
 }
 
 // A sampled line's weight is drawn once, so its route and its country count
