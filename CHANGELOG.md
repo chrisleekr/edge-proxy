@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0](https://github.com/chrisleekr/edge-proxy/compare/v1.3.0...v1.4.0) (2026-11-21)
+
+
+### Features
+
+* add IP lists, client.ip_lists and per-edge bans for trap rules ([#37](https://github.com/chrisleekr/edge-proxy/issues/37)) ([7c0907f](https://github.com/chrisleekr/edge-proxy/commit/7c0907fd8e1c7b32d7c784c2e2e1c1adf478e91a))
+* add value lists, a Value lists page and a Policy nav group for IP lists ([#41](https://github.com/chrisleekr/edge-proxy/issues/41)) ([3af4817](https://github.com/chrisleekr/edge-proxy/commit/3af4817db1d1022aca501b07e8b6ae80a843de9f))
+* **admin:** replace the Traffic map with a full-screen War room ([#43](https://github.com/chrisleekr/edge-proxy/issues/43)) ([eb813f8](https://github.com/chrisleekr/edge-proxy/commit/eb813f8d330c723055651003f6418870696d1f8c))
+* **autopilot:** split the verdict into summary, needs_you and details, and scope CI ([#35](https://github.com/chrisleekr/edge-proxy/issues/35)) ([f2df6bf](https://github.com/chrisleekr/edge-proxy/commit/f2df6bf5d0cd31119d34065faf344c1b8eb88d67))
+* **edge:** add browser floor, CDN header signals and a shared-key guard for autopilot ([#36](https://github.com/chrisleekr/edge-proxy/issues/36)) ([bb51830](https://github.com/chrisleekr/edge-proxy/commit/bb518306679a5660d15f931f84335cc49a0bbdd7))
+* name log-only counts logged and list matched rules, action and decided_by in the access log ([#42](https://github.com/chrisleekr/edge-proxy/issues/42)) ([0aa7caf](https://github.com/chrisleekr/edge-proxy/commit/0aa7cafc7c144e394782006532b309e187d143f5))
+* rename denylists to IP lists, add typed IP lists and always-allow rules ([#40](https://github.com/chrisleekr/edge-proxy/issues/40)) ([ab4aa66](https://github.com/chrisleekr/edge-proxy/commit/ab4aa6640c4263319e62285d1cb2b9d6828a708d))
+
 ## [1.3.0](https://github.com/chrisleekr/edge-proxy/compare/v1.2.0...v1.3.0) (2026-11-14)
 
 
