@@ -109,7 +109,6 @@ type accessLine struct {
 	// ponytail: delete with legacy once no edge sends edge.decision.
 	Decision      string   `json:"edge.decision"`
 	ConfigRules   []string `json:"edge.config_rules"`
-	BlockRule     string   `json:"edge.block_rule"`
 	RateLimitRule string   `json:"edge.rate_limit_rule"`
 	// SampleRate is set on allowed lines the edge logged at a rate below 1.
 	SampleRate float64 `json:"edge.sample_rate"`
@@ -126,8 +125,9 @@ type matchedRule struct {
 
 // legacy turns a line with edge.decision and no edge.action into the current
 // fields, which log shippers can still deliver after an edge upgrade. Such an
-// edge named one log-only rule: the block rule for would_block, the
-// rate-limit rule for would_limit.
+// edge names the log-only rule only for would_limit, in edge.rate_limit_rule;
+// its would_block line names no rule, so it counts as allow with no logged
+// rule.
 // ponytail: delete once no edge sends edge.decision.
 func (l *accessLine) legacy() {
 	if l.Action != "" || l.Decision == "" {
@@ -138,14 +138,12 @@ func (l *accessLine) legacy() {
 		l.MatchedRules = append(l.MatchedRules, matchedRule{Rule: id, Type: "access"})
 	}
 	switch l.Decision {
-	case "would_block", "would_limit":
-		id := l.BlockRule
-		if l.Decision == "would_limit" {
-			id = l.RateLimitRule
-		}
+	case "would_block":
 		l.Action = "allow"
-		if id != "" {
-			l.LoggedRules = []string{id}
+	case "would_limit":
+		l.Action = "allow"
+		if l.RateLimitRule != "" {
+			l.LoggedRules = []string{l.RateLimitRule}
 		}
 	case "rate_limited":
 		l.DecidedBy = l.RateLimitRule
