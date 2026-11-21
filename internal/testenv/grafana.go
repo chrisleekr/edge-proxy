@@ -15,8 +15,8 @@ import (
 )
 
 // GrafanaImage is pinned by digest, from
-// https://hub.docker.com/r/grafana/grafana/tags (13.3.0 manifest list).
-const GrafanaImage = "grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205"
+// https://hub.docker.com/r/grafana/grafana/tags (13.3.1 manifest list).
+const GrafanaImage = "grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf"
 
 // GrafanaAdminPassword is the admin user's password, for tests that seed
 // annotations and dashboards the Viewer token can't write.
