@@ -149,7 +149,7 @@ func TestRefusedRequestsCountAsBlocked(t *testing.T) {
 		}, 1},
 		{"allowed with a log-only rule logged", "AE", func(c string) string { return geo(c, "edge.logged_rules", []string{"tools"}) }, 0},
 		{"older edge: log-only access rule", "AK", func(c string) string {
-			return oldAccess("GET", "api.example.com", "/", "client.geo.country_iso_code", c, "edge.decision", "would_block", "edge.block_rule", "tools")
+			return oldAccess("GET", "api.example.com", "/", "client.geo.country_iso_code", c, "edge.decision", "would_block", "edge.config_rules", []string{"tools"})
 		}, 0},
 		{"older edge: log-only rate limit", "AL", func(c string) string {
 			return oldAccess("GET", "api.example.com", "/", "client.geo.country_iso_code", c, "edge.decision", "would_limit", "edge.rate_limit_rule", "login")

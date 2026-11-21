@@ -163,8 +163,10 @@ func TestRoutesAreGroupedFromAccessLines(t *testing.T) {
 
 // The same request logged by an older edge and by a current one gives the
 // same route counts: a would_limit or would_block line is a request that
-// went through, counted as allow with its log-only rule in logged_rules and
-// never as limiting the route, and a rate_limited line names its rule.
+// went through, counted as allow and never as limiting the route, a
+// would_limit line puts its log-only rule in logged_rules, and a
+// rate_limited line names its rule. An older edge's would_block line names
+// no rule, so it has no current-edge twin.
 func TestOlderAndCurrentLinesGiveTheSameRouteCounts(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -180,9 +182,13 @@ func TestOlderAndCurrentLinesGiveTheSameRouteCounts(t *testing.T) {
 			access("GET", "api.example.com", "/users/42", "edge.logged_rules", []string{"login"}),
 			map[string]int64{"allow": 1}, map[string]int64{"login": 1}, map[string]int64{}, map[string]int64{}},
 		{"log-only access rule",
-			oldAccess("GET", "api.example.com", "/users/42", "edge.decision", "would_block", "edge.block_rule", "tools", "edge.config_rules", []string{"tools"}),
+			"",
 			access("GET", "api.example.com", "/users/42", "edge.logged_rules", []string{"tools"}, "edge.matched_rules", accessRulesResult("logged", "tools")),
 			map[string]int64{"allow": 1}, map[string]int64{"tools": 1}, map[string]int64{}, map[string]int64{"tools": 1}},
+		{"older edge's log-only access rule is allowed with no logged rule",
+			oldAccess("GET", "api.example.com", "/users/42", "edge.decision", "would_block", "edge.config_rules", []string{"tools"}),
+			"",
+			map[string]int64{"allow": 1}, map[string]int64{}, map[string]int64{}, map[string]int64{"tools": 1}},
 		{"enforced rate limit",
 			oldAccess("GET", "api.example.com", "/users/42", "http.response.status_code", 429, "edge.decision", "rate_limited", "edge.rate_limit_rule", "login"),
 			access("GET", "api.example.com", "/users/42", "http.response.status_code", 429, "edge.action", "rate_limited", "edge.decided_by", "login"),
@@ -198,6 +204,9 @@ func TestOlderAndCurrentLinesGiveTheSameRouteCounts(t *testing.T) {
 			lines := map[string]string{"older edge": tc.old, "current edge": tc.current}
 			if tc.old == "" {
 				delete(lines, "older edge")
+			}
+			if tc.current == "" {
+				delete(lines, "current edge")
 			}
 			for name, line := range lines {
 				h, pub := published(t)
