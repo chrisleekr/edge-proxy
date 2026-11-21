@@ -122,7 +122,7 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM postgres:18.7@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+        FROM postgres:19.0@sha256:bb6e70add742cd868fb62cb3b2f67d1dd2bdd2b65a521e778420748753687c60
         COPY postgres-init.sql /docker-entrypoint-initdb.d/init.sql
     environment: { POSTGRES_PASSWORD: postgres }
     healthcheck:
@@ -133,7 +133,7 @@ services:
       retries: 30
 
   valkey:
-    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    image: valkey/valkey:9.2.0-alpine@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
     # Rate-limit state has TTLs and needs no persistence.
     command: [valkey-server, --save, "", --appendonly, "no"]
     healthcheck:
@@ -242,7 +242,7 @@ services:
   # Three-shard Valkey cluster, fixed IPs because nodes
   # announce addresses, not names.
   valkey-c1: &cluster-node
-    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    image: valkey/valkey:9.2.0-alpine@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
     profiles: [cluster]
     command: [valkey-server, --cluster-enabled, "yes", --cluster-require-full-coverage, "no", --save, "", --appendonly, "no"]
     networks: { default: { ipv4_address: 10.77.0.21 } }
@@ -253,7 +253,7 @@ services:
     <<: *cluster-node
     networks: { default: { ipv4_address: 10.77.0.23 } }
   valkey-cluster-init:
-    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    image: valkey/valkey:9.2.0-alpine@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
     profiles: [cluster]
     depends_on: [valkey-c1, valkey-c2, valkey-c3]
     command: [sh, -c, "sleep 2 && valkey-cli --cluster create 10.77.0.21:6379 10.77.0.22:6379 10.77.0.23:6379 --cluster-replicas 0 --cluster-yes"]

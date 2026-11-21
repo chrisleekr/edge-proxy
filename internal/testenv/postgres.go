@@ -16,7 +16,7 @@ import (
 )
 
 // PostgresImage matches compose.yaml.
-const PostgresImage = "postgres:18.7"
+const PostgresImage = "postgres:19.0"
 
 // Roles every test database uses, as in a deployment: the
 // owner runs migrations, the app role is what admin connects as.
