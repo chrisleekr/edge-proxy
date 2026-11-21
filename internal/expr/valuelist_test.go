@@ -94,6 +94,8 @@ func TestParseValueListReferences(t *testing.T) {
 	for _, tc := range []struct{ name, in, msg string }{
 		{"a lone $ in a comparison", `http.user_agent contains $`, "expected a value list name after $"},
 		{"a lone $ in a function", `starts_with(http.request.uri.path, $)`, "expected a value list name after $"},
+		{"a value list inside a set", `http.user_agent in {$bad-agents}`, `write "in $name"`},
+		{"two value lists combined in a set", `http.request.uri.path in {"/a" $eu $asia}`, `write "in $name"`},
 	} {
 		t.Run(tc.name+" is a syntax error", func(t *testing.T) {
 			_, err := Parse(tc.in)
