@@ -318,7 +318,9 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request, _ *principal
 		To        time.Time        `json:"to"`
 		Countries []countryTraffic `json:"countries"`
 		Edge      *geoPoint        `json:"edge"`
-	}{From: from, To: earlierOf(to, s.now().UTC()), Countries: []countryTraffic{}, Edge: settings.Edge}
+	}{To: earlierOf(to, s.now().UTC()), Countries: []countryTraffic{}, Edge: settings.Edge}
+	// A span wholly in the future starts after now; keep it empty, not inverted.
+	out.From = earlierOf(from, out.To)
 	for rows.Next() {
 		var c countryTraffic
 		if err := rows.Scan(&c.Country, &c.Requests, &c.Blocked, &c.Estimated); err != nil {

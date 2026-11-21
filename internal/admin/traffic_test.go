@@ -263,6 +263,14 @@ func TestTrafficRangeEdges(t *testing.T) {
 			t.Fatalf("to = %v, want %v", got.To, want)
 		}
 	})
+	t.Run("a window wholly in the future is empty and does not end before it starts", func(t *testing.T) {
+		at := func(d time.Duration) string { return h.now().Add(d).UTC().Format(time.RFC3339) }
+		got := h.traffic(vera, "?from="+at(2*time.Hour)+"&to="+at(3*time.Hour))
+		wantCountries(t, got)
+		if got.From.After(got.To) {
+			t.Fatalf("from %v is after to %v", got.From, got.To)
+		}
+	})
 }
 
 // A sampled line's weight is drawn once, so its route and its country count
