@@ -46,7 +46,7 @@ Go (version in `go.mod`), Docker, Node 26 for the UI and the autopilot runner, a
 | `make capacity` | Per-unit costs for sizing: p99, CPU and Valkey cost per request at each rate, memory per stream with `STREAMS=N`, and with `SENSORS=N` the same figures with N log-only rules shaped like the autopilot's sensors ([Capacity planning](../deploy/capacity.md)) |
 | `make capacity-max` | One 2 vCPU edge's maximum rate within `BUDGET_MS` added at p99, in front of a mock gateway routing to four mock microservices with network delay ([Capacity planning](../deploy/capacity.md#find-one-edges-maximum)) |
 | `make ci` | Everything CI runs, in order |
-| `make demo` / `make demo-down` | The local demo from [Get started](../get-started.md) |
+| `make demo` / `make demo-down` | The local demo from [Get started](../get-started.md). The demo and `make infra-up` keep Postgres data in the image's anonymous volume, so after the Postgres image moves to a new major version, run `make demo-down` or `make infra-down` first: the new image refuses to start on the old version's data. Both delete the data, which is disposable |
 | `make demo-autopilot` | Add the autopilot runner to the running demo, with the model credential exported in your shell |
 | `make demo-traffic` | Steady traffic against the demo until Ctrl+C, covering every part of the demo policy |
 | `make demo-outage` | Pause the demo's Valkey for `OUTAGE` seconds (90), to see each fail mode |
