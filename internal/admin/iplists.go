@@ -182,6 +182,9 @@ func widest(wide bool) (min4, min6 int) {
 // take 500,000 entries across every list.
 const maxTypedEntries = 10_000
 
+// maxTypedIssues bounds the line problems one save reports.
+const maxTypedIssues = 50
+
 // parseTyped reads addresses typed in admin. A download skips what it can't
 // use; a typed line is a person's intent, so every line must be an address
 // or a CIDR range with no host bits set, within the width limit, not 4-in-6
@@ -191,7 +194,14 @@ func parseTyped(text string, wide bool) ([]string, []expr.Issue) {
 	min4, min6 := widest(wide)
 	var out []string
 	var issues []expr.Issue
+	more := 0
 	bad := func(line int, format string, args ...any) {
+		// A pasted file of junk would otherwise build a response as large as
+		// the request; the first lines are enough to show what is wrong.
+		if len(issues) == maxTypedIssues {
+			more++
+			return
+		}
 		issues = append(issues, expr.Issue{Path: "entries", Msg: fmt.Sprintf("line %d: ", line) + fmt.Sprintf(format, args...)})
 	}
 	seen := map[netip.Prefix]int{}
@@ -227,6 +237,8 @@ func parseTyped(text string, wide bool) ([]string, []expr.Issue) {
 		}
 	}
 	switch {
+	case more > 0:
+		return nil, append(issues, expr.Issue{Path: "entries", Msg: fmt.Sprintf("and %d more lines have problems", more)})
 	case len(issues) > 0:
 		return nil, issues
 	case len(out) == 0:
