@@ -429,15 +429,16 @@ func strictDecode(src string, v any) error {
 // markers in the text.
 func parseRecipes(t *testing.T, src string) (recipes []*recipe, rules, proofs int) {
 	t.Helper()
-	var cur *recipe
+	// Text before the first "## " is a recipe of its own, so a marker there is
+	// run, and a broken fence there fails by name rather than on a nil recipe.
+	cur := &recipe{heading: "(before the first ## heading)"}
+	recipes = append(recipes, cur)
 	var pending, when, phase, id string // what the next fence is for
 	start := 0
 	lines := strings.Split(src, "\n")
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
-		if cur != nil {
-			cur.text = strings.Join(lines[start:min(i+1, len(lines))], "\n")
-		}
+		cur.text = strings.Join(lines[start:min(i+1, len(lines))], "\n")
 		if h, ok := strings.CutPrefix(line, "## "); ok {
 			cur = &recipe{heading: h}
 			start = i
@@ -591,8 +592,13 @@ func TestDocsCookbookRecipes(t *testing.T) {
 				if compiled == nil {
 					t.Fatalf("does not compile: %v", errs)
 				}
-				if len(warns) > 0 && !strings.Contains(r.text, "expect the warning") {
-					t.Fatalf("saves with warnings the recipe does not mention: %v", expr.Issues(warns))
+				// "expect the warning" names exactly one warning, so a second, unrelated one fails, and so does none.
+				want := 0
+				if strings.Contains(r.text, "expect the warning") {
+					want = 1
+				}
+				if len(warns) != want {
+					t.Fatalf("saves with %d warnings, the recipe mentions %d: %v", len(warns), want, expr.Issues(warns))
 				}
 				var tests []ConfigTest
 				for _, body := range r.tests {
