@@ -2,6 +2,16 @@
 
 For Envoy, APISIX, Kong and other gateways you run yourself, see [Why a custom proxy](why-custom-proxy.md).
 
+## In short
+
+- Pick this proxy, behind a vendor, when you need exact rate limits shared by every node, limits keyed on a verified identity, a header contract with your services, or tested, canaried policy changes owned by the application team ([rate limiting](#rate-limiting), [auth, CORS, headers, responses](#auth-cors-headers-responses), [rules and change safety](#rules-and-change-safety)).
+- Pick a vendor alone when approximate limits are fine and you use one vendor, or when your needs stop at basic IP rate limits, custom error bodies, static CORS headers, simple header edits and path normalization ([where each side wins](#where-each-side-wins)).
+- Keep a vendor in front either way: the proxy does no Open Worldwide Application Security Project (OWASP) rules, bot management, volumetric distributed denial-of-service (DDoS) protection or client Transport Layer Security (TLS) ([perimeter](#perimeter)).
+- The cost of the proxy is one extra network hop, plus one pipelined Valkey round trip when a rate-limit rule matches ([added latency](#perimeter)).
+- For your own situation, see the [decision guide](#decision-guide).
+
+## Why run it behind a vendor
+
 **Why run this proxy if you already have Cloudflare, AWS WAF + CloudFront, Azure Front Door, Google Cloud Armor, Fastly or Akamai?**
 
 Don't run it *instead of* a vendor. Run it *behind* one when you need application policy the vendors offer only through custom edge code or Enterprise add-ons:
@@ -12,6 +22,8 @@ Don't run it *instead of* a vendor. Run it *behind* one when you need applicatio
 - tested, canaried policy changes owned by the application team
 
 If none of those matter, a vendor alone is simpler.
+
+## How to read the tables
 
 | Mark | Meaning |
 |---|---|

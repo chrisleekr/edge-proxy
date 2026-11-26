@@ -1,6 +1,11 @@
 # Autopilot
 
-Autopilot adds a short-lived rate limit during an attack. A language model investigates and proposes a rule through admin's [MCP tools](../reference/api.md#mcp-tools). Admin decides: it checks the proposal against fixed checks and your budgets, runs the rule log-only first, and lets it block only when it would block few other clients. Each autopilot rule expires at most 24 hours ahead and is renewed only while it is still needed, up to `max_lifetime` (7 days by default). Autopilot rules run after yours, as an [overlay](publishing.md#autopilot-rules).
+Autopilot adds a short-lived rate limit during an attack. A language model investigates and proposes a rule through admin's Model Context Protocol (MCP) [tools](../reference/api.md#mcp-tools). Admin decides.
+
+- Admin checks the proposal against fixed checks and your budgets.
+- The rule runs log-only first, and blocks only when it would block few other clients.
+- Each autopilot rule expires at most 24 hours ahead. It is renewed only while it is still needed, up to `max_lifetime` (7 days by default).
+- Autopilot rules run after yours, as an [overlay](publishing.md#autopilot-rules).
 
 ## How it works
 
@@ -9,8 +14,17 @@ An example with the default settings (`mode: auto`):
 1. Requests rise over 5 times their baseline (at least 1,000), [`traffic_surge`](../operate/notifications.md#signals) fires, and admin opens a case.
 2. The runner claims the case and runs the model. The model reads the stats, routes and rules and finds the surge on `POST /login`. It tests a rule with `validate_rule` and `simulate_rule`, then proposes it ([example](#example-a-proposal)).
 3. Admin runs its [checks](#proposals-and-the-checks). A refused proposal goes back to the model with the reasons.
-4. The next publish puts the rule on the edges, logging only. After 5 minutes (`observe_for`), admin looks at what it would have blocked. The rule starts blocking when it would still block someone, the blocks besides its heaviest clients are at most 2% of the fleet's requests (`max_block_share`), and none of the clients it would block most is a verified crawler or a protected subject. Otherwise it is rejected.
-5. While it blocks, its own [rule guard](#the-rule-guard) can roll it back. Its TTL counts again from when it started blocking, and near its expiry it is renewed by `default_ttl` (1h) only if it blocked someone in the last 10 minutes, up to `max_lifetime`. Once it blocks no one, it runs out at its current expiry. It renews on any client it blocks, so a rule that keeps blocking legitimate clients, such as many users behind one address, keeps running: **Mark false positive** on its case.
+4. The next publish puts the rule on the edges, logging only. After 5 minutes (`observe_for`), admin looks at what it would have blocked. The rule starts blocking when all of these hold:
+    - It would still block someone.
+    - The blocks besides its heaviest clients are at most 2% of the fleet's requests (`max_block_share`).
+    - None of the clients it would block most is a verified crawler or a protected subject.
+
+    Otherwise it is rejected.
+5. While it blocks, its own [rule guard](#the-rule-guard) can roll it back. Its renewal works like this:
+    - Its TTL counts again from when it started blocking.
+    - Near its expiry it is renewed by `default_ttl` (1h) only if it blocked someone in the last 10 minutes, up to `max_lifetime`.
+    - Once it blocks no one, it runs out at its current expiry.
+    - It renews on any client it blocks. A rule that keeps blocking legitimate clients, such as many users behind one address, keeps running: click **Mark false positive** on its case.
 
 In `observe` mode, step 4 also waits for a person to click **Approve blocking** on the case. A rule nobody approves runs out at its expiry. Every step shows on the [Autopilot page](#the-autopilot-page) and on the [case's page](#reading-a-case).
 
@@ -37,6 +51,26 @@ sequenceDiagram
     Note over Edges,Admin: renewed while it blocks, then expires
 ```
 
+## Turn it on and act on a proposal
+
+You turn autopilot on in the settings, read the cases it opens, and approve, retire or exclude what it proposes.
+
+1. Run the runner. Admin opens cases only while a runner was seen in the last 2 minutes. [Autopilot runner](../deploy/autopilot.md) covers its image and settings. Without one, **Status** on **Overview** warns that nothing new is investigated.
+2. Open **Autopilot**, under **Monitor**, then the **Settings** tab. Changing settings needs `settings.manage`.
+3. Pick the **Mode**, then click **Save autopilot settings** and confirm. It applies from the next run.
+    - **Observe: a person approves each block.** Sensors are added and enforce rules are measured. Each enforce rule waits for your **Approve blocking**.
+    - **Auto: blocks once the measurements hold.** An enforce rule blocks on its own once its measurements pass.
+    - **Off** is offered only while it is off.
+4. Wait for a case, or ask for one. Admin opens a [case](#cases) on an anomaly, an hourly sweep or a daily review. With `autopilot.manage`, click **Investigate** on a rule's editor, a route's page or an open anomaly on **Notifications**, and add a question if you want.
+5. Open the case from **Cases** or **Live rules** on **Overview**. Read [the case](#reading-a-case) from the top: **Trigger**, **Verdict** (its **Needs you** list), **Policy checks**, then **Actions**.
+6. Act on each rule under **Actions**. These need `autopilot.manage`.
+    - **Approve blocking** lets an observing enforce rule block. It shows only in `observe` mode, and is refused until the rule has observed for `observe_for`.
+    - **Retire** ends the rule. It asks for a reason.
+    - **Mark false positive** ends the rule and stops it being proposed again. It asks for a reason.
+    - A rule you do nothing about runs out at its expiry. In `observe` mode that includes an enforce rule nobody approves.
+7. To stop one client from being counted or blocked, click **Exclude a client** on the sensor's case. Enter the client, host, path prefix and a reason, pick an expiry and click **Exclude** ([details](#exclusions)). **Revoke** on **Overview** ends one.
+8. To turn it off, click **Turn autopilot off** on **Overview** (needs `settings.manage`), give a reason and confirm. Every autopilot rule is retired and leaves the edges in one publish. Your own rules don't change ([details](#turning-it-off)).
+
 ## Example: a proposal
 
 The model calls `propose` with the rule it wants. It names the rule and sets a TTL; admin sets the id, the expiry and whether it logs or blocks:
@@ -62,8 +96,19 @@ The model calls `propose` with the rule it wants. It names the rule and sets a T
 Admin accepts it and answers with the new rule's id, `ap-<name>-<proposal id>`. `checks` lists every check with its result; one is shown here:
 
 ```json
-{"proposal_id": 42, "accepted": true, "rule_id": "ap-login-post-42", "reasons": [],
- "checks": [{"name": "site_wide", "ok": true, "detail": "an autopilot rule never matches every request"}]}
+{
+  "proposal_id": 42,
+  "accepted": true,
+  "rule_id": "ap-login-post-42",
+  "reasons": [],
+  "checks": [
+    {
+      "name": "site_wide",
+      "ok": true,
+      "detail": "an autopilot rule never matches every request"
+    }
+  ]
+}
 ```
 
 On the edges the rule runs as:
@@ -83,8 +128,18 @@ expires:  1h after it goes live, counted again from when it starts blocking,
 The same rule with `and ip.src in {"203.0.113.0/24"}` added is refused. Autopilot limits whoever crosses a rate; it never lists clients:
 
 ```json
-{"proposal_id": 43, "accepted": false, "reasons": ["named_subjects"],
- "checks": [{"name": "named_subjects", "ok": false, "detail": "the rule names no IP, AS number, X-Forwarded-For, JWT claim value or a client IP, network or location header"}]}
+{
+  "proposal_id": 43,
+  "accepted": false,
+  "reasons": ["named_subjects"],
+  "checks": [
+    {
+      "name": "named_subjects",
+      "ok": false,
+      "detail": "the rule names no IP, AS number, X-Forwarded-For, JWT claim value or a client IP, network or location header"
+    }
+  ]
+}
 ```
 
 ## What runs where
@@ -101,9 +156,19 @@ The same rule with `and ip.src in {"203.0.113.0/24"}` added is refused. Autopilo
 
 **Overview** shows:
 
-- **Status:** the mode, how many cases are open, each runner seen in the last day with its version, the providers it holds a credential for and when it was last seen, and any warning, such as a model whose provider no connected runner holds. When no runner was seen in the last 2 minutes it says so: nothing new is investigated, and live rules run until they expire. While the autopilot is on, it also names the [automatic cases](#cases) turned off in the settings. Three budgets show what is in use: **Enforce rules** (`max_enforcing`), **Sensors** (`max_sensors`) and **Cases started this hour** (`cases_per_hour`). With `settings.manage`, **Turn autopilot off** is the [kill switch](#turning-it-off).
+- **Status:**
+    - The mode and how many cases are open.
+    - Each runner seen in the last day: its version, the providers it holds a credential for and when it was last seen.
+    - Any warning, such as a model whose provider no connected runner holds.
+    - When no runner was seen in the last 2 minutes, a notice: nothing new is investigated, and live rules run until they expire.
+    - While the autopilot is on, the [automatic cases](#cases) turned off in the settings.
+    - Three budgets: **Enforce rules** (`max_enforcing`), **Sensors** (`max_sensors`) and **Cases started this hour** (`cases_per_hour`).
+    - With `settings.manage`, **Turn autopilot off**, the [kill switch](#turning-it-off).
 - **Find an autopilot rule** narrows **Live rules** to the rules whose ID contains what you type, and **Cases** to the cases opened on exactly that rule ID. An autopilot rule's ID on **Rules** links here with it filled in.
-- **Live rules:** each proposed, observing or enforcing rule, as a sensor or an enforce rule, with its condition as admin renders it, its limit and key, and when it expires. Once an enforce rule has been measured, it shows the share of the requests it checked that were over its limit while it only logged; the edges count every request, so the share is exact. With `stats.read`, each rule also shows how many requests it found over its limit in the picked range while logging and while blocking, with a sparkline of each; the counts are exact. A rule's ID opens the case that made it.
+- **Live rules:** each proposed, observing or enforcing rule, as a sensor or an enforce rule. A rule's ID opens the case that made it.
+    - Each shows its condition as admin renders it, its limit and key, and when it expires.
+    - Once an enforce rule has been measured, it shows the share of the requests it checked that were over its limit while it only logged. The edges count every request, so the share is exact.
+    - With `stats.read`, it also shows how many requests it found over its limit in the picked range while logging and while blocking, with a sparkline of each. The counts are exact.
 - **Exclusions:** the [exclusions](#exclusions) active now and those that ended in the last 30 days, with **Revoke** for an active one with `autopilot.manage`.
 - **Cases:** the latest 20 cases, newest first, with what started each, its state and its verdict.
 
@@ -114,13 +179,23 @@ The same rule with `and ip.src in {"203.0.113.0/24"}` added is refused. Autopilo
 
 ### Spend
 
-What finished runs cost, for the last 24 hours and the last 7 days, counted back from now by when each run started. A run still going is not counted. **At your prices** is each run's token counts, as the runner reported them, times the price in effect when it started: exact for your price table. A run whose model had no price is left out of it and counted as having no price. **The provider's estimate** is the runner's report of what the provider itself estimated, for the runs that reported one.
+What finished runs cost, for the last 24 hours and the last 7 days, counted back from now by when each run started. A run still going is not counted.
 
-**By day and model** splits the finished runs started in the last 14 UTC days, today included, by UTC day and model, newest day first: runs, cases, the cost at your prices, the cost per case and the provider's estimate. A case whose run failed and was queued again counts once in **Cases**. **Per case** is the cost at your prices divided by cases, or `n/a` with the number of unpriced runs when any run that day had no price.
+- **At your prices:** each run's token counts, as the runner reported them, times the price in effect when it started. It is exact for your price table. A run whose model had no price is left out and counted as having no price.
+- **The provider's estimate:** the runner's report of what the provider itself estimated, for the runs that reported one.
+
+**By day and model** splits the finished runs started in the last 14 UTC days, today included, by UTC day and model, newest day first. Its columns are runs, cases, the cost at your prices, the cost per case and the provider's estimate.
+
+- A case whose run failed and was queued again counts once in **Cases**.
+- **Per case** is the cost at your prices divided by cases. It is `n/a`, with the number of unpriced runs, when any run that day had no price.
 
 ### Precision
 
-How the enforce rules that ended in the last 7 days turned out, one row per model and prompt, the prompt named by the first 12 characters of its SHA-256. **Right** counts the rules that ran out after blocking and the rules a person adopted. **Wrong** counts the rules their [guard](#the-rule-guard) rolled back and the rules a person marked a false positive. Rules retired for another reason, rejected before they blocked, or sensors are not counted. The counts are exact.
+How the enforce rules that ended in the last 7 days turned out, one row per model and prompt. The prompt is named by the first 12 characters of its SHA-256. The counts are exact.
+
+- **Right** counts the rules that ran out after blocking and the rules a person adopted.
+- **Wrong** counts the rules their [guard](#the-rule-guard) rolled back and the rules a person marked a false positive.
+- Rules retired for another reason, rejected before they blocked, or sensors are not counted.
 
 ## Reading a case
 
@@ -129,24 +204,45 @@ A case's page starts with what you need to know: the answer, what needs you and 
 ![A case](../assets/screenshots/autopilot-case.png)
 
 - **Trigger:** what opened it, its question, who opened it and when, and its state.
-- **Verdict:** the model's **summary**, its answer in one sentence of at most 300 characters, with `attack`, `benign` or `unsure` (not shown on a daily review, which judges no attack). **Needs you** lists up to 5 decisions only a person can make; one about an autopilot rule links to the case that made it, where its actions are, only when the rule is one of this case's rules or a live autopilot rule. The **Done** line, a plain line and not a heading, says what the case proposed and how many admin accepted, from admin's own records. **How it decided**, folded, holds the model's reasoning and numbers, at most 4,000 characters. Cases closed before these fields existed show their longer summary in place of the sentence.
+- **Verdict:**
+    - The model's **summary**: its answer in one sentence of at most 300 characters, with `attack`, `benign` or `unsure`. The `attack`, `benign` or `unsure` label is not shown on a daily review, which judges no attack.
+    - **Needs you** lists up to 5 decisions only a person can make. One about an autopilot rule links to the case that made it, where its actions are, only when the rule is one of this case's rules or a live autopilot rule.
+    - The **Done** line, a plain line and not a heading, says what the case proposed and how many admin accepted, from admin's own records.
+    - **How it decided**, folded, holds the model's reasoning and numbers, at most 4,000 characters.
+    - Cases closed before these fields existed show their longer summary in place of the sentence.
 - **Policy checks:** each proposal, accepted or refused, with every [check](#proposals-and-the-checks) it passed or failed. A proposal that passed every check shows one line, with the checks folded.
-- **Actions:** each rule the case made, with its state, how it ended and every change of state. With `autopilot.manage`: **Approve blocking**, in `observe` mode, for an observing enforce rule, refused until it has observed for `observe_for`; **Retire** and **Mark false positive**, each asking for a reason that the rule's history and the audit log keep; and, for a sensor, **Exclude a client** (see [Exclusions](#exclusions)). With `config.write`, **Adopt** copies a live rule into the draft, as on [Rules](dashboard.md#rules).
+- **Actions:** each rule the case made, with its state, how it ended and every change of state. With `autopilot.manage`:
+    - **Approve blocking**, in `observe` mode, for an observing enforce rule. It is refused until the rule has observed for `observe_for`.
+    - **Retire** and **Mark false positive**, each asking for a reason that the rule's history and the audit log keep.
+    - For a sensor, **Exclude a client** (see [Exclusions](#exclusions)).
+
+    With `config.write`, **Adopt** copies a live rule into the draft, as on [Rules](../tour/policy.md#rules).
 - **Evidence:** folded until opened. For each proposal, the model's rationale and the evidence it cited, as it wrote them.
-- **Tool calls:** folded until opened. Every MCP call the case's runs made, in order, as admin recorded it. Each is closed until opened, and shows the arguments and admin's answer or refusal, and how long it took. Admin's answer needs both `stats.read` and `config.read`, and is hidden without either one, with the permissions it needs. A [connector](#external-metrics-and-logs) call's answer also needs `autopilot.manage`; hidden, it shows neither its arguments nor its refusal, since its query and error text are part of what it read. A call over 64 KiB is kept only as its size and SHA-256, and shows just those.
+- **Tool calls:** folded until opened. Every MCP call the case's runs made, in order, as admin recorded it. Each call is closed until opened, and shows the arguments, admin's answer or refusal, and how long it took.
+    - Admin's answer needs both `stats.read` and `config.read`. Without either one it is hidden, with the permissions it needs.
+    - A [connector](#external-metrics-and-logs) call's answer also needs `autopilot.manage`. Hidden, it shows neither its arguments nor its refusal, since its query and error text are part of what it read.
+    - A call over 64 KiB is kept only as its size and SHA-256, and shows just those.
 - **Cost:** each run's model, prompt and tool list hashes (the first 12 characters of each SHA-256), result, token counts, cost at your prices and the provider's estimate.
 
 **Replay with another model** shows the command that [replays](#replay-and-evaluation) the case's run against a provider and model you pick. Admin calls no model for it.
 
 **Investigate**, with `autopilot.manage`, opens a case and this page: on a rule's editor, on a route's page, and on an open traffic or rule anomaly on **Notifications**. It takes an optional question.
 
-[Find](dashboard.md#find) opens one of the latest 100 cases by `Case N`, and one of the newest 500 notes by `Note N` or words from the first 80 characters of its statement.
+[Find](../tour/index.md#find) opens one of the latest 100 cases by `Case N`, and one of the newest 500 notes by `Note N` or words from the first 80 characters of its statement.
 
 ## Settings
 
-`GET` and `PUT /api/settings/autopilot` (`settings.manage` to change). `PUT` replaces every setting: send the whole object from `GET`, since a setting left out is saved as zero or empty where its range allows it, such as `max_enforcing: 0`. The exceptions are `sweep_enabled`, `review_enabled` and `anomaly_investigation_enabled`: left out, each is saved as `true`. Every change is audited (`settings.autopilot`) and takes effect on the next run.
+The settings are `GET` and `PUT /api/settings/autopilot` (`settings.manage` to change). Every change is audited (`settings.autopilot`) and takes effect on the next run.
 
-A rule is renewed only in the last quarter of its TTL, on a 30 second run that publishes at most once every `min_publish_interval`, so `default_ttl` and `max_ttl` must be at least 4 times (30s plus `min_publish_interval`): 6m at the default `min_publish_interval` of 1m. A `PUT` below that is refused with `422`. Stored settings below it are raised to it when read, as is `max_lifetime`. An enforce rule logs only for `observe_for` first, so `default_ttl`, and an enforce proposal's own `ttl`, must also be over `observe_for` plus `min_publish_interval` and 30s (6m30s at the defaults); a shorter one would expire before it blocks.
+- `PUT` replaces every setting: send the whole object from `GET`.
+- A setting left out is saved as zero or empty where its range allows it, such as `max_enforcing: 0`.
+- The exceptions are `sweep_enabled`, `review_enabled` and `anomaly_investigation_enabled`: left out, each is saved as `true`.
+
+Limits on the TTL settings:
+
+- A rule is renewed only in the last quarter of its TTL, on a 30 second run that publishes at most once every `min_publish_interval`. So `default_ttl` and `max_ttl` must be at least 4 times (30s plus `min_publish_interval`): 6m at the default `min_publish_interval` of 1m.
+- A `PUT` below that is refused with `422`. Stored settings below it are raised to it when read, as is `max_lifetime`.
+- An enforce rule logs only for `observe_for` first. So `default_ttl`, and an enforce proposal's own `ttl`, must also be over `observe_for` plus `min_publish_interval` and 30s (6m30s at the defaults). A shorter one would expire before it blocks.
 
 | Setting | Default | Range | What it does |
 |---|---|---|---|
@@ -156,15 +252,25 @@ A rule is renewed only in the last quarter of its TTL, on a 30 second run that p
 | `observe_for` | 5m | 1m to 1h | How long an enforce rule logs before it may block |
 | `default_ttl` | 1h | 4 × (30s + `min_publish_interval`) to `max_ttl`, and over `observe_for` + `min_publish_interval` + 30s | A rule's TTL when the proposal sets none, and an enforcing rule's renewal |
 | `max_ttl` | 24h | 4 × (30s + `min_publish_interval`) to 24h | The longest TTL; a sensor is renewed by this much |
-| `max_lifetime` | 168h | `max_ttl` to 720h | How long a rule, and the sensor it cites, may keep being renewed; also how long a rolled back or false positive rule is not proposed again, and how long a sweep does not propose a sensor that ended unused or was retired by a daily review. A sensor is unused when it has been live at least `max_ttl` and matched no requests over the last `max_ttl` |
+| `max_lifetime` | 168h | `max_ttl` to 720h | How long a rule, and the sensor it cites, may keep being renewed. Also how long a rolled back or false positive rule is not proposed again, and how long a sweep does not propose a sensor that ended unused or was retired by a daily review (see below) |
 | `max_block_share` | 0.02 | 0.001 to 0.2 | The most of the fleet's requests one autopilot rule may block besides its heavy subjects, each at least 5% of a minute's blocks: the collateral. See [Rule states](#rule-states) |
 | `cases_per_hour` | 20 | 1 to 200 | Runs started in the last hour |
 | `min_publish_interval` | 1m | 30s to 15m | Least time from the last autopilot publish of any kind to one that adds or renews rules. Removals don't wait |
 | `sweep_enabled` | `true` | `true`, `false` | Whether admin opens the hourly sweep. See [Cases](#cases) |
 | `review_enabled` | `true` | `true`, `false` | Whether admin opens the daily review. Off, sensors are not retired to make room for the sweep and notes are not merged; admin still re-checks every note's claim daily |
 | `anomaly_investigation_enabled` | `true` | `true`, `false` | Whether admin opens a case for a firing anomaly. Off, no case opens for an anomaly, so a notification waits only for a case already open on it; see [what the autopilot holds back](../operate/notifications.md#what-the-autopilot-holds-back) |
-| `model`, `sweep_model` | `claude-opus-5-5` | a model id | The model for cases, and for sweeps and reviews. While `sweep_enabled` and `review_enabled` are both `false` and no sweep or review is queued, a missing credential for `sweep_model` raises no warning. A model id containing `claude` runs on a runner's `claude` credential; any other on `openai` |
-| `protected_subjects` | none | up to 200 IPs, CIDRs or AS numbers | Subjects no autopilot rule may block. Each autopilot rule leaves the networks out of its expression on the edges; your own rules still apply to them. Together with the active exclusions, as `not ip.src in {...}`, they must fit in half of an expression (2,000 characters). An AS number is accepted but not yet matched: the stats name subjects by address. Subjects are checked only for a rule whose key includes `ip`, which admin puts first in the key; a rule keyed on a JWT claim alone is not checked |
+| `model`, `sweep_model` | `claude-opus-5-5` | a model id | The model for cases, and for sweeps and reviews (see below) |
+| `protected_subjects` | none | up to 200 IPs, CIDRs or AS numbers | Subjects no autopilot rule may block (see below) |
+
+Notes on the settings above:
+
+- **An unused sensor** has been live at least `max_ttl` and matched no requests over the last `max_ttl`.
+- **`model` and `sweep_model`:** a model id containing `claude` runs on a runner's `claude` credential. Any other runs on `openai`. While `sweep_enabled` and `review_enabled` are both `false` and no sweep or review is queued, a missing credential for `sweep_model` raises no warning.
+- **`protected_subjects`:**
+    - Each autopilot rule leaves the networks out of its expression on the edges. Your own rules still apply to them.
+    - Together with the active exclusions, as `not ip.src in {...}`, they must fit in half of an expression (2,000 characters).
+    - An AS number is accepted but not yet matched: the stats name subjects by address.
+    - Subjects are checked only for a rule whose key includes `ip`, which admin puts first in the key. A rule keyed on a JWT claim alone is not checked.
 
 ## Cases
 
@@ -176,11 +282,31 @@ A case is one question for the model. Admin opens one:
 - **Investigate** (`POST /api/autopilot/cases`, `autopilot.manage`): a person asks about a rule, a route, or a traffic or rule anomaly (not the autopilot's own or a crawler source's), with an optional question, or asks a question alone. Admin also opens one on each rule still enforcing on a note that was [retracted](#re-checks).
 - **Ablation:** a re-run of a case with a confirmed [note](#memory) withheld.
 
-The anomaly cases, the sweep and the review each have a setting that turns them off: `anomaly_investigation_enabled`, `sweep_enabled` and `review_enabled`. Turning one off stops new cases of that kind only. It cancels no case, retires no rule and removes nothing from the active version. Investigate cases, ablations and the cases opened for a retracted note have no setting.
+Turning off a kind of case:
 
-Admin opens cases only while a runner was seen in the last 2 minutes, at most one per target at a time and 100 open at most. A case still queued an hour after it was opened, or after it was last queued again, is cancelled at the next run. A runner takes the oldest queued case whose model's provider it holds a credential for. It holds a case on a 10 minute lease it renews by heartbeat. When the lease lapses, or the run reports `error` or `timeout`, the case is queued again once, then fails. A case that fails or ends `unsure` raises [`autopilot_needs_person`](../operate/notifications.md#signals), and so does one that ends `attack` with no enforce rule accepted, or with one accepted in `observe` mode that no person has approved yet, unless the case's rule is an autopilot rule that already enforces.
+- The anomaly cases, the sweep and the review each have a setting that turns them off: `anomaly_investigation_enabled`, `sweep_enabled` and `review_enabled`.
+- Turning one off stops new cases of that kind only. It cancels no case, retires no rule and removes nothing from the active version.
+- Investigate cases, ablations and the cases opened for a retracted note have no setting.
 
-Every run is kept: its model and provider, the prompt and tool list hashes, the runner's events (at most 1,000 and 4 MiB a run), every tool call admin answered, its token use and its cost. Cost is from the model prices admin holds (`POST /api/autopilot/prices`), at the price in effect when the run started, and from what the runner reports. Cost is recorded and reported only; a model with no price still runs.
+How a case is queued and run:
+
+- Admin opens cases only while a runner was seen in the last 2 minutes, at most one per target at a time and 100 open at most.
+- A case still queued an hour after it was opened, or after it was last queued again, is cancelled at the next run.
+- A runner takes the oldest queued case whose model's provider it holds a credential for.
+- It holds a case on a 10 minute lease it renews by heartbeat.
+- When the lease lapses, or the run reports `error` or `timeout`, the case is queued again once, then fails.
+
+A case raises [`autopilot_needs_person`](../operate/notifications.md#signals) when it:
+
+- fails or ends `unsure`, or
+- ends `attack` with no enforce rule accepted, or with one accepted in `observe` mode that no person has approved yet, unless the case's rule is an autopilot rule that already enforces.
+
+Every run is kept:
+
+- Its model and provider, the prompt and tool list hashes, and the runner's events (at most 1,000 and 4 MiB a run).
+- Every tool call admin answered, its token use and its cost.
+- Cost is from the model prices admin holds (`POST /api/autopilot/prices`), at the price in effect when the run started, and from what the runner reports.
+- Cost is recorded and reported only. A model with no price still runs.
 
 ## Proposals and the checks
 
@@ -197,7 +323,7 @@ The model proposes `add_sensor`, `enforce` or `retire` (of a sensor). Admin chec
 | `missing_key_rejects` | `on_missing_key: reject` |
 | `ttl_over_max`, `lifetime_over_max` | A TTL past `max_ttl`, or a rule that would outlast the cited sensor's `max_lifetime` |
 | `penalty_past_expiry` | A penalty longer than the TTL |
-| `named_subjects` | An expression comparing `ip.src`, `ip.src.asnum`, `http.x_forwarded_for`, a JWT claim or a client IP header (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP`, `CF-Connecting-IPv6`, `CloudFront-Viewer-Address`, `X-GCLB-Client-IP`), a CDN header carrying a network or near-exact location (`CloudFront-Viewer-ISP`, `-Postal-Code`, `-Latitude`, `-Longitude`, `-ASN`, `CF-Postal-Code`, `CF-IPLatitude`, `CF-IPLongitude`), with any operator, negated or not, or any condition whose value is an IP address or a prefix. Autopilot limits whoever crosses a rate; it never lists clients. A client IP header under another name, or an address written another way, is not caught |
+| `named_subjects` | An expression that names a client (see below). Autopilot limits whoever crosses a rate; it never lists clients |
 | `duplicate` | The same expression and key as a live rule, yours or autopilot's |
 | `suppressed` | A rule with exactly the same expression and key as one rolled back or marked a false positive within `max_lifetime`. It is best effort: any change to the expression or key is a new rule |
 | `sweep_repeat` | A sensor proposed by a sweep with exactly the same expression and key as one that ended unused or was retired by a daily review within `max_lifetime`. Other cases may still propose it, for instance with a looser limit |
@@ -205,7 +331,21 @@ The model proposes `add_sensor`, `enforce` or `retire` (of a sensor). Admin chec
 | `budget_sensors`, `budget_enforcing` | A proposal past `max_sensors` or `max_enforcing` |
 | `note_key`, `note_jwt_key` | A key a confirmed [note](#citing-a-note) the proposal cites rules out |
 
-Each accepted rule gets the id `ap-<name>-<n>` and starts with `action: log`. Admin adds to its expression what no autopilot rule may limit, so the edges leave it out on every request: `and not client.verified_bot` while `VERIFIED_BOT_SOURCES` is set, `and not ip.src in {...}` with the protected networks, and the active [exclusions](#exclusions). The rule's content is fixed when it is proposed, so a later change to `protected_subjects` applies to new rules only. The check of its top subjects before it enforces still refuses it early.
+`named_subjects` refuses an expression that compares, with any operator, negated or not:
+
+- `ip.src`, `ip.src.asnum`, `http.x_forwarded_for` or a JWT claim.
+- A client IP header: `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP`, `CF-Connecting-IPv6`, `CloudFront-Viewer-Address` or `X-GCLB-Client-IP`.
+- A CDN header carrying a network or near-exact location: `CloudFront-Viewer-ISP`, `-Postal-Code`, `-Latitude`, `-Longitude`, `-ASN`, `CF-Postal-Code`, `CF-IPLatitude` or `CF-IPLongitude`.
+
+It also refuses any condition whose value is an IP address or a prefix. A client IP header under another name, or an address written another way, is not caught.
+
+Each accepted rule gets the id `ap-<name>-<n>` and starts with `action: log`. Admin adds to its expression what no autopilot rule may limit, so the edges leave it out on every request:
+
+- `and not client.verified_bot` while `VERIFIED_BOT_SOURCES` is set.
+- `and not ip.src in {...}` with the protected networks.
+- The active [exclusions](#exclusions).
+
+The rule's content is fixed when it is proposed, so a later change to `protected_subjects` applies to new rules only. The check of its top subjects before it enforces still refuses it early.
 
 ## Rule states
 
@@ -220,32 +360,135 @@ flowchart LR
     Enforcing -->|"expires once it stops blocking,<br/>rolled back, retired or adopted"| Ended
 ```
 
-- **Proposed** until the next publish that may add rules: no canary is running and `min_publish_interval` has passed since the last. When a live edge's deployment settings or schema refuse the publish that would add it, it is **rejected** with that reason (`deployment` or `schema`), so it never holds back later ticks; expiries and rollbacks still go out.
-- **Observing:** live on the edges, logging only. A sensor stays here, renewed by `max_ttl` while it is due within a quarter of its TTL, up to `max_lifetime`, unless it is idle: live at least `max_ttl` and matched no requests over the last `max_ttl`, counting requests it matched but the edge did not check because the request had already matched its limit of rate-limit rules. A sensor that has not lived `max_ttl` is always renewed, however short its first TTL. It is renewed when any whole minute of that window has no stats for it, as when stats ingest was down. An enforce rule is not renewed while it observes, so in `observe` mode one nobody approves expires.
-- **Enforcing:** an enforce rule blocks once it has observed for `observe_for` (and, in `observe` mode, a person approved it with `POST /api/autopilot/rules/{id}/enforce`). Before it does, admin measures its shadow counts since it went live. It is **rejected** instead when, besides its heavy subjects, it would block over `max_block_share` of the fleet's requests (`block_share`), when a subject it would block, an IPv4 address or an IPv6 /64 as the edge shows it, overlaps a verified crawler range (`crawler_subject`) or a protected subject (`protected_subject`), or when it would have blocked nothing over the last `observe_for` (`attack_stopped`). Its heavy subjects are found minute by minute, each holding at least 5% of the rule's logged requests in that minute. Their estimates are summed over the window and left out once, less an allowance of 3 × √(16 × H) for sampling error, where H is that sum and 16 is the edges' sampling rate: an edge adds one limited request in 16 to a subject's estimate. An attack spread so thin that no subject reaches 5% of a minute counts as collateral, and is refused. A rule keyed on `ja4` alone, scoped to a client signal, has no heavy subject to leave out: its bucket is the whole fleet on one fingerprint. Its collateral is instead bounded by the signal's baseline: the median per-minute count of the requests carrying the signal over the same clock window on each of the previous 7 days (the median of the 60 minutes before it went live when fewer than 3 of those days have data), times the minutes in which the rule would have limited, and never more than its logged count. An `in` list counts the sum of its signals, since any of them matches; signal conditions joined by `and` use the lowest of their baselines. Only minutes whose config version had the same browser floor or trusted CDN headers as the active version count, so with none, or no stored signal counts, there is no baseline and the whole logged count is collateral. That bound is what `max_block_share` is checked against. When the baseline is at most `max_block_share` of the fleet's median requests per minute over the 60 minutes before the rule went live, blocking everything the signal carries fits the budget and the rule observes 1 minute instead of `observe_for`. A confirmed [note](#citing-a-note) the rule cites can lower that share, halve `observe_for`, or hold it back (`note_expected_pattern`). When it starts blocking, its TTL counts again from then, so time spent observing and waiting for a publish doesn't leave it too little to be renewed; it never runs past `max_lifetime` after it, or the sensor it cites, went live. An enforcing rule is renewed by `default_ttl` only if it blocked within the last 10 minutes, so it runs out once the attack moves on.
-- **Ended:** expired, expired unused (a sensor idle at its expiry: live at least `max_ttl` and matched no requests over the last `max_ttl`; the transition and audit row carry the window and counts that decided it), retired by a person (`POST /api/autopilot/rules/{id}/retire`, with `false_positive` to stop it being proposed again), retired by the model (sensors only: an enforcing rule ends at its expiry or by a person), adopted into your draft, or rolled back by its guard. When a new rule no longer compiles with the rules you published since, admin can't tell which one broke the publish, so every proposed rule is **rejected** (`compile`).
+| State | What it does | Leaves when |
+|---|---|---|
+| **Proposed** | Waits to be published | The next publish that may add rules: no canary is running and `min_publish_interval` has passed since the last. It is rejected if that publish is refused |
+| **Observing** | Live on the edges, logging only | An enforce rule has observed for `observe_for` and its measurements hold, or it is rejected. A sensor expires, is retired or adopted |
+| **Enforcing** | An enforce rule that blocks | It expires once it stops blocking, is rolled back by its guard, retired or adopted |
+| **Rejected** | Never blocked | Final |
+| **Ended** | Gone from the edges | Final |
+
+The details of each state follow.
+
+### Proposed
+
+When a live edge's deployment settings or schema refuse the publish that would add the rule, it is **rejected** with that reason (`deployment` or `schema`). It then never holds back later ticks. Expiries and rollbacks still go out.
+
+### Observing
+
+- A sensor stays here, renewed by `max_ttl` while it is due within a quarter of its TTL, up to `max_lifetime`, unless it is idle.
+- A sensor is idle when it has been live at least `max_ttl` and matched no requests over the last `max_ttl`. This counts requests it matched but the edge did not check, because the request had already matched its limit of rate-limit rules.
+- A sensor that has not lived `max_ttl` is always renewed, however short its first TTL.
+- A sensor is renewed when any whole minute of that window has no stats for it, as when stats ingest was down.
+- An enforce rule is not renewed while it observes. In `observe` mode one nobody approves expires.
+
+### Enforcing
+
+An enforce rule blocks once it has observed for `observe_for`. In `observe` mode a person must also approve it with `POST /api/autopilot/rules/{id}/enforce`. Before it blocks, admin measures its shadow counts since it went live. It is **rejected** instead when:
+
+- Besides its heavy subjects, it would block over `max_block_share` of the fleet's requests (`block_share`).
+- A subject it would block overlaps a verified crawler range (`crawler_subject`). A subject is an IPv4 address or an IPv6 /64 as the edge shows it.
+- A subject it would block overlaps a protected subject (`protected_subject`).
+- It would have blocked nothing over the last `observe_for` (`attack_stopped`).
+
+When it starts blocking:
+
+- Its TTL counts again from then, so time spent observing and waiting for a publish doesn't leave it too little to be renewed.
+- It never runs past `max_lifetime` after it, or the sensor it cites, went live.
+- It is renewed by `default_ttl` only if it blocked within the last 10 minutes, so it runs out once the attack moves on.
+
+??? note "Details: heavy subjects"
+
+    - Heavy subjects are found minute by minute. Each holds at least 5% of the rule's logged requests in that minute.
+    - Their estimates are summed over the window and left out once, less an allowance of 3 × √(16 × H) for sampling error. H is that sum, and 16 is the edges' sampling rate: an edge adds one limited request in 16 to a subject's estimate.
+    - An attack spread so thin that no subject reaches 5% of a minute counts as collateral, and is refused.
+
+??? note "Details: a rule keyed on `ja4` alone"
+
+    - A rule keyed on `ja4` alone, scoped to a client signal, has no heavy subject to leave out: its bucket is the whole fleet on one fingerprint.
+    - Its collateral is instead bounded by the signal's baseline, times the minutes in which the rule would have limited, and never more than its logged count.
+    - The baseline is the median per-minute count of the requests carrying the signal over the same clock window on each of the previous 7 days. When fewer than 3 of those days have data, it is the median of the 60 minutes before the rule went live.
+    - An `in` list counts the sum of its signals, since any of them matches. Signal conditions joined by `and` use the lowest of their baselines.
+    - Only minutes whose config version had the same browser floor or trusted CDN headers as the active version count. With none, or no stored signal counts, there is no baseline and the whole logged count is collateral.
+    - That bound is what `max_block_share` is checked against.
+    - When the baseline is at most `max_block_share` of the fleet's median requests per minute over the 60 minutes before the rule went live, blocking everything the signal carries fits the budget. The rule then observes 1 minute instead of `observe_for`.
+    - A confirmed [note](#citing-a-note) the rule cites can lower that share, halve `observe_for`, or hold it back (`note_expected_pattern`).
+
+### Ended
+
+A rule ends when it is:
+
+- Expired.
+- Expired unused: a sensor idle at its expiry, live at least `max_ttl` and matched no requests over the last `max_ttl`. The transition and audit row carry the window and counts that decided it.
+- Retired by a person (`POST /api/autopilot/rules/{id}/retire`, with `false_positive` to stop it being proposed again).
+- Retired by the model. This is for sensors only: an enforcing rule ends at its expiry or by a person.
+- Adopted into your draft.
+- Rolled back by its guard.
+
+When a new rule no longer compiles with the rules you published since, admin can't tell which one broke the publish, so every proposed rule is **rejected** (`compile`).
 
 Every change of state is an `autopilot_transitions` row and an audit event naming the rule, with the numbers that decided it.
 
 ## Exclusions
 
-An exclusion is a client a person found legitimate on a host, and optionally a path prefix, such as a CI job polling an API that a sensor keeps flagging. Every autopilot rule proposed while it is active leaves that traffic out on the edges, as it leaves out the protected networks, so a sensor stops counting the client and no enforce rule can block it there. Your own rules still apply to it. Only a person makes or ends one; no model tool can.
+An exclusion is a client a person found legitimate on a host, and optionally a path prefix, such as a CI job polling an API that a sensor keeps flagging. Only a person makes or ends one; no model tool can.
 
-**Exclude a client**, on a sensor's case with `autopilot.manage`, lists, with `stats.read` and only for a sensor keyed on `ip`, the clients the sensor found over its limit most in the last 24 hours, a sampled estimate, and takes the client, the host and path prefix (filled from the sensor's own conditions), a reason, and an expiry: 30 days, 7 days, 90 days or never. The sensor is retired with it, in the same transaction, so the next sweep can watch the route again without the client. **Exclusions**, on the Autopilot page, lists the active ones and those that ended in the last 30 days; **Revoke** asks for a reason.
+- Every autopilot rule proposed while it is active leaves that traffic out on the edges, as it leaves out the protected networks.
+- A sensor stops counting the client, and no enforce rule can block it there.
+- Your own rules still apply to it.
 
-The client is an IP, or a CIDR of at least /24 for IPv4 or /48 for IPv6; a wider network belongs in `protected_subjects`. The exclusions and the protected networks share half of an expression (2,000 characters), which every autopilot rule carries.
+To add one, click **Exclude a client** on a sensor's case (`autopilot.manage`):
 
-A rule's content never changes under its id, so an exclusion that is revoked or expires stops applying to new rules, and on its next run admin retires each observing sensor that still carries it. An enforce rule that carries it keeps blocking until it ends: it is renewed only while it blocks, and never past `max_lifetime`.
+- With `stats.read`, and only for a sensor keyed on `ip`, it lists the clients the sensor found over its limit most in the last 24 hours, a sampled estimate.
+- You enter the client, the host and path prefix (filled from the sensor's own conditions), a reason, and an expiry: 30 days, 7 days, 90 days or never.
+- The sensor is retired with it, in the same transaction, so the next sweep can watch the route again without the client.
 
-Exclusions are kept in `autopilot_exclusions`, never deleted, and `get_autopilot_state` lists the active ones to the model: client, host, path prefix and expiry, not who made one or why. The audit actions are `autopilot.exclusion_add` and `autopilot.exclusion_revoke`.
+**Exclusions**, on the Autopilot page, lists the active ones and those that ended in the last 30 days. **Revoke** asks for a reason.
+
+Limits and effects:
+
+- The client is an IP, or a CIDR of at least /24 for IPv4 or /48 for IPv6. A wider network belongs in `protected_subjects`.
+- The exclusions and the protected networks share half of an expression (2,000 characters), which every autopilot rule carries.
+- A rule's content never changes under its id. An exclusion that is revoked or expires stops applying to new rules, and on its next run admin retires each observing sensor that still carries it.
+- An enforce rule that carries it keeps blocking until it ends: it is renewed only while it blocks, and never past `max_lifetime`.
+
+Records:
+
+- Exclusions are kept in `autopilot_exclusions`, never deleted.
+- `get_autopilot_state` lists the active ones to the model: client, host, path prefix and expiry, not who made one or why.
+- The audit actions are `autopilot.exclusion_add` and `autopilot.exclusion_revoke`.
 
 ## The rule guard
 
-The [rollback guard](publishing.md#rollback-guard) leaves autopilot rules out of its rule signals and judges the version a person published, so an autopilot rule blocking an attack never rolls back your publish. Each enforcing autopilot rule has its own guard instead, for the guard's `window` after it started blocking, using the `changed_rule_limited_ratio` signal's `mode` and `max_vs_shadow`, and the guard's `min_requests`. It trips when the rule limits more than `max_vs_shadow` times its shadow ratio, or, when its shadow ratio is 0 (every shadow limit went to heavy subjects), more than the signal's `max_ratio`; or when it limits more than `max_block_share` of the fleet's requests. The shadow ratio leaves heavy subjects out, as the guard's counts do: both find them minute by minute and leave their summed estimates out once over the window, less the same sampling allowance. An attack spread so thin that no subject reaches 5% of a minute counts against the rule, and can roll it back. A rule whose key has no per-client part is judged on its raw limited count against its shadow ratio, which is also raw. A `ja4`-only rule scoped to a client signal is judged against `max_block_share` on the same baseline bound as at enforce (the baseline times the minutes it has limited since it started blocking, never more than its limited count), because the attackers on the fingerprint are most of what it limits. In `rollback` mode the rule is rolled back (`autopilot.rollback`), [`autopilot_rolled_back`](../operate/notifications.md#signals) fires, and the rule leaves the edges in that run's publish. During a canary no publish goes out, so it stays on the edges until the canary ends, and its transition records `published: false` and `waits_for_canary` with the canary's version. In `alert` mode it is audited once (`guard.alert`). With the guard turned off (`enabled: false`), or the `changed_rule_limited_ratio` signal's `mode` set to `off`, autopilot rules are not judged either.
+The [rollback guard](publishing.md#rollback-guard) leaves autopilot rules out of its rule signals and judges the version a person published, so an autopilot rule blocking an attack never rolls back your publish. Each enforcing autopilot rule has its own guard instead. It runs for the guard's `window` after the rule started blocking, using the `changed_rule_limited_ratio` signal's `mode` and `max_vs_shadow`, and the guard's `min_requests`.
+
+It trips when:
+
+- The rule limits more than `max_vs_shadow` times its shadow ratio.
+- Its shadow ratio is 0 (every shadow limit went to heavy subjects) and it limits more than the signal's `max_ratio`.
+- It limits more than `max_block_share` of the fleet's requests.
+
+What happens when it trips:
+
+- In `rollback` mode the rule is rolled back (`autopilot.rollback`), [`autopilot_rolled_back`](../operate/notifications.md#signals) fires, and the rule leaves the edges in that run's publish.
+- During a canary no publish goes out, so the rule stays on the edges until the canary ends. Its transition records `published: false` and `waits_for_canary` with the canary's version.
+- In `alert` mode it is audited once (`guard.alert`).
+- With the guard turned off (`enabled: false`), or the `changed_rule_limited_ratio` signal's `mode` set to `off`, autopilot rules are not judged either.
+
+How the guard counts:
+
+- The shadow ratio leaves heavy subjects out, as the guard's counts do. Both find them minute by minute and leave their summed estimates out once over the window, less the same sampling allowance.
+- An attack spread so thin that no subject reaches 5% of a minute counts against the rule, and can roll it back.
+- A rule whose key has no per-client part is judged on its raw limited count against its shadow ratio, which is also raw.
+- A `ja4`-only rule scoped to a client signal is judged against `max_block_share` on the same baseline bound as at enforce: the baseline times the minutes it has limited since it started blocking, never more than its limited count. The attackers on the fingerprint are most of what it limits.
 
 ## Memory
 
-A case run can record what it learned as a **note** with `record_learning`, and later runs read notes with `search_notes`. A note goes live without a person. The gate below, its trust level and the limits keep it honest, and a person can [retract](#retracting-a-note) one at any time. No note can stop sensors, anomalies or notifications, or change budgets, protected subjects or [exclusions](#exclusions).
+A case run can record what it learned as a **note** with `record_learning`, and later runs read notes with `search_notes`. A note goes live without a person.
+
+- The gate below, its trust level and the limits keep it honest.
+- A person can [retract](#retracting-a-note) a note at any time.
+- No note can stop sensors, anomalies or notifications, or change budgets, protected subjects or [exclusions](#exclusions).
 
 | Kind | What it says | Effect once confirmed |
 |---|---|---|
@@ -255,11 +498,19 @@ A case run can record what it learned as a **note** with `record_learning`, and 
 | `collateral_risk` | What blocking a scope would hurt | Lowers the share a rule may block, or requires a `jwt_claim` key |
 | `key_preference` | A key that separates attackers from users | Requires key parts |
 
-An `observed` note has a **claim** admin recomputes on its own data, and cites **evidence**: the `evidence_id`s of successful calls to `stats.read` tools or [connector](#external-metrics-and-logs) tools in the same run. Admin answers every such call with its `evidence_id`, both as a second text content and in the structured result, unless the call's record was over 64 KiB and was cut. A `hypothesis` is a `context` note with no claim whose statement says it is one, with a word such as likely, might, appears or unconfirmed. It is never confirmed.
+A note has one of two bases:
+
+- An `observed` note has a **claim** admin recomputes on its own data, and cites **evidence**: the `evidence_id`s of successful calls to `stats.read` tools or [connector](#external-metrics-and-logs) tools in the same run. Admin answers every such call with its `evidence_id`, both as a second text content and in the structured result, unless the call's record was over 64 KiB and was cut.
+- A `hypothesis` is a `context` note with no claim whose statement says it is one, with a word such as likely, might, appears or unconfirmed. It is never confirmed.
 
 A note's **scope** is `{"kind": "global"}`, an observed host (`{"kind": "host", "host": ...}`), an observed route (`{"kind": "route", "host": ..., "method": ..., "template": ...}`) or a live rate-limit rule (`{"kind": "rule", "rule": ...}`).
 
-A **claim** is `{metric, window, op, value}`, with `subject` for `subject_limited`. The window is `{"last_minutes": N}` or `{"daily_utc": [from, to]}`, whole UTC hours with `0 <= from < to <= 24` whose latest occurrence ended by now; either is at most 360 minutes. An `expected_pattern` takes `daily_utc` only. `op` is `>=` or `<=`, and a `>=` value is above 0. The days before are the same window 24, 48 and so on hours earlier.
+A **claim** is `{metric, window, op, value}`, with `subject` for `subject_limited`.
+
+- The window is `{"last_minutes": N}` or `{"daily_utc": [from, to]}`. A `daily_utc` window is whole UTC hours with `0 <= from < to <= 24` whose latest occurrence ended by now. Either kind is at most 360 minutes.
+- An `expected_pattern` takes `daily_utc` only.
+- `op` is `>=` or `<=`, and a `>=` value is above 0.
+- The days before are the same window 24, 48 and so on hours earlier.
 
 | Metric | Scope | Counts |
 |---|---|---|
@@ -275,7 +526,7 @@ A **claim** is `{metric, window, op, value}`, with `subject` for `subject_limite
 
 | Reason | Refuses |
 |---|---|
-| `credential` | What looks like a credential anywhere in the arguments, keys included, even ones that don't decode: a bearer token, a JWT, an AWS, OpenAI, GitHub or Slack key, a private key, or `api_key`, `secret`, `password` or `token` set to a value. The refusal never repeats it, and the run's record keeps the call's arguments as `{"redacted": "credential"}` |
+| `credential` | What looks like a credential anywhere in the arguments, keys included, even ones that don't decode (see below) |
 | `off` | Any note while autopilot is off |
 | `ablation` | Any note from an [ablation](#re-checks) run |
 | `invalid` | Malformed arguments, an empty statement or one over 500 characters, a rationale over 1,000, over 20 evidence ids or over 5 merges |
@@ -289,25 +540,57 @@ A **claim** is `{metric, window, op, value}`, with `subject` for `subject_limite
 | `anchor` | An `expected_pattern` or `collateral_risk` without an [anchor](#the-anchor) |
 | `merges` | Merges outside the daily review case, of a note of another kind or scope, or a hypothesis merging an observed note |
 
-A note admin keeps carries what admin computed itself, never what the model wrote: the claim's value with its `precision` (`exact`, or `estimate` for sampled metrics and routes counted from sampled lines) and `sample` (requests, subjects and minutes), and its **baseline** over the 14 days before: the days present, median, p95 (nearest rank), median absolute deviation, the ratio of the value to the median (to 1 when the median is under 1), the robust z, `(value - median) / (1.4826 * MAD)`, and `held_days`, the days the claim held. With a MAD of 0, z is `(value - median) / (1.2533 * mean absolute deviation)`; with that 0 too, z is 0 at the median and empty elsewhere. It also keeps the inputs for links to the route, rule or stats page, and each cited read as its run, `seq`, tool and SHA-256.
+The `credential` refusal covers a bearer token, a JWT, an AWS, OpenAI, GitHub or Slack key, a private key, or `api_key`, `secret`, `password` or `token` set to a value. The refusal never repeats it, and the run's record keeps the call's arguments as `{"redacted": "credential"}`.
+
+A note admin keeps carries what admin computed itself, never what the model wrote:
+
+- The claim's value, with its `precision` (`exact`, or `estimate` for sampled metrics and routes counted from sampled lines) and `sample` (requests, subjects and minutes).
+- Its **baseline** over the 14 days before: the days present, median, p95 (nearest rank), median absolute deviation, the ratio of the value to the median (to 1 when the median is under 1), the robust z, and `held_days`, the days the claim held.
+- The robust z is `(value - median) / (1.4826 * MAD)`. With a MAD of 0, z is `(value - median) / (1.2533 * mean absolute deviation)`. With that 0 too, z is 0 at the median and empty elsewhere.
+- The inputs for links to the route, rule or stats page, and each cited read as its run, `seq`, tool and SHA-256.
 
 ### The anchor
 
-A note that makes the autopilot less likely to act needs evidence an attacker can't create: its `subject` inside a protected subject or a verified crawler range, a rule scope whose key has a `jwt_claim` while issuers are configured, or a claim that held on 7 of the 14 days before. A subject or history anchors only a **tight** claim, one that says something about what admin found: a `>=` value of at least half the value admin found, or a `<=` value of at most twice it (or 2 when it found under 1). A history claim must be within a factor of 2 of both today's value and the median of the days before, so a ceiling twice a one-day spike, which holds on every normal day, anchors nothing. A looser claim holds whatever the traffic does. A pattern an attacker keeps up for 7 of 14 days passes the history anchor; contradiction and ablation, below, guard against it.
+A note that makes the autopilot less likely to act needs evidence an attacker can't create. An anchor is one of:
+
+- Its `subject` inside a protected subject or a verified crawler range.
+- A rule scope whose key has a `jwt_claim` while issuers are configured.
+- A claim that held on 7 of the 14 days before.
+
+Rules for the anchor:
+
+- A subject or history anchors only a **tight** claim, one that says something about what admin found: a `>=` value of at least half the value admin found, or a `<=` value of at most twice it (or 2 when it found under 1).
+- A history claim must be within a factor of 2 of both today's value and the median of the days before. A ceiling twice a one-day spike, which holds on every normal day, anchors nothing.
+- A looser claim holds whatever the traffic does.
+- A pattern an attacker keeps up for 7 of 14 days passes the history anchor. Contradiction and ablation, below, guard against it.
 
 ### Trust
 
 | Level | Reached | Served |
 |---|---|---|
 | `unconfirmed` | Written; or contested by an ablation, after which it is never confirmed again | Yes, labelled, its effect ignored |
-| `confirmed` | One case, within 30 days of writing: at least 1,000 requests or 30 subjects in the claim's window, and for `attack_signature` a z of at least 4 or a ratio of at least 3. For `attack_signature` and `key_preference`, an enforce rule of the same case enforced for the whole guard `window`, with the guard and its `changed_rule_limited_ratio` signal on, and had no alert, rollback or false positive mark; the guard judges a window only once it holds `min_requests`, so a quieter one passes. For the other kinds, an anchor and a finished case. Hypotheses never | Yes, with its effect |
+| `confirmed` | One case, within 30 days of writing, with enough data and the conditions below. Hypotheses never | Yes, with its effect |
 | `dormant` | Its claim failed on 3 uses in a row | No |
 | `retracted` | A person, or a contradiction | No |
 | `retired` | Dormant for 30 days, merged into another, or no run served it for 30 days | No |
 
+To be confirmed, a note needs, in one case within 30 days of writing:
+
+- At least 1,000 requests or 30 subjects in the claim's window.
+- For `attack_signature`, a z of at least 4 or a ratio of at least 3.
+- For `attack_signature` and `key_preference`: an enforce rule of the same case enforced for the whole guard `window`, with the guard and its `changed_rule_limited_ratio` signal on, and had no alert, rollback or false positive mark. The guard judges a window only once it holds `min_requests`, so a quieter one passes.
+- For the other kinds, an anchor and a finished case.
+
 ### Citing a note
 
-`search_notes` checks the 20 newest unconfirmed and confirmed notes, by `scope` and `kind` when given, and serves a run the ones whose claim matches its data now, and hypotheses, with what the model wrote inside `untrusted` fields. Every note it checks is a recorded use. An answer holds at most 56 KiB of notes; notes past that are neither served nor recorded, and a narrower `scope` or `kind` reaches them. `propose` and `validate_rule` take `notes`, up to 5 ids search served to this run; any other is refused. A confirmed note acts only on a proposal that cites it:
+`search_notes` checks the 20 newest unconfirmed and confirmed notes, by `scope` and `kind` when given.
+
+- It serves a run the notes whose claim matches its data now, and hypotheses, with what the model wrote inside `untrusted` fields.
+- Every note it checks is a recorded use.
+- An answer holds at most 56 KiB of notes. Notes past that are neither served nor recorded, and a narrower `scope` or `kind` reaches them.
+- `propose` and `validate_rule` take `notes`, up to 5 ids search served to this run. Any other is refused.
+
+A confirmed note acts only on a proposal that cites it:
 
 - `key_preference`: the proposal is refused `note_key` unless its key has every part of the note's `key`.
 - `collateral_risk` with `require_jwt_claim`: refused `note_jwt_key` unless its key has a `jwt_claim`.
@@ -318,12 +601,21 @@ A note that makes the autopilot less likely to act needs evidence an attacker ca
 ### Re-checks
 
 - **Daily.** Once a day the leader re-checks every unconfirmed and confirmed note's claim. Its third failed use in a row, by a search or a re-check, makes it dormant. The daily review case also asks the model to re-check notes and merge ones on the same topic with `merges`.
-- **Contradiction.** When the guard rolls back a rule, or a person marks it a false positive, the confirmed attack signatures and key preferences its proposal cited or its own case wrote are retracted with the reason, in the same transaction. A `collateral_risk` or `expected_pattern` the rule cited held it back, so it stays. While autopilot is on and a runner is connected, every other rule still enforcing because it cites a retracted note gets an investigate case in that transaction; otherwise none opens.
-- **Ablation.** When 3 cases served a confirmed note closed as benign within 24 hours, or a served `expected_pattern`, `collateral_risk` or `context` note's scope got busier every hour for the last 4 hours, to at least twice the first and 1,000 (requests; for a rule, limited and logged requests), admin opens an `ablation` case at most once a day per note. Only anomaly and investigate cases count, and it re-runs the latest such case, with the same brief, with the note withheld from search. The ablation run can't `propose` or `record_learning`, and its `list_cases` leaves out every ablation case and the cases the note was served to. A different verdict, `unsure` included, makes the note `unconfirmed` for good and raises [`autopilot_note_contested`](../operate/notifications.md#signals) for an hour.
+- **Contradiction.** When the guard rolls back a rule, or a person marks it a false positive:
+    - The confirmed attack signatures and key preferences its proposal cited or its own case wrote are retracted with the reason, in the same transaction.
+    - A `collateral_risk` or `expected_pattern` the rule cited held it back, so it stays.
+    - While autopilot is on and a runner is connected, every other rule still enforcing because it cites a retracted note gets an investigate case in that transaction. Otherwise none opens.
+- **Ablation.** Admin opens an `ablation` case, at most once a day per note, when either happens:
+    - 3 cases served a confirmed note closed as benign within 24 hours.
+    - A served `expected_pattern`, `collateral_risk` or `context` note's scope got busier every hour for the last 4 hours, to at least twice the first and 1,000 (requests; for a rule, limited and logged requests).
+
+    Only anomaly and investigate cases count. The ablation re-runs the latest such case, with the same brief, with the note withheld from search. The ablation run can't `propose` or `record_learning`, and its `list_cases` leaves out every ablation case and the cases the note was served to. A different verdict, `unsure` included, makes the note `unconfirmed` for good and raises [`autopilot_note_contested`](../operate/notifications.md#signals) for an hour.
 
 ### Retracting a note
 
-`POST /api/autopilot/notes/{id}/retract` with a `reason` (`autopilot.manage`) adds a `retracted` revision; nothing is deleted, and no case opens. `GET /api/autopilot/notes/{id}` lists the note's revisions, its last 200 uses, its cited reads and its blast radius: the cases served it, the proposals that cited it and the rules still enforcing because of them. `POST /api/autopilot/notes/{id}/reevaluate` opens an investigate case on each of those rules. Like a case a person opens, it is refused while autopilot is off or no runner was seen in the last 2 minutes.
+- `POST /api/autopilot/notes/{id}/retract` with a `reason` (`autopilot.manage`) adds a `retracted` revision. Nothing is deleted, and no case opens.
+- `GET /api/autopilot/notes/{id}` lists the note's revisions, its last 200 uses, its cited reads and its blast radius: the cases served it, the proposals that cited it and the rules still enforcing because of them.
+- `POST /api/autopilot/notes/{id}/reevaluate` opens an investigate case on each of those rules. Like a case a person opens, it is refused while autopilot is off or no runner was seen in the last 2 minutes.
 
 Notes are kept in `autopilot_notes`, with every change in `autopilot_note_revisions` and every use in `autopilot_note_uses`, both append-only. The audit actions are `autopilot.note_write`, `autopilot.note_trust`, `autopilot.note_dormant` and `autopilot.note_retract`.
 
@@ -359,17 +651,46 @@ Where the deployment sets them, the autopilot reads its own Prometheus, Grafana 
 
 ## Replay and evaluation
 
-**Replay** runs a recorded case against another model or prompt without admin opening a run. It reads the case and `GET /api/autopilot/contract` from admin, or a bundle of both saved earlier, then serves the run's recorded tool calls to the model from a local MCP server: a call the run made gets admin's recorded answer, and any other call gets an error saying it was not recorded. A replay never reaches admin's MCP server, so it never proposes or records anything. **Replay with another model** on a case's page shows its command; [Development](../build/development.md#replay-and-golden-cases) covers the flags and the golden cases.
+**Replay** runs a recorded case against another model or prompt without admin opening a run.
 
-It prints a report: the recorded run's provider, model, verdict, tokens and costs, the replay's verdict, turns, tool calls, tokens, the provider's cost estimate and seconds, and the differences: whether the verdict changed, whether the prompt or tool list differs from the recorded run's, the calls the model made that the run didn't, and the recorded calls it didn't make. The prompt text is not recorded, so a replay uses the current prompt, or one given with `--prompt`, and says when its hash differs. The replay's own cost is only the provider's estimate: your prices apply to recorded runs.
+- It reads the case and `GET /api/autopilot/contract` from admin, or a bundle of both saved earlier.
+- It serves the run's recorded tool calls to the model from a local MCP server. A call the run made gets admin's recorded answer, and any other call gets an error saying it was not recorded.
+- A replay never reaches admin's MCP server, so it never proposes or records anything.
+- **Replay with another model** on a case's page shows its command. [Development](../build/development.md#replay-and-golden-cases) covers the flags and the golden cases.
+
+It prints a report with:
+
+- The recorded run's provider, model, verdict, tokens and costs.
+- The replay's verdict, turns, tool calls, tokens, the provider's cost estimate and seconds.
+- The differences: whether the verdict changed, whether the prompt or tool list differs from the recorded run's, the calls the model made that the run didn't, and the recorded calls it didn't make.
+
+The prompt text is not recorded, so a replay uses the current prompt, or one given with `--prompt`, and says when its hash differs. The replay's own cost is only the provider's estimate: your prices apply to recorded runs.
 
 ## Turning it off
 
-On the Autopilot page, **Turn autopilot off** asks for a reason, at most 500 characters, which the audit row of the change keeps as `reason`; the settings don't store it. The API takes the same optional `reason` on `PUT /api/settings/autopilot`. Setting `mode` to `off` retires every autopilot rule, cancels open cases and publishes the active version without autopilot rules, in one transaction. Like every autopilot publish that only takes rules out, it skips the deployment and schema checks, so an edge that is old or runs other deployment settings never holds it back. It is refused (`409`) while a canary runs: promote or abort it first. For the same reason a [rule guard](#the-rule-guard) rollback during a canary keeps the rule on the edges until the canary ends, recorded as `published: false` with `waits_for_canary`. Off, autopilot opens no cases and publishes nothing. The three automatic case settings are different: each stops one kind of new case, and the queued cases, the live rules and the active version stay as they are.
+On the Autopilot page, **Turn autopilot off** asks for a reason, at most 500 characters. The audit row of the change keeps it as `reason`; the settings don't store it. The API takes the same optional `reason` on `PUT /api/settings/autopilot`.
+
+Setting `mode` to `off`, in one transaction:
+
+- Retires every autopilot rule.
+- Cancels open cases.
+- Publishes the active version without autopilot rules.
+
+Details:
+
+- Like every autopilot publish that only takes rules out, it skips the deployment and schema checks, so an edge that is old or runs other deployment settings never holds it back.
+- It is refused (`409`) while a canary runs: promote or abort it first. For the same reason a [rule guard](#the-rule-guard) rollback during a canary keeps the rule on the edges until the canary ends, recorded as `published: false` with `waits_for_canary`.
+- Off, autopilot opens no cases and publishes nothing.
+- The three automatic case settings are different: each stops one kind of new case, and the queued cases, the live rules and the active version stay as they are.
 
 ## From Claude Code
 
-`describe_fields` also tells a run the CDN headers this deployment lists (`cdn_headers`), which it can read in a rule as `http.request.headers["<name>"]`, and `cdn_trusted`, the ones the live policy trusts. `cdn_trusted` also holds listed source headers such as `cf-ipcountry`, which a rule reads only through its field (`ip.src.country`). Only the `cdn_trusted` headers are the CDN's values: a client can send the others, so a run never excludes traffic by one of them. A run never names a CDN header carrying a network or location (ISP, postal code, latitude, longitude); `named_subjects` refuses it.
+`describe_fields` also tells a run two lists of CDN headers:
+
+- `cdn_headers`: the ones this deployment lists, which a rule can read as `http.request.headers["<name>"]`.
+- `cdn_trusted`: the ones the live policy trusts. It also holds listed source headers such as `cf-ipcountry`, which a rule reads only through its field (`ip.src.country`).
+
+Only the `cdn_trusted` headers are the CDN's values: a client can send the others, so a run never excludes traffic by one of them. A run never names a CDN header carrying a network or location (ISP, postal code, latitude, longitude); `named_subjects` refuses it.
 
 The same MCP tools answer a person's API token, limited to its scopes. The runner's own tools (`get_case`, `validate_rule`, `simulate_rule`, `propose`, `record_learning` and the [connector](#external-metrics-and-logs) tools) need `autopilot.agent`, which no person's token has:
 

@@ -53,7 +53,10 @@ valkey:
 
 Two settings in this example matter for safety:
 
-- **NetworkPolicy.** The edge trusts the client-IP header from any peer inside `config.trustedProxies`. A pod range is wide, so without `networkPolicy.enabled` any pod in the cluster can reach the edge and choose its own client IP, which defeats per-IP limits. The chart refuses to render with `networkPolicy.enabled` and an empty `edgeFrom`. Turning it on also limits the edge's `:9090` port to `networkPolicy.metricsFrom` (empty admits nothing, so add Prometheus there if it scrapes `/metrics`). It limits admin's API port to the edges, the log shipper and `networkPolicy.adminFrom`. Chart 0.7.0 and later also limits admin's internal port `:9091`, which serves `/metrics` with no authentication, to `metricsFrom` only; `adminFrom` does not reach it.
+- **NetworkPolicy.** The edge trusts the client-IP header from any peer inside `config.trustedProxies`. A pod range is wide, so without `networkPolicy.enabled` any pod in the cluster can reach the edge and choose its own client IP, which defeats per-IP limits. The chart refuses to render with `networkPolicy.enabled` and an empty `edgeFrom`. Turning it on also limits:
+  - The edge's `:9090` port to `networkPolicy.metricsFrom`. Empty admits nothing, so add Prometheus there if it scrapes `/metrics`.
+  - Admin's API port to the edges, the log shipper and `networkPolicy.adminFrom`.
+  - Admin's internal port `:9091`, which serves `/metrics` with no authentication, to `metricsFrom` only; `adminFrom` does not reach it. This needs chart 0.7.0 or later.
 - **Image tags.** Pin both tags to a digest (`<tag>@sha256:...`) in production, so every node runs the same build. `latest` moves with each release.
 
 The preset's [`CDN_HEADERS`](edge.md#cdn-headers) apply with no setting. To change the list, set the same value in both `edge.env.CDN_HEADERS` and `admin.env.CDN_HEADERS`: admin holds publishes while an edge differs.

@@ -1,7 +1,5 @@
 # Edge Proxy
 
-One policy layer in front of all your services. Edge Proxy is a Go reverse proxy that sits behind your content delivery network (CDN) or web application firewall (WAF) and enforces rate limits, JSON Web Token (JWT) validation, cross-origin resource sharing (CORS) and header rules for every route, so each service doesn't build its own. You manage the policy in an admin UI, where every change is tested, versioned, optionally canaried and audited. During an attack, autopilot can add short-lived rate limits for you, within checks and budgets you set.
-
 ```mermaid
 flowchart LR
     Client["Client"]:::ext --> CDN["CDN / WAF"]:::ext
@@ -18,11 +16,27 @@ flowchart LR
     classDef ext fill:#ffffff,color:#2c3e50
 ```
 
-The edge never routes: it forwards every request it allows to one upstream, your load balancer or gateway. If admin, Postgres or the identity provider goes down, the edge keeps serving with the policy it already has. If Valkey goes down, each rate-limit rule lets traffic through, returns `503` or counts on each replica alone, as you choose.
+Edge Proxy is one shared policy layer in front of all your services. It sits behind your content delivery network (CDN) or web application firewall (WAF), decides what each request may do, and forwards what it allows to the load balancer or gateway that routes your services. No service has to build its own rate limiting, token checks or Cross-Origin Resource Sharing (CORS) handling.
+
+**What it can do**
+
+- **Limit traffic.** Exact rate limits counted once across every replica, keyed on the client IP, a user or tenant ID from a verified token, or other request values.
+- **Control access.** Block, ban or always allow clients, and require a valid JSON Web Token (JWT) on a route.
+- **Shape requests and answers.** Set the headers your services receive, answer CORS, pick the visitor's language and return your own error pages.
+- **Change policy safely.** Test a rule before you publish it, send it to a share of traffic first, roll it back automatically when errors rise, and keep every change in a tamper-evident audit log.
+- **See and respond.** Traffic per route and per rule, a [War room](docs/tour/monitor.md#war-room) screen for incidents, alerts, and an optional [autopilot](docs/use/autopilot.md) that adds short-lived rate limits during an attack.
+
+**Who it is for**
+
+- Teams with many services behind one load balancer or gateway who want application policy in one place.
+- Teams whose CDN rate limits are too approximate, who need limits per signed-in user, or who want one policy model that doesn't change when the CDN or cloud does. See [why it exists](docs/index.md#why-it-exists) and the [comparison with CDN vendors](docs/vendor-comparison.md).
+- Not a WAF or CDN (no managed attack rules, bot scores or distributed denial-of-service (DDoS) absorption) and not a router. If approximate per-IP limits are all you need, your CDN alone is simpler.
+
+If admin, Postgres or the identity provider goes down, the edge keeps serving with the policy it already has. If Valkey goes down, each rate-limit rule lets traffic through, returns `503` or counts on each replica alone, as you choose.
 
 ![Admin dashboard](docs/assets/screenshots/dashboard.png)
 
-The [War room](docs/use/dashboard.md#war-room) is one screen for an incident: what needs a person, requests by outcome, and where requests come from by viewer country, live or over a time range.
+The [War room](docs/tour/monitor.md#war-room) is one screen for an incident: what needs a person, requests by outcome, and where requests come from by viewer country, live or over a time range.
 
 ![War room](docs/assets/screenshots/warroom.png)
 
@@ -50,16 +64,16 @@ limit:  2 per 1m, keyed on ip, sliding window, 1m penalty
 
 <table>
 <tr>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#rules"><img src="docs/assets/screenshots/rule-editor.png" alt="Rule editor"></a><br><b>Rules</b>: build a match from conditions, see the expression it makes and how much traffic the rule matched and blocked.</td>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#routes"><img src="docs/assets/screenshots/route-detail.png" alt="Route detail"></a><br><b>Routes</b>: every route the edges served, and what the policy does to its requests, step by step.</td>
+<td width="50%" valign="top"><a href="docs/tour/policy.md#rules"><img src="docs/assets/screenshots/rule-editor.png" alt="Rule editor"></a><br><b>Rules</b>: build a match from conditions, see the expression it makes and how much traffic the rule matched and blocked.</td>
+<td width="50%" valign="top"><a href="docs/tour/monitor.md#routes"><img src="docs/assets/screenshots/route-detail.png" alt="Route detail"></a><br><b>Routes</b>: every route the edges served, and what the policy does to its requests, step by step.</td>
 </tr>
 <tr>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#tests-and-simulate"><img src="docs/assets/screenshots/tests.png" alt="Policy tests"></a><br><b>Tests and simulate</b>: policy tests run on the draft, and a publish needs them to pass.</td>
+<td width="50%" valign="top"><a href="docs/tour/release.md#tests-and-simulate"><img src="docs/assets/screenshots/tests.png" alt="Policy tests"></a><br><b>Tests and simulate</b>: policy tests run on the draft, and a publish needs them to pass.</td>
 <td width="50%" valign="top"><a href="docs/use/autopilot.md#reading-a-case"><img src="docs/assets/screenshots/autopilot-case.png" alt="Autopilot case"></a><br><b>Autopilot cases</b>: what started a case, the model's evidence and admin's checks on what it proposed.</td>
 </tr>
 <tr>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#versions"><img src="docs/assets/screenshots/versions.png" alt="Versions"></a><br><b>Versions</b>: every publish is a version with its author and changes; compare any two, or revert in one step.</td>
-<td width="50%" valign="top"><a href="docs/use/dashboard.md#fleet-and-stats"><img src="docs/assets/screenshots/fleet.png" alt="Fleet"></a><br><b>Fleet</b>: every edge, the version it has loaded and where its config came from, plus the verified crawler ranges it matches.</td>
+<td width="50%" valign="top"><a href="docs/tour/release.md#versions"><img src="docs/assets/screenshots/versions.png" alt="Versions"></a><br><b>Versions</b>: every publish is a version with its author and changes; compare any two, or revert in one step.</td>
+<td width="50%" valign="top"><a href="docs/tour/monitor.md#fleet"><img src="docs/assets/screenshots/fleet.png" alt="Fleet"></a><br><b>Fleet</b>: every edge, the version it has loaded and where its config came from, plus the verified crawler ranges it matches.</td>
 </tr>
 </table>
 
@@ -85,12 +99,6 @@ flowchart LR
 A proposal like "20 `POST /login` per minute per IP, for 1 hour" passes. One that names an IP address, AS number or JWT claim value, is just `true`, fails closed or is keyed only on values the client chooses is refused. Each autopilot rule expires at most 24 hours ahead and is renewed only while it is still needed, up to 7 days by default; a blocking rule only while it still blocks someone. Setting `mode` to `off` removes them all in one publish, once no canary is running.
 
 It needs the [autopilot runner](docs/deploy/autopilot.md), a separate process that holds your model provider credentials. You watch and steer it on the admin UI's **Autopilot** page: cases with the model's evidence and every check, live rules, settings, spend and the off switch. See [Autopilot](docs/use/autopilot.md).
-
-## Is it for you?
-
-Use it when your CDN's rate limits are too approximate, you need limits keyed on a verified user, or you want one policy model that doesn't change when your CDN or cloud does. See [why it exists](docs/index.md#why-it-exists) and the [comparison with CDN vendors](docs/vendor-comparison.md).
-
-Don't use it as a WAF or CDN (no managed attack rules, bot scores or distributed denial-of-service (DDoS) absorption) or as a router. If approximate per-IP limits are all you need, your CDN alone is simpler.
 
 ## Why a custom proxy
 
@@ -122,10 +130,11 @@ Full docs: https://chrisleekr.github.io/edge-proxy/
 
 | You want to | Read |
 |---|---|
+| Find the rule for a job, with an example and a flow diagram | [Use cases](docs/use/cases/index.md) |
 | Write rules | [Policy](docs/use/policy.md), [Rate limiting](docs/use/rate-limiting.md), [Bot detection](docs/use/bots.md), [Expressions](docs/reference/expressions.md) |
 | Let autopilot add rate limits during an attack | [Autopilot](docs/use/autopilot.md) |
 | Ship a change safely | [Publish and roll back](docs/use/publishing.md) |
-| Find your way around the admin UI | [Dashboard](docs/use/dashboard.md) |
+| Find your way around the admin UI | [Admin UI tour](docs/tour/index.md) |
 | Run it in production | [Deploy](docs/deploy/index.md), [Kubernetes with Helm](docs/deploy/kubernetes.md), [Capacity planning](docs/deploy/capacity.md) |
 | Keep it running | [Monitoring](docs/operate/monitoring.md), [Runbooks](docs/operate/runbooks.md) |
 | Understand the internals | [Design](docs/design.md) |

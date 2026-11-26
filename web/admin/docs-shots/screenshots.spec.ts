@@ -78,6 +78,7 @@ test('docs screenshots', async ({ page }) => {
     ['warroom', '/traffic?view=period&range=1h', 'War room'],
     ['value-lists', '/value-lists', 'Value lists'],
     ['templates', '/templates', 'Templates'],
+    ['template', '/templates/friendly-429', 'friendly-429'],
     ['cors', '/cors', 'CORS policies'],
     ['issuers', '/issuers', 'Issuers'],
     ['settings', '/settings', 'Settings'],
@@ -91,6 +92,13 @@ test('docs screenshots', async ({ page }) => {
     await page.goto(path);
     await shot(page, name, heading);
   }
+
+  // IP lists shows the first screen only: the whole page lists every
+  // default list and runs to thousands of pixels.
+  await page.goto('/ip-lists');
+  await expect(page.getByRole('heading', { name: 'IP lists', exact: true })).toBeVisible();
+  await page.waitForLoadState('networkidle');
+  await expect(page).toHaveScreenshot('ip-lists.png');
 
   // The docs explain the traffic chart's release marks from a close-up.
   await page.goto('/?range=1h');

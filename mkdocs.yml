@@ -61,14 +61,32 @@ nav:
       - index.md
       - Why a custom proxy: why-custom-proxy.md
       - Compared with vendors: vendor-comparison.md
-  - Get started: get-started.md
+  - Get started:
+      - get-started.md
+      - Admin UI tour:
+          - tour/index.md
+          - Monitor: tour/monitor.md
+          - Policy: tour/policy.md
+          - Release: tour/release.md
+          - Admin: tour/admin.md
   - Use:
-      - Policy: use/policy.md
+      - Use cases:
+          - use/cases/index.md
+          - Access: use/cases/access.md
+          - Rate limits: use/cases/rate-limits.md
+          - Browsers: use/cases/browsers.md
+          - Headers: use/cases/headers.md
+      - Rules: use/policy.md
       - Rate limiting: use/rate-limiting.md
-      - Autopilot: use/autopilot.md
+      - Value lists: use/value-lists.md
+      - IP lists: use/ip-lists.md
+      - Response templates: use/templates.md
+      - CORS: use/cors.md
+      - Issuers and tokens: use/tokens.md
+      - Settings: use/settings.md
       - Bot detection: use/bots.md
+      - Autopilot: use/autopilot.md
       - Publish and roll back: use/publishing.md
-      - Dashboard: use/dashboard.md
   - Deploy:
       - deploy/index.md
       - Edge settings: deploy/edge.md
@@ -82,6 +100,7 @@ nav:
       - Runbooks: operate/runbooks.md
   - Reference:
       - Expressions: reference/expressions.md
+      - Policy fields: reference/policy-fields.md
       - Admin API: reference/api.md
       - Glossary: reference/glossary.md
   - Build:

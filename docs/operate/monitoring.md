@@ -7,9 +7,9 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | Metric | Meaning |
 |---|---|
 | `edge_requests_total{class}` | Responses by class (`2xx` … `5xx`; `none` when the client left first). A code above 599, which an upstream can send, counts as `5xx` |
-| `edge_responses_total{origin,code}` | Responses by who answered (`edge` or `upstream`) and status code, so the edge's 502 reads apart from the upstream's. Only codes seen have a series, except the edge's 502, 503 and 504, which are always present so an alert sees the first one. Code `0` is a request that got no answer, `600` any code above 599 |
+| `edge_responses_total{origin,code}` | Responses by who answered (`origin`: `edge` or `upstream`) and status `code`, so the edge's 502 reads apart from the upstream's. [Label values](#edge-metric-label-values) |
 | `edge_upstream_errors_total{cause}` | Requests the edge got no answer from the upstream for, by cause: `dns`, `refused`, `reset`, `tls`, `timeout`, `other`, as on the access line |
-| `edge_rejected_total{reason}` | Requests the edge answered itself, by reason: `rate_limited`, `blocked` (an access rule's `block` setting), `banned` (a client IP an access rule's `ban` setting banned earlier on this edge), `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path`, `body_timeout` (a 400 for a body sent too slowly), `body_invalid` (a 400 for a body that could not be read, such as broken chunk framing) and others. `upstream_tls` is a failed TLS handshake with the upstream: it refused the handshake, or its certificate is not valid for the request's Host, which the client chose, or not trusted; its error is on the request's access line |
+| `edge_rejected_total{reason}` | Requests the edge answered itself, by `reason`: `rate_limited`, `blocked`, `banned`, `auth`, `backstop`, `overloaded`, `upstream_timeout`, `untrusted_peer`, `path`, `body_timeout`, `body_invalid`, `upstream_tls` and others. [Label values](#edge-metric-label-values) |
 | `edge_inflight`, `edge_streams` | Concurrent requests and open WebSocket/SSE streams |
 | `edge_ready` | 1 when a policy is loaded and the edge isn't draining |
 | `edge_snapshot_version` | Policy version this replica runs |
@@ -26,13 +26,40 @@ Prometheus text at `GET :9090/metrics`, per replica.
 | `edge_bans` | Entries in this edge's ban table, including ones that ended and are not yet swept |
 | `edge_allowlisted_total` | Requests from a client on the trusted client allowlist, including ones a retained check later rejected |
 | `edge_ratelimit_rules_capped_total` | Requests matching more rate-limit rules than are evaluated |
+| `edge_snapshot_loads_total` | Policy snapshots this replica activated, from admin, its cache or the bootstrap file |
+| `edge_backstop_untracked_total` | Requests from a new IP that passed the local backstop untracked because its table was full; the shared limits still apply to them |
+| `edge_ratelimit_local_untracked_total` | Requests a rule counted in this replica's memory (a count rule, or `fail_mode: local` while Valkey can't answer) whose new subject wasn't stored because the local store was full, so the rule let it through |
+| `edge_ratelimit_penalty_cache_hits_total` | Rate-limit checks answered from this replica's penalty cache, with no Valkey call |
+| `edge_ratelimit_penalty_cache_dropped_total` | Penalties not stored because the penalty cache was full. A count rule then doesn't refuse that subject (fail open) |
+| `edge_cors_preflight_total{result}` | CORS preflights the edge answered, `allowed` or `denied` (answered with no `Access-Control-*` headers) |
 | `edge_log_dropped_total`, `edge_stats_dropped_total` | Log lines dropped because the buffer was full; stats reports admin did not accept |
 | `edge_background_panics_total` | Recovered panics in background loops |
 | `edge_trace_export_errors_total` | Span batches the trace collector did not accept. Spans are dropped, never retried into the request path |
 | `edge_trace_capped_total` | Traces not sampled because the replica reached `TRACE_MAX_PER_SECOND` |
-| `edge_request_duration_seconds` | Histogram of request latency, on the buckets the rollback guard reads (1 ms to 10 s, then `+Inf`). For SSE and WebSocket it measures the time to response headers, not the stream's lifetime. It has `_bucket` and `_count` but no `_sum`, so averages are not available; `histogram_quantile(0.99, sum by (le) (rate(edge_request_duration_seconds_bucket[5m])))` gives the p99. A request is counted when it finishes, so one still open when its version is dropped, such as a long stream across a publish, is not counted |
-| `edge_client_signal_total{signal}` | Requests that showed each client signal (one request can show several), counted exactly. Every signal always has a series. Requests shed before the config step, such as an ambiguous path, count none |
-| `edge_ratelimit_rule_total{rule,outcome}` | Each rate-limit rule's requests by outcome: `evaluated`, `limited`, `logged` (a log-only rule, or any rule under the kill switch, over its limit), `failed` (Valkey did not answer and the rule took its `fail_mode`), `capped` (matched, but skipped by the per-request rule cap) and `expired` (matched after the rule's `expires_at`, so skipped). Only rules of the versions this replica serves, or served since its last stats report, have series, so a rule removed by a publish loses its series after the next report. A version has at most 200 rate-limit rules, so an active version and a canary give at most 400 rules of 6 series each, plus rules of versions retired since the last report |
+| `edge_request_duration_seconds` | Histogram of request latency, on the buckets the rollback guard reads (1 ms to 10 s, then `+Inf`). [Notes](#edge-metric-label-values) |
+| `edge_client_signal_total{signal}` | Requests that showed each client signal (one request can show several), counted exactly. [Notes](#edge-metric-label-values) |
+| `edge_ratelimit_rule_total{rule,outcome}` | Each rate-limit rule's requests by `outcome`: `evaluated`, `limited`, `logged`, `failed`, `capped` or `expired`. [Label values](#edge-metric-label-values) |
+
+### Edge metric label values
+
+- `edge_responses_total`: only codes seen have a series, except the edge's 502, 503 and 504, which are always present so an alert sees the first one. Code `0` is a request that got no answer, `600` any code above 599.
+- `edge_rejected_total{reason}`:
+    - `blocked` is an access rule's `block` setting.
+    - `banned` is a client IP an access rule's `ban` setting banned earlier on this edge.
+    - `body_timeout` is a 400 for a body sent too slowly.
+    - `body_invalid` is a 400 for a body that could not be read, such as broken chunk framing.
+    - `upstream_tls` is a failed TLS handshake with the upstream: it refused the handshake, or its certificate is not valid for the request's Host, which the client chose, or not trusted. Its error is on the request's access line.
+- `edge_request_duration_seconds`:
+    - For SSE and WebSocket it measures the time to response headers, not the stream's lifetime.
+    - It has `_bucket` and `_count` but no `_sum`, so averages are not available. `histogram_quantile(0.99, sum by (le) (rate(edge_request_duration_seconds_bucket[5m])))` gives the p99.
+    - A request is counted when it finishes, so one still open when its version is dropped, such as a long stream across a publish, is not counted.
+- `edge_client_signal_total`: every signal always has a series. Requests shed before the config step, such as an ambiguous path, count none.
+- `edge_ratelimit_rule_total{outcome}`:
+    - `logged` is a log-only rule, or any rule under the kill switch, over its limit.
+    - `failed` is Valkey not answering, so the rule took its `fail_mode`.
+    - `capped` is matched but skipped by the per-request rule cap.
+    - `expired` is matched after the rule's `expires_at`, so skipped.
+- `edge_ratelimit_rule_total{rule}`: only rules of the versions this replica serves, or served since its last stats report, have series, so a rule removed by a publish loses its series after the next report. A version has at most 200 rate-limit rules, so an active version and a canary give at most 400 rules of 6 series each, plus rules of versions retired since the last report.
 
 In the admin UI, latency is on **Routes**: p95 and p50 per route, from the access log's `duration_ms`, which for SSE and WebSocket is the stream's whole lifetime. **Stats** shows no latency.
 
@@ -46,10 +73,10 @@ Prometheus text at `GET :9091/metrics` (`ADMIN_INTERNAL_ADDR`), per replica, wit
 | `admin_publishes_total{source}` | New versions by how they were made: `manual` (including the starter policy at first start), `revert`, `guard_rollback`, `import`, `autopilot` |
 | `admin_guard_actions_total{action}` | Guard actions: `rollback`, `canary_abort`, `alert` (counted once when an alert starts) |
 | `admin_notifications_total{result}` | Posts to Alertmanager, `sent` or `failed` |
-| `admin_edge_reports_total{result}` | Edge stats reports: `accepted`, `invalid` (refused as malformed or too large, or a body that could not be read, such as from an edge that disconnected mid-report or hit admin's 30 s read timeout) or `error` (admin failed after authenticating the report and before ingesting it, such as Postgres unreachable). A report refused before this check, for a missing or wrong edge token or because Postgres was down while checking a token created in admin, is not counted under any label; the edge drops every report admin does not answer with 2xx and counts it in `edge_stats_dropped_total` |
+| `admin_edge_reports_total{result}` | Edge stats reports: `accepted`, `invalid` or `error`. Details follow the table |
 | `admin_log_lines_total{result}` | Shipped access lines `accepted` into **Routes**, or `rejected` (not an access line, or too long) |
 | `admin_log_batches_busy_total` | Access-log batches answered 429 because admin was busy; the shipper resends them |
-| `admin_background_job_failures_total{job}` | Failed leader jobs: `jwks`, `verified_bots`, `audit`, `audit_full`, `guard`, `notifications`, `retention`, `autopilot`, `ip_lists`. `jwks` counts only Postgres errors: a failed JWKS fetch keeps the last good keys and logs `jwks fetch failed; keeping the last good keys` instead. `verified_bots` counts a Postgres error storing a source's ranges or status, returned after every source is processed; a failed crawler range fetch or a list that does not parse does not count: it keeps the last good set, logs `verified bot ranges fetch failed; keeping the last good set`, shows on **Fleet** and raises `verified_bots_stale` after repeated failures. `ip_lists` counts a Postgres error storing a list or its status, returned after every source is processed; a failed download or a list with no usable line does not count: it keeps the last good list, logs `ip list fetch failed; keeping the last good set` and shows on **IP lists**. `notifications` also counts a post Alertmanager did not accept (unreachable or not 2xx), which `admin_notifications_total{result="failed"}` counts too. `audit` and `audit_full` also count a broken chain, which `admin_audit_verify_failures_total` counts too |
+| `admin_background_job_failures_total{job}` | Failed leader jobs, by `job`: `jwks`, `verified_bots`, `audit`, `audit_full`, `guard`, `notifications`, `retention`, `autopilot`, `ip_lists`. Details follow the table |
 | `admin_audit_verify_failures_total` | Audit verifications that found the chain broken |
 | `admin_trace_export_errors_total` | Span batches the trace collector did not accept |
 | `admin_connector_requests_total{connector,result}` | Requests to the autopilot's [connectors](../deploy/admin.md#connectors) (`prometheus`, `grafana`, `datadog`), by result: `ok`, `error` (unreachable, a redirect or not 2xx), `timeout` (over 10 seconds) or `too_large` (an answer over 256 KiB). Exported from zero on every replica, configured or not |
@@ -70,6 +97,19 @@ Prometheus text at `GET :9091/metrics` (`ADMIN_INTERNAL_ADDR`), per replica, wit
 | `admin_autopilot_budget_used_ratio{budget}` | Leader only: the share in use of each budget: `enforcing` (`max_enforcing`), `sensors` (`max_sensors`), `cases_hour` (`cases_per_hour`) |
 | `admin_edges_live` | Leader only: edges that reported in the last minute |
 | `admin_anomalies_firing{signal}` | Leader only: firing [notifications](notifications.md), by signal |
+
+Notes on the labels above:
+
+- `admin_edge_reports_total`:
+    - `invalid` is a report refused as malformed or too large, or a body that could not be read, such as from an edge that disconnected mid-report or hit admin's 30 s read timeout.
+    - `error` is admin failing after authenticating the report and before ingesting it, such as Postgres unreachable.
+    - A report refused before this check, for a missing or wrong edge token or because Postgres was down while checking a token created in admin, is not counted under any label. The edge drops every report admin does not answer with 2xx and counts it in `edge_stats_dropped_total`.
+- `admin_background_job_failures_total`:
+    - `jwks` counts only Postgres errors: a failed JWKS fetch keeps the last good keys and logs `jwks fetch failed; keeping the last good keys` instead.
+    - `verified_bots` counts a Postgres error storing a source's ranges or status, returned after every source is processed. A failed crawler range fetch or a list that does not parse does not count: it keeps the last good set, logs `verified bot ranges fetch failed; keeping the last good set`, shows on **Fleet** and raises `verified_bots_stale` after repeated failures.
+    - `ip_lists` counts a Postgres error storing a list or its status, returned after every source is processed. A failed download or a list with no usable line does not count: it keeps the last good list, logs `ip list fetch failed; keeping the last good set` and shows on **IP lists**.
+    - `notifications` also counts a post Alertmanager did not accept (unreachable or not 2xx), which `admin_notifications_total{result="failed"}` counts too.
+    - `audit` and `audit_full` also count a broken chain, which `admin_audit_verify_failures_total` counts too.
 
 The leader gauges come from the leader's notification check, so they appear up to one minute after a replica takes the lead and disappear when it steps down. They also disappear while that check fails, rather than show stale values. Use `max` across replicas for them.
 
@@ -98,7 +138,59 @@ The leader gauges come from the leader's notification check, so they appear up t
 
 Both binaries write JSON lines to stdout.
 
-**Edge access log** (`msg: access`): method, host (`server.address`), normalized path, query key names (`edge.query_keys`, and `edge.query_keys_dropped` counting keys not logged because they looked like secrets or were past the first 32), status, `request_id`, `edge.action` (`allow`, or the reason the edge refused the request, such as `blocked` or `rate_limited`; a log-only rule's match is not a refusal, so the line stays `allow`), whether the upstream answered (`edge.upstream_answered`: `false` when the edge wrote the response, such as a CORS preflight, which is still `allow`, or the 502 for a protocol switch the edge refused because the upstream's `Upgrade` didn't match the request's), `duration_ms`, client IP (`client.address`), `user_agent.original`, the viewer AS number (`client.as.number`), country (`client.geo.country_iso_code`) and JA4 (`tls.client.ja4`) when the deployment has their sources, the request's [client signals](../reference/expressions.md#client-signals) (`client.signals`, when any; computed for every logged request that reached the config phase, whether or not a rule reads them), the names of the [IP lists](../use/bots.md#ip-lists) that hold the client IP (`client.ip_lists`, when any, so it is absent while no list is on), config version and cohort (`edge.cohort`: `candidate` when the request's client is in the [canary](../use/publishing.md#canary), otherwise `active`), the trusted client allowlist entry the client matched, as written in the policy (`edge.allowlist`, only on lines that are written, so it follows `LOG_SAMPLE_RATE` like any other), the rule that decided the request (`edge.decided_by`: the access rule whose `block` setting refused it, the rule behind a ban for `banned`, the rate-limit rule for `rate_limited`, `rate_limit_key` and `rate_limit_unavailable`, or the [always-allow](../use/policy.md#always-allow) rule that let it through; absent when no rule decided it), every access, rate-limit and request-header rule the request matched, in evaluation order (`edge.matched_rules`, see [Matched rules](#matched-rules)), the rules that only logged (`edge.logged_rules`, the IDs of the entries whose `result` is `logged`; absent when there are none), the ban (`edge.ban.until`, RFC 3339 UTC, on the line of the request that set a ban; `edge.ban.dropped: true` instead when the ban table was full and nothing was stored; on a `banned` line also the rule that set it, `edge.ban.rule`, when the client last tripped it, `edge.ban.since`, and the host and path of the request that tripped it, `edge.ban.host` and `edge.ban.path`, at most 255 and 128 bytes, never the query), and the JWT result (`edge.auth`: `verified`, `cached`, `missing`, `invalid` or `pass_no_keys`). After `client.signals` the line carries, when the request has them: the JA3 fingerprint (`tls.client.ja3`) and continent (`client.geo.continent_code`) from the deployment's sources; the viewer HTTP version (`network.protocol.version`: `1.0`, `1.1`, `2` or `3`) and `url.scheme` (`https` or `http`) from the trusted viewer headers, only when the deployment has a source for them; the declared request body length (`http.request.body.size`, absent when the length is unknown, as for a chunked body); the bytes the edge wrote as the response body (`http.response.body.size`, including the edge's own templates and absent on a WebSocket or other hijacked connection, whose traffic does not pass through the edge's writer); the locale the edge detected (`edge.locale`, only when the request's locale setting is on and a rule or the upstream request read it); the JWT `sub` claim (`edge.auth_sub`, at most 256 bytes, only when `edge.auth` is `verified` or `cached`; no other claim is logged); and these request headers when sent, the first value of each, at most 256 bytes: `http.request.header.sec-ch-ua`, `.sec-ch-ua-mobile`, `.sec-ch-ua-platform`, `.sec-fetch-site`, `.sec-fetch-mode`, `.sec-fetch-dest`, `.sec-fetch-user`, `.accept`, `.accept-language` and `.accept-encoding`. Every header in [`CDN_HEADERS`](../deploy/edge.md#cdn-headers) is logged the same way, raw as received, as `http.request.header.<lower-case name>` (for example `.cf-ipcity` or `.cloudfront-viewer-tls`), so each preset adds its CDN's headers to every line. `http.request.header.referer` is the Referer's scheme, host and path only, at most 512 bytes, and absent when it is not an absolute URL. When the edge got no answer from the upstream, the line carries the error (`edge.upstream_error`, at most 512 bytes; quoted values, which can be a header line or an `Upgrade` value, are replaced with `"…"` unless the error is a DNS, certificate or socket error) and its cause (`edge.upstream_error_kind`): `dns` when the upstream's name did not resolve, `refused` when nothing accepted the connection, `reset` when the upstream dropped it, `tls` when the TLS handshake with the upstream failed: it refused the handshake, or its certificate is not valid for the request's Host or not trusted (action `upstream_tls`), `timeout` when the upstream did not connect, finish the TLS handshake or send response headers in time (action `upstream_timeout`, a 504), or `other`. **Stats** and `edge_upstream_errors_total` count the same causes exactly. There is no separate log line per failure: during an outage every failing request would take the log handler's lock on the request path. Admin keeps counts, not lines: keep these lines in your log store, and set `LOG_SEARCH_URL` ([admin settings](../deploy/admin.md)) so admin links its counts to them. Query values, `Authorization` and `Cookie` are never logged. Rejections, 5xx, lines of a request an always-allow rule or the allowlist let through past a block, and lines with an `edge.logged_rules` entry are always logged; other allowed requests follow `LOG_SAMPLE_RATE`, and when it is below 1 their lines carry it as `edge.sample_rate`. With [tracing](#traces) on, every line except shed requests (`overloaded`, `streams_overloaded`) carries `trace_id` and `span_id`, sampled or not, and the upstream receives the same trace ID in `traceparent`.
+**Edge access log** (`msg: access`): one JSON line per logged request, written off the request path. Field names follow OpenTelemetry HTTP conventions where one exists. Fields marked "when present" are left out of the line otherwise.
+
+| Field | Meaning | When present |
+|---|---|---|
+| `http.request.method`, `url.path`, `http.response.status_code`, `request_id` | Method, normalized path, status and request ID | Always |
+| `server.address` | The host | Always |
+| `edge.action` | `allow`, or the reason the edge refused the request, such as `blocked` or `rate_limited`. A log-only rule's match is not a refusal, so the line stays `allow` | Always |
+| `edge.upstream_answered` | Whether the upstream answered. `false` when the edge wrote the response, such as a CORS preflight, which is still `allow`, or the 502 for a protocol switch the edge refused because the upstream's `Upgrade` didn't match the request's | Always |
+| `duration_ms` | Request duration | Always |
+| `edge.query_keys` | Query key names, never values | The request has a query |
+| `edge.query_keys_dropped` | Count of keys not logged because they looked like secrets or were past the first 32 | Any key was dropped |
+| `client.address` | Client IP | The edge has a client IP |
+| `user_agent.original` | The `User-Agent` | The request sent one |
+| `client.as.number`, `client.geo.country_iso_code`, `tls.client.ja4` | Viewer AS number, country and JA4 | The deployment has their sources |
+| `tls.client.ja3`, `client.geo.continent_code` | JA3 fingerprint and continent | The deployment has their sources |
+| `client.signals` | The request's [client signals](../reference/expressions.md#client-signals). Computed for every logged request that reached the config phase, whether or not a rule reads them | Any signal showed |
+| `client.ip_lists` | Names of the [IP lists](../use/ip-lists.md) that hold the client IP | The IP is on a list, so absent while no list is on |
+| `edge.config_version`, `edge.cohort` | Config version and cohort: `candidate` when the request's client is in the [canary](../use/publishing.md#canary), otherwise `active` | The request got a config version |
+| `edge.allowlist` | The trusted client allowlist entry the client matched, as written in the policy | The client matched an entry, on lines that are written, so it follows `LOG_SAMPLE_RATE` like any other |
+| `edge.decided_by` | The rule that decided the request: the access rule whose `block` setting refused it, the rule behind a ban for `banned`, the rate-limit rule for `rate_limited`, `rate_limit_key` and `rate_limit_unavailable`, or the [always-allow](../use/policy.md#always-allow) rule that let it through | A rule decided it |
+| `edge.matched_rules` | Every access, rate-limit and request-header rule the request matched, in evaluation order. See [Matched rules](#matched-rules) | A rule matched |
+| `edge.logged_rules` | The IDs of the `edge.matched_rules` entries whose `result` is `logged`, the rules that only logged | Any rule only logged |
+| `edge.ban.until` | When the ban ends, RFC 3339 UTC | The request set a ban |
+| `edge.ban.dropped: true` | The ban table was full and nothing was stored | Instead of `edge.ban.until`, when the table was full |
+| `edge.ban.rule`, `edge.ban.since`, `edge.ban.host`, `edge.ban.path` | The rule that set the ban, when the client last tripped it, and the host and path of the request that tripped it, at most 255 and 128 bytes, never the query | `edge.action` is `banned` |
+| `edge.auth` | JWT result: `verified`, `cached`, `missing`, `invalid` or `pass_no_keys` | A token check ran |
+| `edge.auth_sub` | The JWT `sub` claim, at most 256 bytes. No other claim is logged | `edge.auth` is `verified` or `cached` |
+| `network.protocol.version`, `url.scheme` | Viewer HTTP version (`1.0`, `1.1`, `2` or `3`) and scheme (`https` or `http`), from the trusted viewer headers | The deployment has a source for them |
+| `http.request.body.size` | The declared request body length | The length is known, so absent for a chunked body |
+| `http.response.body.size` | The bytes the edge wrote as the response body, including the edge's own templates | Not on a WebSocket or other hijacked connection, whose traffic does not pass through the edge's writer |
+| `edge.locale` | The locale the edge detected | The request's locale setting is on and a rule or the upstream request read it |
+| `http.request.header.sec-ch-ua`, `.sec-ch-ua-mobile`, `.sec-ch-ua-platform`, `.sec-fetch-site`, `.sec-fetch-mode`, `.sec-fetch-dest`, `.sec-fetch-user`, `.accept`, `.accept-language`, `.accept-encoding` | The request header, the first value, at most 256 bytes | The request sent it |
+| `http.request.header.<lower-case name>` | Every header in [`CDN_HEADERS`](../deploy/edge.md#cdn-headers), raw as received, for example `.cf-ipcity` or `.cloudfront-viewer-tls`, so each preset adds its CDN's headers to every line | The request sent it |
+| `http.request.header.referer` | The Referer's scheme, host and path only, at most 512 bytes | The Referer is an absolute URL |
+| `edge.upstream_error` | The error when the edge got no answer from the upstream, at most 512 bytes. Quoted values, which can be a header line or an `Upgrade` value, are replaced with `"…"` unless the error is a DNS, certificate or socket error | The upstream did not answer |
+| `edge.upstream_error_kind` | The cause, listed below | The upstream did not answer |
+| `edge.sample_rate` | The value of `LOG_SAMPLE_RATE` | It is below 1 and the line is a sampled allowed request |
+| `trace_id`, `span_id` | The request's trace, which the upstream also receives as `traceparent` | [Tracing](#traces) is on, sampled or not, except for shed requests (`overloaded`, `streams_overloaded`) |
+
+Causes in `edge.upstream_error_kind`, which **Stats** and `edge_upstream_errors_total` count exactly:
+
+- `dns`: the upstream's name did not resolve.
+- `refused`: nothing accepted the connection.
+- `reset`: the upstream dropped the connection.
+- `tls`: the TLS handshake with the upstream failed. It refused the handshake, or its certificate is not valid for the request's Host or not trusted (action `upstream_tls`).
+- `timeout`: the upstream did not connect, finish the TLS handshake or send response headers in time (action `upstream_timeout`, a 504).
+- `other`: any other failure.
+
+Rules for what is logged:
+
+- **Never logged:** query values, `Authorization` and `Cookie`.
+- **Always logged:** rejections, 5xx, lines of a request an always-allow rule or the allowlist let through past a block, and lines with an `edge.logged_rules` entry. Other allowed requests follow `LOG_SAMPLE_RATE`.
+- **No line per failure:** an upstream failure has no separate log line, because during an outage every failing request would take the log handler's lock on the request path. Admin keeps counts, not lines: keep these lines in your log store, and set `LOG_SEARCH_URL` ([admin settings](../deploy/admin.md)) so admin links its counts to them.
 
 **Admin messages to alert on:**
 

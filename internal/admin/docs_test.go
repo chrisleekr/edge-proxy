@@ -3,11 +3,15 @@ package admin
 import (
 	"bytes"
 	"context"
+	"encoding"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -15,6 +19,7 @@ import (
 
 	"github.com/chrisleekr/edge-proxy/internal/edge"
 	"github.com/chrisleekr/edge-proxy/internal/expr"
+	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
 // docRows returns the cells of every Markdown table row in a docs page, or
@@ -257,7 +262,7 @@ func TestDocsListEveryDefaultIPList(t *testing.T) {
 		t.Fatalf("the migration seeds %d lists, want 73", len(code))
 	}
 	var docs []string
-	for _, row := range docRows(t, "use/bots.md", "Default IP lists") {
+	for _, row := range docRows(t, "use/ip-lists.md", "Default IP lists") {
 		if len(row) != 4 || strings.TrimSpace(row[0]) == "Name" || strings.TrimSpace(row[0]) == "---" {
 			continue
 		}
@@ -265,4 +270,384 @@ func TestDocsListEveryDefaultIPList(t *testing.T) {
 		docs = append(docs, name+" "+url+" wide="+map[string]string{"yes": "true", "no": "false"}[strings.TrimSpace(row[3])])
 	}
 	diff(t, "default IP list", uniq(code), uniq(docs))
+}
+
+// leaf reports a type the docs treat as one value: it has its own JSON or
+// text form, so its Go fields are not settings.
+func leaf(t reflect.Type) bool {
+	if t == reflect.TypeFor[expr.Node]() {
+		return true
+	}
+	for _, i := range []reflect.Type{reflect.TypeFor[json.Marshaler](), reflect.TypeFor[encoding.TextMarshaler]()} {
+		if t.Implements(i) || reflect.PointerTo(t).Implements(i) {
+			return true
+		}
+	}
+	return false
+}
+
+// mapKeyNames name the key of a map by where it sits; any other map key is <name>.
+var mapKeyNames = map[string]string{"notifications.rules": "<rule>", "notifications.rules.<rule>": "<signal>"}
+
+// settingPaths appends the dotted JSON path of every leaf setting under t.
+// Map keys read <name> and slice elements [], so a path names a setting once
+// however many entries a policy holds.
+func settingPaths(t *testing.T, out *[]string, typ reflect.Type, path string) {
+	t.Helper()
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	join := func(name string) string {
+		if path == "" {
+			return name
+		}
+		return path + "." + name
+	}
+	nested := func(e reflect.Type) bool {
+		for e.Kind() == reflect.Pointer {
+			e = e.Elem()
+		}
+		return (e.Kind() == reflect.Struct || e.Kind() == reflect.Map) && !leaf(e)
+	}
+	switch {
+	case leaf(typ):
+		*out = append(*out, path)
+	case typ.Kind() == reflect.Struct:
+		for f := range typ.Fields() {
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if !f.IsExported() || name == "-" {
+				continue
+			}
+			// An untagged or embedded field gets a path this walk cannot name, so it would escape the docs check.
+			if name == "" || f.Anonymous {
+				t.Fatalf("%s.%s has no json name: tag it so the policy fields reference can list it", typ, f.Name)
+			}
+			settingPaths(t, out, f.Type, join(name))
+		}
+	case typ.Kind() == reflect.Map && nested(typ.Elem()):
+		key := mapKeyNames[path]
+		if key == "" {
+			key = "<name>"
+		}
+		settingPaths(t, out, typ.Elem(), join(key))
+	case typ.Kind() == reflect.Slice && nested(typ.Elem()):
+		settingPaths(t, out, typ.Elem(), path+"[]")
+	default:
+		*out = append(*out, path)
+	}
+}
+
+// The policy fields reference lists every policy and admin setting, so a
+// field added or removed without its docs fails here.
+func TestDocsListEveryPolicyField(t *testing.T) {
+	var policy, adminSettings []string
+	settingPaths(t, &policy, reflect.TypeFor[snapshot.Config](), "")
+	for prefix, typ := range map[string]reflect.Type{
+		"guard":         reflect.TypeFor[GuardSettings](),
+		"notifications": reflect.TypeFor[NotifySettings](),
+		"autopilot":     reflect.TypeFor[AutopilotSettings](),
+		"traffic_map":   reflect.TypeFor[TrafficMapSettings](),
+	} {
+		settingPaths(t, &adminSettings, typ, prefix)
+	}
+	anySpan := regexp.MustCompile(`.`)
+	for section, code := range map[string][]string{"Policy": policy, "Admin settings": adminSettings} {
+		var documented []string
+		for _, row := range docRows(t, "reference/policy-fields.md", section) {
+			documented = append(documented, spans(row[0], anySpan)...)
+		}
+		diff(t, section+" field", uniq(code), uniq(documented))
+	}
+}
+
+// Every admin page has a section in the tour page of its sidebar group.
+func TestDocsTourEveryPage(t *testing.T) {
+	b, err := os.ReadFile("../../web/admin/src/nav.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	matches := regexp.MustCompile(`group: '([^']+)'|label: '([^']+)'`).FindAllStringSubmatch(src, -1)
+	// A quoting change in nav.ts would make the pattern match nothing and the test pass silently.
+	labels, links := 0, len(regexp.MustCompile(`to:\s*['"]`).FindAllString(src, -1))
+	for _, m := range matches {
+		if m[2] != "" {
+			labels++
+		}
+	}
+	if labels == 0 || labels != links {
+		t.Fatalf("read %d page labels from nav.ts but it has %d links: update the pattern to match its quoting", labels, links)
+	}
+	var group string
+	for _, m := range matches {
+		if m[1] != "" {
+			group = strings.ToLower(m[1])
+			continue
+		}
+		label := m[2]
+		tour, err := os.ReadFile("../../docs/tour/" + group + ".md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains("\n"+string(tour), "\n## "+label+"\n") {
+			t.Errorf("page %s has no \"## %s\" section in tour/%s.md", label, label, group)
+		}
+	}
+}
+
+// recipe is one "## " section of a use-case page: the rules and settings it
+// tells the reader to enter, and the policy tests that prove them.
+type recipe struct {
+	heading string
+	rules   []map[string]any
+	phases  []string    // config key of each rule's phase list
+	sets    [][2]string // settings path and its JSON
+	tests   []string
+	text    string // the section's Markdown, to find a promised warning
+}
+
+var (
+	rulePhases = map[string]string{"Access rule": "config_rules", "Rate limit rule": "rate_limit_rules", "Request header rule": "request_header_rules"}
+	// Paths an "Also set" may name, and whether its JSON adds keys to a map.
+	setPaths    = map[string]bool{"auth": false, "global.cors_policies": true, "global.responses": true, "global.lists": true, "global.locale": false, "global.client_allowlist": false}
+	ruleMarker  = regexp.MustCompile("^\\*\\*Rule\\*\\* · (.+?), ID `([^`]+)`")
+	setMarker   = regexp.MustCompile("^\\*\\*Also set\\*\\*.*?\\(`([^`]+)`\\)[.:]")
+	jsonFence   = regexp.MustCompile("(?s)```json\n(.*?)\n```")
+	proveMarker = regexp.MustCompile(`(?m)^\*\*Prove it\*\*`)
+	ruleCount   = regexp.MustCompile(`(?m)^\*\*Rule\*\*`)
+)
+
+// strictDecode reads src as admin reads a draft: unknown fields and data after the value are errors.
+func strictDecode(src string, v any) error {
+	dec := json.NewDecoder(strings.NewReader(src))
+	dec.DisallowUnknownFields()
+	return decodeOne(dec, v, "invalid JSON")
+}
+
+// parseRecipes reads the recipes of a cookbook page. It returns the number
+// of Rule and Prove it fences it found, for the caller to compare with the
+// markers in the text.
+func parseRecipes(t *testing.T, src string) (recipes []*recipe, rules, proofs int) {
+	t.Helper()
+	var cur *recipe
+	var pending, when, phase, id string // what the next fence is for
+	start := 0
+	lines := strings.Split(src, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if cur != nil {
+			cur.text = strings.Join(lines[start:min(i+1, len(lines))], "\n")
+		}
+		if h, ok := strings.CutPrefix(line, "## "); ok {
+			cur = &recipe{heading: h}
+			start = i
+			recipes = append(recipes, cur)
+			pending = ""
+		} else if m := ruleMarker.FindStringSubmatch(line); m != nil {
+			pending, phase, id = "when", m[1], m[2]
+		} else if m := setMarker.FindStringSubmatch(line); m != nil {
+			pending = "set " + m[1]
+		} else if strings.HasPrefix(line, "**Also set**") {
+			// IP lists and monitors have no JSON, the policy test supplies them.
+			pending = "also"
+		} else if strings.HasPrefix(line, "**Prove it**") {
+			pending = "prove"
+		} else if lang, ok := strings.CutPrefix(line, "```"); ok && lang != "" {
+			j := i + 1
+			for ; j < len(lines) && lines[j] != "```"; j++ {
+			}
+			if j == len(lines) {
+				t.Fatalf("%s: code fence on line %d is never closed", cur.heading, i+1)
+			}
+			body := strings.Join(lines[i+1:j], "\n")
+			i = j
+			switch {
+			case pending == "also" && lang == "json":
+				t.Fatalf("%s: JSON after an Also set line that names no settings path: write the path in backticks and end the sentence with . or :", cur.heading)
+			case pending == "when" && lang == "text":
+				when, pending = body, "then"
+			case pending == "then" && lang == "json":
+				var rule map[string]any
+				if err := strictDecode(body, &rule); err != nil {
+					t.Fatalf("%s: Then is not a JSON object: %v", cur.heading, err)
+				}
+				rule["when"] = when
+				rule["id"] = id
+				cur.rules, cur.phases = append(cur.rules, rule), append(cur.phases, phase)
+				rules++
+				pending = ""
+			case strings.HasPrefix(pending, "set ") && lang == "json":
+				cur.sets = append(cur.sets, [2]string{strings.TrimPrefix(pending, "set "), body})
+				pending = ""
+			case pending == "prove" && lang == "json":
+				cur.tests = append(cur.tests, body)
+				proofs++
+				pending = ""
+			}
+		}
+	}
+	return recipes, rules, proofs
+}
+
+// build applies the recipe to the starter policy the way the admin UI does,
+// then decodes it as admin reads a draft.
+func (r *recipe) build(t *testing.T) snapshot.Config {
+	t.Helper()
+	raw, _ := json.Marshal(snapshot.Starter())
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	for i, rule := range r.rules {
+		key, ok := rulePhases[r.phases[i]]
+		if !ok {
+			t.Fatalf("unknown phase label %q", r.phases[i])
+		}
+		node, err := expr.Parse(rule["when"].(string))
+		if err != nil {
+			t.Fatalf("rule %s: When does not parse: %v", rule["id"], err)
+		}
+		delete(rule, "when")
+		rule["expression"] = node
+		list, _ := root[key].([]any)
+		root[key] = append(list, rule)
+	}
+	for _, s := range r.sets {
+		merge, ok := setPaths[s[0]]
+		if !ok {
+			t.Fatalf("Also set path %q is not handled by the docs test: add it to setPaths", s[0])
+		}
+		var val any
+		if err := json.Unmarshal([]byte(s[1]), &val); err != nil {
+			t.Fatalf("Also set %s: %v", s[0], err)
+		}
+		m := root
+		keys := strings.Split(s[0], ".")
+		for _, k := range keys[:len(keys)-1] {
+			m = m[k].(map[string]any)
+		}
+		last := keys[len(keys)-1]
+		add, isMap := val.(map[string]any)
+		if dst, ok := m[last].(map[string]any); ok && merge && isMap {
+			maps.Copy(dst, add)
+			val = dst
+		}
+		m[last] = val
+	}
+	raw, _ = json.Marshal(root)
+	var cfg snapshot.Config
+	if err := strictDecode(string(raw), &cfg); err != nil {
+		t.Fatalf("policy does not decode: %v", err)
+	}
+	return cfg
+}
+
+// Every recipe in the use docs (the cookbook and the feature pages that show
+// one) compiles, and its policy tests pass, against the same validator and
+// test runner admin uses.
+func TestDocsCookbookRecipes(t *testing.T) {
+	// Every viewer field is available and verified bots are on, so a recipe
+	// is not rejected for a deployment detail the reader sets up themselves.
+	dep := snapshot.Deployment{VerifiedBots: true}
+	for _, f := range expr.Fields {
+		if f.Source == expr.SourceViewer {
+			dep.ViewerFields = append(dep.ViewerFields, f.Name)
+		}
+	}
+	var pages []string
+	err := filepath.WalkDir("../../docs/use", func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".md") {
+			pages = append(pages, p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := 0
+	for _, p := range pages {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := strings.TrimPrefix(p, "../../docs/")
+		recipes, rules, proofs := parseRecipes(t, string(b))
+		// A parser regression would otherwise test nothing and pass.
+		if want := len(ruleCount.FindAllString(string(b), -1)); rules != want {
+			t.Errorf("%s: parsed %d rules but the page has %d Rule markers", page, rules, want)
+		}
+		if want := len(proveMarker.FindAllString(string(b), -1)); proofs != want {
+			t.Errorf("%s: parsed %d policy tests but the page has %d Prove it markers", page, proofs, want)
+		}
+		for _, r := range recipes {
+			if len(r.rules)+len(r.sets)+len(r.tests) == 0 {
+				continue
+			}
+			ran++
+			t.Run(page+"/"+r.heading, func(t *testing.T) {
+				cfg := r.build(t)
+				cfg.Version = 1 // admin assigns the next version on save
+				compiled, warns, errs := snapshot.Compile(&cfg, dep)
+				if compiled == nil {
+					t.Fatalf("does not compile: %v", errs)
+				}
+				if len(warns) > 0 && !strings.Contains(r.text, "expect the warning") {
+					t.Fatalf("saves with warnings the recipe does not mention: %v", expr.Issues(warns))
+				}
+				var tests []ConfigTest
+				for _, body := range r.tests {
+					var more []ConfigTest
+					if err := strictDecode(body, &more); err != nil {
+						t.Fatalf("policy tests do not decode: %v", err)
+					}
+					tests = append(tests, more...)
+				}
+				if issues := checkTests(tests); len(issues) > 0 {
+					t.Fatalf("policy tests are invalid: %v", issues)
+				}
+				for _, res := range runTests(compiled, tests) {
+					for _, f := range res.Failures {
+						t.Errorf("test %q failed: %s", res.Name, f)
+					}
+				}
+			})
+		}
+	}
+	if ran == 0 {
+		t.Fatal("found no recipes under docs/use")
+	}
+}
+
+// Every policy test array shown anywhere in the use docs is valid, including
+// those on pages whose policy is not built here.
+func TestDocsPolicyTestsAreValid(t *testing.T) {
+	err := filepath.WalkDir("../../docs/use", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".md") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, m := range jsonFence.FindAllStringSubmatch(string(b), -1) {
+			if !strings.Contains(m[1], `"expect"`) {
+				continue
+			}
+			body := m[1]
+			// One test on its own, as docs/use/policy.md shows it.
+			if strings.HasPrefix(strings.TrimSpace(body), "{") {
+				body = "[" + body + "]"
+			}
+			var tests []ConfigTest
+			if err := strictDecode(body, &tests); err != nil {
+				t.Errorf("%s: policy tests do not decode: %v", p, err)
+			} else if issues := checkTests(tests); len(issues) > 0 {
+				t.Errorf("%s: policy tests are invalid: %v", p, issues)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

@@ -15,7 +15,7 @@ An access rule's `block` setting answers 403; a rate limit answers 429. Every re
 
 A signal or fingerprint is a hint, not proof. A careful bot sends a browser's headers and TLS stack, and some real users run privacy tools or old browsers. Keep crawlers you want out of every blocking rule with `not client.verified_bot`.
 
-`client.verified_bot` needs `VERIFIED_BOT_SOURCES`; without it, validation refuses rules that read the field. Until admin's first fetch succeeds, the field is false. When a list keeps failing, edges keep matching its last good ranges; **Fleet** shows each source's state under [Verified crawler ranges](dashboard.md#fleet-and-stats), and the `verified_bots_stale` [notification](../operate/notifications.md#signals) trips after 3 failed refreshes in a row by default, then fires per the notification settings. For Google, list only `common-crawlers.json` and `special-crawlers.json`. The user-triggered fetcher lists cover fetches other people control, such as Google Cloud customers' fetchers, so never use them for an exemption.
+`client.verified_bot` needs `VERIFIED_BOT_SOURCES`; without it, validation refuses rules that read the field. Until admin's first fetch succeeds, the field is false. When a list keeps failing, edges keep matching its last good ranges; **Fleet** shows each source's state under [Verified crawler ranges](../tour/monitor.md#verified-crawler-ranges), and the `verified_bots_stale` [notification](../operate/notifications.md#signals) trips after 3 failed refreshes in a row by default, then fires per the notification settings. For Google, list only `common-crawlers.json` and `special-crawlers.json`. The user-triggered fetcher lists cover fetches other people control, such as Google Cloud customers' fetchers, so never use them for an exemption.
 
 ## Refuse tools on pages
 
@@ -43,140 +43,13 @@ starts_with(http.request.uri.path, "/wp-") or starts_with(http.request.uri.path,
 { "settings": { "block": "block", "ban": "24h" } }
 ```
 
-The first request that matches gets 403, and every later request from that client IP on that edge gets 403 with the action `banned` for 24 hours, on every host. See [Banning a client](policy.md#banning-a-client) for what ends a ban early and what clears it. Bans an edge records show on the [IP lists](#ip-lists) page, where a person can lift one.
+The first request that matches gets 403, and every later request from that client IP on that edge gets 403 with the action `banned` for 24 hours, on every host. See [Banning a client](policy.md#banning-a-client) for what ends a ban early and what clears it. Bans an edge records show under [Banned IPs](ip-lists.md#banned-ips) on the IP lists page, where a person can lift one.
 
 Anchor the expression on paths your own sites and services never use. `/wp-` also matches a top-level path such as a GitLab group, a user or a MinIO bucket named `wp-something`, and would ban its owner on every host. Start with `"block": "log"` and no `ban`, check the lines whose `edge.logged_rules` contains this rule in the [access log](../operate/monitoring.md#logs) against your real traffic, and only then switch to `block` with `ban`.
 
 ## IP lists
 
-The **IP lists** page (Policy, IP lists) holds named lists of addresses: your own, typed on the page, such as an office or partner network, and downloaded lists of known abusers and the address ranges of cloud providers, crawlers, monitors and CDNs. A list says nothing about allowing or blocking: the rule that names it does, whether it blocks, logs, rate limits or [always allows](policy.md#always-allow). `client.ip_lists` holds the names of the lists that hold the request's client IP, so a rule says which ones it means:
-
-```text
-client.ip_lists in {"aws" "azure"}
-```
-
-The migration adds [73 lists](#default-ip-lists), all off. A list that is off is not downloaded and matches no one. Turn on the ones your rules name, or add your own. A name is 1 to 63 lowercase letters, digits and hyphens, not starting with a hyphen.
-
-- **I'll type them:** one address or CIDR range per line, at most 10,000. Every line must be valid or nothing is saved, and each problem names its line: not an address, host bits set (`198.51.100.7/24` suggests `198.51.100.0/24`), a zone, IPv4 written as IPv6, wider than /16 for IPv4 or /32 for IPv6 (or /8 and /16 with **Allows ranges up to /8**), or a repeat. A saved change reaches every edge within about a minute, with no publish.
-- **Download from a URL:** an https address and, for a cloud provider's list, **Allows ranges up to /8**.
-
-**Edit** changes a list's name, its addresses or URL, and its width; a list keeps its kind, so to switch between typed and downloaded, remove it and add it again. Changing a downloaded list's URL, or narrowing its width, stops serving its old entries without waiting for a download, so edges drop them within about a minute, and fetches it again on the leader's next check, every minute, after any download in progress; widening keeps them. A typed list's audit row records every address added and removed. **Used by**, under a list's name, names the rules in the draft, the active version or a canary candidate that name a list. A list cannot be renamed while any of them does, because the rule would then match no one: change those rules first. Lists catch known abusers and hosted clients, not a scan from rotating residential addresses, which public lists rarely carry: use them beside a trap rule, not instead of one.
-
-Admin downloads each list that is on about once an hour through the same guard as [JWKS](../deploy/admin.md#variables), keeps the last good copy, and serves the lists to the edges by name. Turning a list off or removing it reaches every edge within about a minute, with no publish; a downloaded list added or turned on does so once admin has downloaded it, so check its first success on the page before relying on it; a typed list is served from the edges' next poll. A list is plain text, one address or range per line, where text after a space, tab, comma, `;` or `#` is ignored, or JSON, when the file starts with `{` or `[`: every string value in it that is an address or range counts, at any depth; object keys are not read and other values are ignored. A JSON file is read whole, so a file that holds several kinds of ranges, such as GitHub's meta file, becomes one list. JSON that is broken or cut off counts as failed. Ranges wider than a /16 for IPv4 or a /32 for IPv6 are skipped and counted on the page, or wider than a /8 and a /16 on a list that allows wide ranges. A download with no usable line, such as an HTML page, counts as failed and the last good list stays. There are at most 128 lists, the defaults included. The edges take at most 500,000 entries in all: typed lists come first, then downloaded lists in the order they were added, and one that would pass that is left out whole, so a name never means part of a list; a later, smaller list that still fits is served.
-
-An address on several lists carries every name, because one provider's ranges can overlap another's (GitHub Actions runners are in both `github` and `azure`). Until an edge's first poll after it starts, `client.ip_lists` is empty, as `client.verified_bot` is: a rule that names a list does not match, and an exclusion does not exempt.
-
-With any list on, every [access log](../operate/monitoring.md#logs) line for a listed address carries `client.ip_lists`. Group by it and `server.address` in your log store to see which provider sends what to which host before a rule blocks anything.
-
-### Using it
-
-Find the source first: turn on the lists you care about and read the log. Then limit by name. Roll out each rule as `log` first, because the ranges come from third-party repositories:
-
-```json
-{ "settings": { "block": "log" } }
-```
-
-Known abusers, anywhere:
-
-```text
-client.ip_lists in {"firehol-abusers" "spamhaus-drop"} and not client.verified_bot
-```
-
-A lower per-IP rate limit for hosted clients, as a `rate_limit` rule with key `ip`, keeping your own monitoring out. The exclusions must be on too, or they exclude nobody:
-
-```text
-client.ip_lists in {"aws" "azure" "googlecloud" "digitalocean" "hetzner" "vultr"} and not client.ip_lists in {"statuscake" "uptimerobot" "datadog"}
-```
-
-To rate limit a whole provider at once, catching a scraper that rotates addresses inside one cloud, scope the same kind of expression to that provider and use the key `constant`: one counter is shared by every matching address.
-
-Match services, not whole providers, where a provider list mixes both: `aws` holds CloudFront and Route 53 health checks as well as EC2 compute, and `github` holds webhooks as well as the CI runners anyone can rent. Use `aws-ec2` and `github-actions` for compute, and `aws-route53-healthchecks` and `github-hooks` to exempt what you want. Other services of a provider are added by their address from the same repository.
-
-The editor warns about each name in a rule that matches no one: a list that does not exist, a list that is off or has no entries yet (typed, or downloaded at least once), and a list that is on but left out because the lists that are on pass 500,000 entries. The second matters most for exclusions, because every default is off. A rule that reads `client.denylisted` is always warned about, since it matches every list that is on, monitors and crawlers included. The page's **Is this IP listed?** check says which lists that are on and have entries (typed, or downloaded at least once) hold an address, by name. It reads every such list, without the 500,000-entry cut, so a hit on a list left out at the cut is not in the edges' `client.ip_lists`.
-
-Many hosted clients are your own monitors and webhooks, such as Datadog, StatusCake, UptimeRobot checks and GitHub webhooks, which is why a rule names lists instead of matching "any list".
-
-The same page lists **Banned IPs**: addresses a [trap rule](#trap-paths) banned, as the edges reported them, that have not ended or been lifted (an edge restart ends a ban, and removing its rule suspends it, without admin knowing; it applies again if a rule with that ID that sets `ban` returns before the ban ends), with the rule, the host and path that tripped it, and the edge. Each edge reports a ban within about a minute of recording it. **Lift ban** ends the ban on every edge within about a minute; the address is banned again if it trips the trap again. For an IPv6 address the ban covers its whole /64. A lift ends only the ban: it does not change any rule, and it is not the allowlist, which skips blocking, bans and rate-limit rules and needs a [publish](policy.md#trusted-clients). Changing lists and lifting bans needs the `ip_lists.manage` permission, which publishers and admins have, because editing a list that an always-allow or blocking rule names changes whom that rule matches without a publish; every role that reads stats can read the page. An [always-allow](policy.md#always-allow) rule that requires a downloaded list (names it in a positive `eq` or `in` condition the rule needs) is warned about in the editor, because whoever publishes that address then decides who skips blocks, bans and rate limits: type the addresses in a list instead.
-
-## Default IP lists
-
-Each row is a list the migration adds, off. An abuse list is [FireHOL `firehol_abusers_30d`](https://iplists.firehol.org/) or [Spamhaus DROP](https://www.spamhaus.org/drop/); the others are files of [rezmoss/cloud-provider-ip-addresses](https://github.com/rezmoss/cloud-provider-ip-addresses), updated daily, with each provider's IPv4 and IPv6 ranges merged. The terms of each source differ, so check them before use. **Wide** lists keep ranges up to /8 for IPv4 and /16 for IPv6. A list without Wide skips ranges wider than /16 for IPv4 and /32 for IPv6, whatever its category, and Wide is set only where the provider's own data has wider ranges. The repository also has per-region lists, split and re-formatted copies of these ranges and more per-service lists; add one by its address from the page. A default you remove stays removed. `spamhaus-drop` does not allow wide ranges, so its /12 to /15 entries are skipped and counted on the page; to keep them, remove it and add it again by its address with **Allows ranges up to /8**.
-
-| Name | Holds | Address | Wide |
-| --- | --- | --- | --- |
-| `firehol-abusers` | abuse list | `https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset` | no |
-| `spamhaus-drop` | abuse list | `https://www.spamhaus.org/drop/drop.txt` | no |
-| `akamai` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/akamai/akamai_ips_merged.txt` | yes |
-| `alibaba` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/alibaba/alibaba_ips_merged.txt` | yes |
-| `amazonbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/amazonbot/amazonbot_ips_merged.txt` | no |
-| `apple-private-relay` | VPN or anonymiser | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/apple_private_relay/apple_private_relay_ips_merged.txt` | no |
-| `applebot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/applebot/applebot_ips_merged.txt` | no |
-| `atlassian` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/atlassian/atlassian_ips_merged.txt` | no |
-| `aws` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/aws_ips_merged.txt` | yes |
-| `azure` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/azure/azure_ips_merged.txt` | yes |
-| `backblaze` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/backblaze/backblaze_ips_merged.txt` | no |
-| `baidu` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/baidu/baidu_ips_merged.txt` | yes |
-| `bingbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/bingbot/bingbot_ips_merged.txt` | no |
-| `bunny` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/bunny/bunny_ips_merged.txt` | no |
-| `cachefly` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/cachefly/cachefly_ips_merged.txt` | no |
-| `circleci` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/circleci/circleci_ips_merged.txt` | no |
-| `claudebot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/claudebot/claudebot_ips_merged.txt` | no |
-| `cloudflare` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/cloudflare/cloudflare_ips_merged.txt` | yes |
-| `commoncrawl` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/commoncrawl/commoncrawl_ips_merged.txt` | no |
-| `contabo` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/contabo/contabo_ips_merged.txt` | yes |
-| `datadog` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/datadog/datadog_ips_merged.txt` | no |
-| `digitalocean` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/digitalocean/digitalocean_ips_merged.txt` | no |
-| `discord` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/discord/discord_ips_merged.txt` | no |
-| `duckduckbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/duckduckbot/duckduckbot_ips_merged.txt` | no |
-| `fastly` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/fastly/fastly_ips_merged.txt` | yes |
-| `gabia` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gabia/gabia_ips_merged.txt` | no |
-| `gcore` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gcore/gcore_ips_merged.txt` | no |
-| `github` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/github/github_ips_merged.txt` | yes |
-| `gocache` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gocache/gocache_ips_merged.txt` | no |
-| `googlebot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/googlebot/googlebot_ips_merged.txt` | no |
-| `googlecloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/googlecloud/googlecloud_ips_merged.txt` | yes |
-| `googleservices` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/googleservices/googleservices_ips_merged.txt` | yes |
-| `gptbot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/gptbot/gptbot_ips_merged.txt` | no |
-| `hetzner` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/hetzner/hetzner_ips_merged.txt` | yes |
-| `hostway` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/hostway/hostway_ips_merged.txt` | no |
-| `huawei` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/huawei/huawei_ips_merged.txt` | yes |
-| `ibmcloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/ibmcloud/ibmcloud_ips_merged.txt` | yes |
-| `imperva` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/imperva/imperva_ips_merged.txt` | yes |
-| `internetarchive` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/internetarchive/internetarchive_ips_merged.txt` | no |
-| `leaseweb` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/leaseweb/leaseweb_ips_merged.txt` | yes |
-| `linode` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/linode/linode_ips_merged.txt` | yes |
-| `meta` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/meta/meta_ips_merged.txt` | yes |
-| `microsoft365` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/microsoft365/microsoft365_ips_merged.txt` | yes |
-| `mullvad` | VPN or anonymiser | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/mullvad/mullvad_ips_merged.txt` | no |
-| `nhncloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/nhncloud/nhncloud_ips_merged.txt` | no |
-| `oracle` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/oracle/oracle_ips_merged.txt` | yes |
-| `ovhcloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/ovhcloud/ovhcloud_ips_merged.txt` | yes |
-| `perplexitybot` | crawler | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/perplexitybot/perplexitybot_ips_merged.txt` | no |
-| `pingdom` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/pingdom/pingdom_ips_merged.txt` | no |
-| `play2go` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/play2go/play2go_ips_merged.txt` | no |
-| `quiccloud` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/quiccloud/quiccloud_ips_merged.txt` | no |
-| `rackspace` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/rackspace/rackspace_ips_merged.txt` | yes |
-| `salesforce` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/salesforce/salesforce_ips_merged.txt` | yes |
-| `scaleway` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/scaleway/scaleway_ips_merged.txt` | yes |
-| `statuscake` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/statuscake/statuscake_ips_merged.txt` | no |
-| `stormwall` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/stormwall/stormwall_ips_merged.txt` | no |
-| `sucuri` | CDN | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/sucuri/sucuri_ips_merged.txt` | no |
-| `teamcity` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/teamcity/teamcity_ips_merged.txt` | no |
-| `telegram` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/telegram/telegram_ips_merged.txt` | no |
-| `tencent` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/tencent/tencent_ips_merged.txt` | yes |
-| `tor` | VPN or anonymiser | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/tor/tor_ips_merged.txt` | no |
-| `upcloud` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/upcloud/upcloud_ips_merged.txt` | yes |
-| `uptimerobot` | uptime monitor | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/uptimerobot/uptimerobot_ips_merged.txt` | no |
-| `vultr` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/vultr/vultr_ips_merged.txt` | yes |
-| `wasabi` | cloud provider | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/wasabi/wasabi_ips_merged.txt` | no |
-| `yandex` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/yandex/yandex_ips_merged.txt` | yes |
-| `zoho` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/zoho/zoho_ips_merged.txt` | no |
-| `zoom` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/zoom/zoom_ips_merged.txt` | no |
-| `zscaler` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/zscaler/zscaler_ips_merged.txt` | yes |
-| `aws-ec2` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/services/ec2/aws_ec2_ips_merged.txt` | yes |
-| `aws-route53-healthchecks` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/aws/services/route53_healthchecks/aws_route53_healthchecks_ips_merged.txt` | no |
-| `github-hooks` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/github/services/hooks/github_hooks_ips_merged.txt` | yes |
-| `github-actions` | service | `https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/github/services/actions/github_actions_ips_merged.txt` | yes |
+Named lists of addresses, typed or downloaded, that rules match with `client.ip_lists`: see [IP lists](ip-lists.md), including the [default lists](ip-lists.md#default-ip-lists) and the **Banned IPs** a trap rule produces.
 
 ## CDN headers
 
@@ -201,7 +74,7 @@ Cloudflare sends the bot headers only with Enterprise Bot Management, and a clie
 
 A scraper fleet often forges a browser `User-Agent` that is years old, or rewrites a Firefox or Safari one while the rest of the request is Chromium. Two signals separate it from real browsers on the same TLS fingerprint:
 
-- `browser_outdated` fires when the claimed Chrome (or other Chromium) or Firefox major version is below **Settings → Oldest browser version** (`global.browser_floor`, for example `{"chromium": 130, "firefox": 128}`). Safari has no floor, because its version follows the operating system. With no floor set the signal is off, and validation refuses a rule that names it. The floor needs schema 7 edges: admin holds the publish while a live edge reads an older schema, naming it.
+- `browser_outdated` fires when the claimed Chrome (or other Chromium) or Firefox major version is below **Settings → Oldest browser version** (`global.browser_floor`, for example `{"chromium": 130, "firefox": 128}`). Safari has no floor, because its version follows the operating system. With no floor set the signal is off, and validation refuses a rule that names it. The floor needs schema 7 edges: admin refuses the publish while a live edge reads an older schema, naming that edge.
 - `client_hints_mismatch` also fires for a Firefox or Safari `User-Agent` that sends `Sec-CH-UA`, because only Chromium sends it. Its known false positive is a Chrome user whose User-Agent switcher claims Firefox.
 
 You set the floor by hand and must raise it about once a year, as browsers release. Real users on devices pinned to an old operating system can't update, so start with `log`:
@@ -227,8 +100,16 @@ not client.verified_bot and client.signals in {"browser_outdated" "client_hints_
 ```
 
 ```json
-{ "id": "fingerprint-fleet", "algorithm": "sliding_window", "limit": 300, "period": "1m", "key": ["ja4"],
-  "on_missing_key": "skip", "action": "log", "fail_mode": "open" }
+{
+  "id": "fingerprint-fleet",
+  "algorithm": "sliding_window",
+  "limit": 300,
+  "period": "1m",
+  "key": ["ja4"],
+  "on_missing_key": "skip",
+  "action": "log",
+  "fail_mode": "open"
+}
 ```
 
 It needs:
@@ -253,7 +134,7 @@ The [autopilot](autopilot.md#cases) opens a case when `signal_surge` fires and p
 
 ## JSON answers on API paths
 
-The default `forbidden` template is HTML. Add a template named `forbidden-json` with status 403 and content type `application/problem+json` on **Templates**, then map it for the API in an access rule:
+The starter `forbidden` template already sends problem+json to API clients, `fetch` and curl, and a small HTML page to browsers, chosen by the `Accept` header. Use this recipe for a policy whose `forbidden` template predates those bodies, or to send a different answer on API paths: add a template named `forbidden-json` with status 403 and content type `application/problem+json` on **Templates**, then map it for the API in an access rule:
 
 ```text
 starts_with(http.request.uri.path, "/api/")
@@ -271,10 +152,26 @@ A botnet rotating IPs often keeps one TLS stack and a few networks. A rate limit
 
 ```json
 [
-  { "id": "per-ip", "algorithm": "sliding_window", "limit": 600, "period": "1m", "key": ["ip"],
-    "on_missing_key": "fallback_ip", "action": "block", "fail_mode": "open" },
-  { "id": "ja4-network", "algorithm": "sliding_window", "limit": 3000, "period": "1m", "key": ["ja4", "asnum"],
-    "on_missing_key": "skip", "action": "log", "fail_mode": "open" }
+  {
+    "id": "per-ip",
+    "algorithm": "sliding_window",
+    "limit": 600,
+    "period": "1m",
+    "key": ["ip"],
+    "on_missing_key": "fallback_ip",
+    "action": "block",
+    "fail_mode": "open"
+  },
+  {
+    "id": "ja4-network",
+    "algorithm": "sliding_window",
+    "limit": 3000,
+    "period": "1m",
+    "key": ["ja4", "asnum"],
+    "on_missing_key": "skip",
+    "action": "log",
+    "fail_mode": "open"
+  }
 ]
 ```
 
@@ -285,9 +182,18 @@ A botnet rotating IPs often keeps one TLS stack and a few networks. A rate limit
 A scanner probing for files gets 404 after 404:
 
 ```json
-{ "id": "404-sweep", "algorithm": "fixed_window", "limit": 30, "period": "1m", "key": ["ip"],
-  "on_missing_key": "fallback_ip", "action": "log", "penalty": "10m", "fail_mode": "open",
-  "count_statuses": ["404"] }
+{
+  "id": "404-sweep",
+  "algorithm": "fixed_window",
+  "limit": 30,
+  "period": "1m",
+  "key": ["ip"],
+  "on_missing_key": "fallback_ip",
+  "action": "log",
+  "penalty": "10m",
+  "fail_mode": "open",
+  "count_statuses": ["404"]
+}
 ```
 
 ## Failed logins
@@ -295,9 +201,18 @@ A scanner probing for files gets 404 after 404:
 A password guesser gets 401 or 403 from the login endpoint. With the expression `http.request.uri.path eq "/login" and http.request.method eq "POST"`:
 
 ```json
-{ "id": "login-failures", "algorithm": "fixed_window", "limit": 10, "period": "10m", "key": ["ip"],
-  "on_missing_key": "fallback_ip", "action": "log", "penalty": "15m", "fail_mode": "open",
-  "count_statuses": ["401", "403"] }
+{
+  "id": "login-failures",
+  "algorithm": "fixed_window",
+  "limit": 10,
+  "period": "10m",
+  "key": ["ip"],
+  "on_missing_key": "fallback_ip",
+  "action": "log",
+  "penalty": "15m",
+  "fail_mode": "open",
+  "count_statuses": ["401", "403"]
+}
 ```
 
 ## Crawl breadth
@@ -305,8 +220,17 @@ A password guesser gets 401 or 403 from the login endpoint. With the expression 
 A crawler you didn't invite walks many pages slowly, under any request rate. Limit different paths per IP:
 
 ```json
-{ "id": "crawl-breadth", "algorithm": "distinct", "distinct_of": "path", "limit": 300, "period": "10m",
-  "key": ["ip"], "on_missing_key": "fallback_ip", "action": "log", "fail_mode": "open" }
+{
+  "id": "crawl-breadth",
+  "algorithm": "distinct",
+  "distinct_of": "path",
+  "limit": 300,
+  "period": "10m",
+  "key": ["ip"],
+  "on_missing_key": "fallback_ip",
+  "action": "log",
+  "fail_mode": "open"
+}
 ```
 
 With the expression `not client.verified_bot`, verified crawlers are left alone.
@@ -316,8 +240,17 @@ With the expression `not client.verified_bot`, verified crawlers are left alone.
 Shared or stolen credentials show up as one account from many addresses. On routes that require a token:
 
 ```json
-{ "id": "account-ips", "algorithm": "distinct", "distinct_of": "ip", "limit": 20, "period": "1h",
-  "key": ["jwt_claim:sub"], "on_missing_key": "skip", "action": "log", "fail_mode": "open" }
+{
+  "id": "account-ips",
+  "algorithm": "distinct",
+  "distinct_of": "ip",
+  "limit": 20,
+  "period": "1h",
+  "key": ["jwt_claim:sub"],
+  "on_missing_key": "skip",
+  "action": "log",
+  "fail_mode": "open"
+}
 ```
 
 A phone moving between networks uses a few IPs an hour, so start high.

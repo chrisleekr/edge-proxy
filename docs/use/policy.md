@@ -1,6 +1,8 @@
-# Policy
+# Rules
 
 A policy is a set of **rules grouped in phases**, plus shared **settings**. Each rule is an *expression* (which requests it matches) and an *action* (what happens to them). You edit a draft in the admin UI, and edges run the published version.
+
+This page covers rules. What rules use has its own page: [Value lists](value-lists.md), [IP lists](ip-lists.md), [Response templates](templates.md), [CORS](cors.md), [Issuers and tokens](tokens.md) and [Settings](settings.md). Every field of a policy is in [Policy fields](../reference/policy-fields.md).
 
 ## How a request is handled
 
@@ -32,16 +34,34 @@ The `config` phase runs before JWT validation and before the locale is resolved,
 
 Turn on `auth` and `locale` with a `config` rule that matches a few paths first, then widen its expression.
 
+[Use cases](cases/index.md) has a ready rule, flow diagram and policy test for each common job.
+
+### Requiring a token
+
+An access rule's `auth` setting decides whether the matching requests need a JWT (JSON Web Token) in `Authorization: Bearer`:
+
+```json
+{ "settings": { "auth": { "mode": "required", "accepted": ["partners"] } } }
+```
+
+| `mode` | No token | Valid token | Invalid token |
+|---|---|---|---|
+| `none` | Passes | Passes, not checked | Passes, not checked |
+| `optional` | Passes without claims | Passes with claims | 401 |
+| `required` | 401 | Passes with claims | 401 |
+
+`accepted` lists the IDs of the issuers whose tokens the rule accepts, or none for the issuers accepted by default. What is verified, what a 401 carries, what happens before an issuer's keys are fetched, and how claims reach rate limits and headers are in [Issuers and tokens](tokens.md).
+
 ### Blocking requests
 
 An access rule with `"block": "block"` answers the requests it matches with 403 and the `forbidden` template, right after the config phase, so a blocked request costs no backstop slot, token check or Valkey call. `"block": "log"` lets them through and counts them as logged. As with every setting, the last matching rule that sets `block` wins, so a later matching rule with `"block": "log"` turns an earlier rule's block into log for the requests both match, and the later rule is the one counted.
 
 Start with `log`, watch **Blocking access rules** on **Stats** and the lines whose `edge.logged_rules` contains the rule in the [access log](../operate/monitoring.md#logs), then switch to `block`. `kill_switch.block`, under **Settings**, turns every `block` into `log` in an incident. [Bot detection](bots.md) has recipes.
 
-The default `forbidden` template is an HTML page, since a block usually refuses a page request. For API paths, add a JSON template with status 403 and map it in the blocking rule, or in a rule matching the API paths:
+The starter's `forbidden` template has three bodies: problem+json, which API clients, `fetch` and curl get because they send `Accept: */*` or none; a small HTML page, which a browser opening a page gets; and plain text, for clients that ask for `text/plain`. A policy published before keeps its own `forbidden` body. To answer some paths with another template, map it in the blocking rule, or in a rule matching those paths:
 
 ```json
-{ "settings": { "block": "block", "responses": { "forbidden": "forbidden-json" } } }
+{"settings": {"block": "block", "responses": {"forbidden": "my-forbidden"}}}
 ```
 
 ### Banning a client
@@ -52,8 +72,8 @@ A rule with `"block": "block"` may also set `"ban": "24h"`, a whole number of se
 { "settings": { "block": "block", "ban": "24h" } }
 ```
 
-- **A ban lives on one edge.** Each edge keeps its own table in memory, so a client trips the rule once per edge, and a restart or rollout clears every ban. Enforcement reads only that memory; admin keeps the reported bans in Postgres for the [IP lists](bots.md#ip-lists) page.
-- **A ban follows its rule.** It applies only while the client's version still has a rule with that ID that sets `ban`. Removing the rule or its `ban`, a revert, or a [canary](publishing.md#canary) the client is not in sets the ban aside at once; if a rule with that ID that sets `ban` returns before the ban ends, it applies again. **Lift ban** on the [IP lists](bots.md#ip-lists) page ends it.
+- **A ban lives on one edge.** Each edge keeps its own table in memory, so a client trips the rule once per edge, and a restart or rollout clears every ban. Enforcement reads only that memory; admin keeps the reported bans in Postgres for the [IP lists](ip-lists.md) page.
+- **A ban follows its rule.** It applies only while the client's version still has a rule with that ID that sets `ban`. Removing the rule or its `ban`, a revert, or a [canary](publishing.md#canary) the client is not in sets the ban aside at once; if a rule with that ID that sets `ban` returns before the ban ends, it applies again. **Lift ban** on the [IP lists](ip-lists.md) page ends it.
 - **Trusted clients and the kill switch.** A client on the [allowlist](#trusted-clients) is never banned or refused as banned, and `kill_switch.block` stops refusals as banned.
 - **A late request never replaces a newer ban.** A request that arrived before the edge recorded the current ban does not replace it, so a slow request cannot shorten or swap a ban.
 - **`log` never bans.** Start with `"block": "log"` to see who the rule matches, then switch to `block` and add `ban`.
@@ -78,7 +98,14 @@ It still goes through the load shed, client IP and path checks, the local backst
 !!! warning "JWT consequence"
     A route that requires a JWT lets trusted clients in without one. An upstream that needs to know the caller gets its identity only when the trusted client sends a valid token; without one the request is anonymous.
 
-The list holds up to 100 entries. Each is an IPv4 or IPv6 address or a CIDR range written from its first address, such as `198.51.100.0/24`; a range with host bits set, such as `198.51.100.7/24`, is refused, and the message names both readings: `198.51.100.0/24` for the whole range or `198.51.100.7` for the one address. A range can be no wider than `/24` for IPv4 or `/48` for IPv6, because one entry is meant to be one site. Entries must not overlap, and an address is a range of one, so `203.0.113.7` can't sit beside `203.0.113.0/24`. An IPv4-mapped IPv6 entry such as `::ffff:203.0.113.7` is read as the IPv4 address and matches the IPv4 client. Zones such as `fe80::1%eth0` are refused. It needs schema 6 edges: admin holds the publish while a live edge reads an older schema, naming it.
+The list holds up to 100 entries, and it needs schema 6 edges: admin refuses the publish while a live edge reads an older schema, naming that edge.
+
+- Each entry is an IPv4 or IPv6 address or a CIDR range written from its first address, such as `198.51.100.0/24`.
+- A range with host bits set, such as `198.51.100.7/24`, is refused, and the message names both readings: `198.51.100.0/24` for the whole range or `198.51.100.7` for the one address.
+- A range can be no wider than `/24` for IPv4 or `/48` for IPv6, because one entry is meant to be one site.
+- Entries must not overlap, and an address is a range of one, so `203.0.113.7` can't sit beside `203.0.113.0/24`.
+- An IPv4-mapped IPv6 entry such as `::ffff:203.0.113.7` is read as the IPv4 address and matches the IPv4 client.
+- Zones such as `fe80::1%eth0` are refused.
 
 To block Australia and Singapore but let two partner networks through, add an access rule with the expression below and the setting `"block": "block"`:
 
@@ -88,17 +115,36 @@ ip.src.country in {"AU" "SG"}
 
 with `198.51.100.0/24` and `2001:db8:f00::/48` on the allowlist. Clients in those networks reach the upstream even when the viewer country is `AU` or `SG`.
 
-To test it, set `ip` in a [policy test](#policy-tests) and assert `rejected` is `""` and, on a route that requires a JWT, `settings.auth_mode` is `optional`: a trusted client's simulated request skips the block and needs no token. The [Tests and simulate page](dashboard.md#tests-and-simulate) shows a **Trusted client** row with the entry it matched.
+To test it, set `ip` in a [policy test](#policy-tests) and assert `rejected` is `""` and, on a route that requires a JWT, `settings.auth_mode` is `optional`: a trusted client's simulated request skips the block and needs no token. The [Tests and simulate page](../tour/release.md#tests-and-simulate) shows a **Trusted client** row with the entry it matched.
 
 ### Always allow
 
 An access rule with `"allow": true` lets the requests it matches through every other access rule's `block` (or `log`), any ban, every rate-limit rule and a required JWT, whatever the rule order: it does for one rule what the [allowlist](#trusted-clients) does for the whole policy, with the same exemptions and the same checks kept. The admin UI calls it **Always allow**. Its other settings, and the CORS policy, locale, limits and templates other matching rules set, still apply.
 
-```json
-{ "id": "cfg-office", "expression": "client.ip_lists in {\"office\"}", "settings": { "allow": true } }
+An access rule `cfg-office` with the expression:
+
+```text
+client.ip_lists in {"office"}
 ```
 
-Because anyone can send a header, cookie, path or user agent, an allow rule must require something the client can't forge, as a condition of its own joined with `and` at the top level: the client IP (`ip.src eq` or `in`), an [IP list](bots.md#ip-lists) (`client.ip_lists eq` or `in`) or a verified crawler (`client.verified_bot`). A client IP condition counts only when every range is no wider than /24 for IPv4 or /48 for IPv6, as the allowlist does; wider networks go in an IP list. A condition in parentheses or in an `and` subgroup counts, but one inside an `or` or a negated group does not. Other conditions may narrow it further, such as a host or path. A rule that matches on anything else alone, or that joins the client IP with another condition by `or`, is refused at save, and so is `allow` with `block` in the same rule. A typed IP list such as `office` changes within about a minute with no publish, while the rule itself is published. It needs schema 12 edges.
+and **Then**:
+
+```json
+{ "settings": { "allow": true } }
+```
+
+Because anyone can send a header, cookie, path or user agent, an allow rule must require something the client can't forge, as a condition of its own joined with `and` at the top level. It needs schema 12 edges. The conditions that count are:
+
+- the client IP (`ip.src eq` or `in`), counted only when every range is no wider than /24 for IPv4 or /48 for IPv6, as the allowlist does; wider networks go in an IP list,
+- an [IP list](ip-lists.md) (`client.ip_lists eq` or `in`),
+- a verified crawler (`client.verified_bot`).
+
+Which conditions count:
+
+- A condition in parentheses or in an `and` subgroup counts, but one inside an `or` or a negated group does not.
+- Other conditions may narrow it further, such as a host or path.
+- A rule that matches on anything else alone, or that joins the client IP with another condition by `or`, is refused at save, and so is `allow` with `block` in the same rule.
+- A typed IP list such as `office` changes within about a minute with no publish, while the rule itself is published.
 
 Each allowed request's [access log](../operate/monitoring.md#logs) line names the rule in `edge.decided_by` and lists it in `edge.matched_rules` as `allowed`; a block it lifted is listed as `overridden`. **Simulate** (`POST /api/simulate`) reports it as `allow_rule`, and a [policy test](#policy-tests) checks its effect with `rejected` and `config_rules`.
 
@@ -111,16 +157,11 @@ starts_with(http.request.uri.path, "/api/") and not ip.src in {"10.0.0.0/8"}
 http.request.jwt.claims["tenant"] eq "acme" and http.request.method in {"POST" "PUT"}
 ```
 
-`true` matches every request. A [value list](../reference/expressions.md#value-lists), written `$name`, holds a list of values many rules share, such as user agents or countries: make and edit value lists on the **Value lists** page (**New value list**, then the list's name to edit it; renaming a value list also updates the rules that use it), or select values in a rule and choose **Save as list**. Fields, operators and syntax are in [Expressions](../reference/expressions.md). Admin parses and validates expressions; the UI never does.
+`true` matches every request. A [value list](value-lists.md), written `$name`, holds a list of values many rules share, such as user agents or countries. Fields, operators and syntax are in [Expressions](../reference/expressions.md). Admin parses and validates expressions; the UI never does.
 
 ## Settings
 
-| Section | Holds |
-|---|---|
-| Templates | Response bodies for each kind of edge response: `bad_request`, `unauthorized`, `forbidden`, `payload_too_large`, `rate_limited`, `bad_gateway`, `unavailable`, `overloaded`, `gateway_timeout`. JSON, problem+json, HTML or text, with `{{retry_after}}`, `{{request_id}}` and `{{status}}` placeholders |
-| CORS policies | Named policies: origins, methods, headers, credentials, max age |
-| Issuers | JWT issuers: ID, issuer (the token's `iss`), audiences, JWKS URL (https), algorithm (RS, PS, ES or EdDSA; never HMAC). Access rules say which are accepted |
-| Settings | Kill switch (rate limiting, JWT checks, blocking), trusted client allowlist, local backstop, defaults (body limit and timeouts), locale (supported languages and output header), header forwarding, the rollback guard, and where the edges are (a place for the war room map, which applies at once and is not part of the policy) |
+Rules pick from parts of the policy defined once: [response templates](templates.md), [CORS policies](cors.md) and [issuers](tokens.md). Policy-wide values, such as the kill switch, the local backstop and default timeouts, are on [Settings](settings.md).
 
 ## Headers your upstream can trust
 
@@ -173,26 +214,24 @@ A `value` is at most 4096 bytes with no control characters, and can hold placeho
 
 Control characters are removed from header and claim values.
 
-**Reserved headers** can be neither written nor read by any rule: not by an op, a `{{header:<name>}}` placeholder, a `header:<name>` rate-limit key or `http.request.headers["<name>"]` in an expression. Validation rejects them. They are `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `Te`, `Trailer`, `Upgrade`, `Forwarded`, `X-Request-Id`, every `X-Edge-*` and `X-Forwarded-*` header, and the deployment's client-IP, viewer and ingress-secret source headers. A [CDN header](../deploy/edge.md#cdn-headers) that is also a source header, such as `CF-IPCountry` on the `cloudflare` preset, is reserved too: read it through its typed field, such as `ip.src.country`. A client can forge an `X-Edge-*` header before the edge replaces it, and a source header can carry the ingress secret. An allowlist never drops the named ones, from `Host` to `X-Request-Id`, so it can't break WebSockets or trailers. A rule can name `traceparent` or `tracestate`, with a warning: a forward filter, denylist included, still keeps them, and with tracing on the edge replaces whatever a rule writes. With tracing off, a `remove` op is the way to drop them.
+**Reserved headers** can be neither written nor read by any rule: not by an op, a `{{header:<name>}}` placeholder, a `header:<name>` rate-limit key or `http.request.headers["<name>"]` in an expression. Validation rejects them. They are:
+
+- `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `Te`, `Trailer`, `Upgrade`, `Forwarded` and `X-Request-Id`,
+- every `X-Edge-*` and `X-Forwarded-*` header,
+- the deployment's client-IP, viewer and ingress-secret source headers.
+
+Why and how:
+
+- A [CDN header](../deploy/edge.md#cdn-headers) that is also a source header, such as `CF-IPCountry` on the `cloudflare` preset, is reserved too: read it through its typed field, such as `ip.src.country`.
+- A client can forge an `X-Edge-*` header before the edge replaces it, and a source header can carry the ingress secret.
+- An allowlist never drops the named ones, from `Host` to `X-Request-Id`, so it can't break WebSockets or trailers.
+
+??? note "Details: tracing headers"
+    A rule can name `traceparent` or `tracestate`, with a warning: a forward filter, denylist included, still keeps them, and with tracing on the edge replaces whatever a rule writes. With tracing off, a `remove` op is the way to drop them.
 
 ## CORS
 
-A CORS policy is defined by name under **CORS policies**, and a `config` rule picks one with `cors_policy`; `""` turns CORS off for the matching requests.
-
-| Field | Holds |
-|---|---|
-| `origins` | `*`, or one or more origins such as `https://app.example.com`: lowercase, no path |
-| `methods` | Methods allowed besides `GET`, `HEAD` and `POST`, which are always allowed. Uppercase |
-| `request_headers` | Headers the page may send, or `*` |
-| `exposed_headers` | Response headers the page may read, or `*` |
-| `credentials` | Sends `Access-Control-Allow-Credentials: true`. Can't be combined with `*` |
-| `max_age` | How long the browser may reuse a preflight answer, 1s to 24h |
-
-**Allowed origin.** `*` sends `*`. A single listed origin is always sent as is. A list of origins echoes the request's `Origin` when it is listed, and sends no `Access-Control-Allow-Origin` otherwise. Only the list form depends on the request, so only it sends `Vary: Origin`.
-
-**Preflight.** On a route with a policy, the edge answers a preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) itself, after the local backstop and before JWT and rate limits. The answer is always `204` with `Cache-Control: no-store`. When the origin, the requested method and every requested header are allowed, it echoes the requested method and headers in `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers`, and adds `Access-Control-Max-Age` when set. Otherwise it has no `Access-Control-*` headers, which the browser treats as a failed check. On a route without a policy, a preflight goes to the upstream like any request.
-
-**Other responses.** On a route with a policy, the edge removes the upstream's `Access-Control-*` headers and sets its own: the allowed origin, credentials and exposed headers. Edge responses such as a 401 or 429 get them too; edge responses sent before the `config` phase, such as a 400 for a bad path, have none. Every edge response sends `Cache-Control: no-store`.
+A `config` rule picks a CORS policy with `cors_policy`, and `""` turns CORS off for the matching requests. Policies, preflights and the headers the edge sends are in [CORS](cors.md).
 
 ## Locale
 
@@ -216,13 +255,18 @@ The result is sent in the output header, replacing any client copy, and is the v
 
 ## Policy tests
 
+![Tests and simulate](../assets/screenshots/tests.png)
+
 A test is a synthetic request and the outcome you expect. Tests run through the edge's own code, so they check what will really happen:
 
 ```json
 {
   "name": "private pages need a token",
-  "request": { "method": "GET", "host": "api.example.com", "path": "/private/x" },
-  "expect": { "config_rules": ["private-needs-auth"], "settings": { "auth_mode": "required" } }
+  "request": {"method": "GET", "host": "api.example.com", "path": "/private/x"},
+  "expect": {
+    "config_rules": ["private-needs-auth"],
+    "settings": {"auth_mode": "required"}
+  }
 }
 ```
 
@@ -241,6 +285,7 @@ A test states the trusted values directly, because trust depends on the deployme
 | `ja4`, `ja3` | The viewer TLS fingerprints. As on the edge, a malformed one is absent, and with an `ssl` source a fingerprint applies only when `ssl` is `true` |
 | `verified_bot` | `true` to put `ip` in the verified crawler ranges |
 | `jwt_claims` | Claim name to one value, standing in for a verified token |
+| `ip_lists` | Names of the [IP lists](ip-lists.md) that hold `ip`, standing in for the lists edges get from admin |
 
 `expect` checks only what it lists:
 
@@ -250,7 +295,7 @@ A test states the trusted values directly, because trust depends on the deployme
 | `preflight` | Whether the edge answers the request as a CORS preflight matches |
 | `config_rules` | The IDs of the matching access rules equal this list, in order |
 | `rate_limit_rules` | The IDs of people's rate-limit rules the request is checked against equal this list, in order. [Autopilot rules](publishing.md#autopilot-rules) are left out |
-| `settings` | Each listed setting matches: `auth_mode`, `accepted`, `cors_policy`, `locale`, `responses`, `body_limit`, `upstream_timeout`, `ratelimit_headers`, `block`, `ban` (the winning rule's duration, absent when none, such as `1h0m0s`) |
+| `settings` | Each listed setting matches: `auth_mode`, `accepted`, `cors_policy`, `locale`, `responses`, `body_limit`, `upstream_timeout`, `ratelimit_headers`, `block`, `ban` (the winning rule's duration, absent when none, such as `1h0m0s`). `responses` checks only the kinds it lists, such as `{"rate_limited": "friendly-429"}`, and must list at least one. It must be an object whose keys are response kinds and whose values are template names (strings), or the save is refused; a template name that does not exist fails when the test runs |
 | `upstream_headers` | Each listed header's first value matches; `""` means the header is absent |
 
 **A failing test blocks publish.** The backstop and rate-limit counters depend on the running edges and aren't simulated.

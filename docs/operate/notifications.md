@@ -18,6 +18,46 @@ Set [`ALERTMANAGER_URL`](../deploy/admin.md#variables) to send them. Without it,
 
 **Notifications** has two tabs. **Anomalies** lists what admin found in the last 7 days; resolved ones are hidden behind **Show N resolved anomalies** (`?resolved=1`) until you ask. **Settings** (`?tab=settings`, for roles that can read config) holds the defaults and the per-rule settings below.
 
+## Set up Alertmanager, step by step
+
+1. **Run Alertmanager where admin can reach it.** Admin posts to `/api/v2/alerts` on the base URL you give it, with a 10 second timeout, and needs a 2xx answer.
+2. **Set `ALERTMANAGER_URL` on admin** ([admin variables](../deploy/admin.md#variables)) and restart admin. It is an environment variable only: the **Settings** tab has no field for it. It must be an `http` or `https` URL with no query or credentials, such as `http://alertmanager:9093`; admin rejects any other value at start, naming the variable. While it is unset, **Notifications** shows a notice that anomalies are shown there and nowhere else.
+3. **Check the defaults on Notifications → Settings.** **Notify on anomalies** is on by default, and each signal has a severity (`critical`, `warning` or `info`) that becomes the alert's `severity` label. Changing them needs `settings.manage` and takes effect at the next check.
+4. **Route the alerts in Alertmanager.** Every alert has `service="edge-proxy"` (see [Alerts](#alerts) for all labels), so one route catches them. This example sends all of them to one receiver and `critical` ones to a second. It uses the [route and webhook receiver fields](https://prometheus.io/docs/alerting/latest/configuration/) of Alertmanager's configuration. Replace the URLs with your relay, or use a receiver such as `slack_configs` or `pagerduty_configs`, which the same page documents.
+
+    ```yaml
+    route:
+      receiver: default
+      group_by: [alertname, rule]
+      routes:
+        - matchers:
+            - service="edge-proxy"
+          receiver: edge-proxy-team
+          routes:
+            - matchers:
+                - severity="critical"
+              receiver: edge-proxy-pager
+    receivers:
+      - name: default
+      - name: edge-proxy-team
+        webhook_configs:
+          - url: http://team-relay.example.internal/hook
+            send_resolved: true
+      - name: edge-proxy-pager
+        webhook_configs:
+          - url: http://pager-relay.example.internal/hook
+            send_resolved: true
+    ```
+
+5. **Test the route.** Admin has no send-test button, so post an alert with the same labels straight to Alertmanager. This tests Alertmanager's routing and receivers, not admin. The alert has no `endsAt`, so Alertmanager resolves it after its `resolve_timeout` (5 minutes by default, [global settings](https://prometheus.io/docs/alerting/latest/configuration/)). The request format is in [Alertmanager's alerts API](https://prometheus.io/docs/alerting/latest/alerts_api/).
+
+    ```sh
+    curl -X POST -H 'Content-Type: application/json' http://alertmanager:9093/api/v2/alerts -d '[{"labels":{"alertname":"EdgeProxyTest","service":"edge-proxy","signal":"test","severity":"warning"},"annotations":{"summary":"Test alert","description":"Routing test"}}]'
+    ```
+
+6. **Confirm admin's side with the first real anomaly.** On **Notifications**, the **Sent to Alertmanager** column shows when Alertmanager last accepted each anomaly. `admin_notifications_total{result="sent"}` counts accepted posts and `result="failed"` those that were unreachable or not 2xx; both stay at 0 until an anomaly is sent. A failed post logs `background job failed` and is sent again at the next check ([Monitoring](monitoring.md#alerts-worth-having)).
+7. **Silence an alert during maintenance.** Create a silence in Alertmanager's web interface (**Silences**, then **New Silence**) with matchers such as `service="edge-proxy"`, or narrower ones such as `alertname="EdgeProxyTrafficDrop"` or `rule="<rule id>"`, and an end time. See [silences](https://prometheus.io/docs/alerting/latest/alertmanager/#silences). `amtool silence add` does the same from a shell ([amtool](https://github.com/prometheus/alertmanager#amtool)). Admin keeps sending the firing alerts every minute, so the silence holds until it ends, and the anomaly stays visible on **Notifications**. To stop admin from raising an anomaly at all, turn off **Notify on anomalies**, one signal, or one rule's signal under [Per-rule settings](#per-rule-settings): open anomalies resolve at the next check. Those changes are audited as `settings.notifications`.
+
 ## How a check decides
 
 Each minute, admin compares the last **window** (5 minutes) with the **baseline** before it (60 minutes), both whole minutes, summed over every version and edge. The newest 30 seconds are left out, since edges may still be reporting them.
@@ -29,7 +69,13 @@ Each minute, admin compares the last **window** (5 minutes) with the **baseline*
 
 One cause notifies once. Per-rule checks are measured against the fleet in the same window, so a change every rule shares is reported by the fleet signal alone:
 
-- `rule_match_surge` and `rule_stopped_matching` expect the rule's baseline share of requests. The share counts only the baseline minutes and versions the rule was live on, as the edges' reports list it, so a rule published partway through the baseline is judged by its own minutes. Both multiply it by the window requests the rule was live for, so a rule only on a canary is judged against the canary's requests, and a rule whose versions served no window requests is expected to match none. A rule no edge reports in the window is expected at its baseline share of all requests, multiplied by all the window's requests, so `rule_stopped_matching` still notifies for it. A fleet-wide surge or drop notifies as `traffic_surge` or `traffic_drop`, and a rule that holds steady while traffic moves still notifies, since its share changed. Either signal is judged only when the baseline requests the rule was live for, scaled to the window, are at least the rule's `min_requests`; otherwise the rule has no share yet, as when it was just published, and neither fires for it; a surge of its traffic notifies as `traffic_surge`. A rule that was live all through the baseline and matched nothing, then matches many, still notifies.
+- `rule_match_surge` and `rule_stopped_matching` expect the rule's baseline share of requests:
+    - **Share:** it counts only the baseline minutes and versions the rule was live on, as the edges' reports list it, so a rule published partway through the baseline is judged by its own minutes.
+    - **Expected matches:** both multiply the share by the window requests the rule was live for. A rule only on a canary is judged against the canary's requests, and a rule whose versions served no window requests is expected to match none.
+    - **Not reported:** a rule no edge reports in the window is expected at its baseline share of all requests, multiplied by all the window's requests, so `rule_stopped_matching` still notifies for it.
+    - **Fleet-wide change:** a fleet-wide surge or drop notifies as `traffic_surge` or `traffic_drop`. A rule that holds steady while traffic moves still notifies, since its share changed.
+    - **New rule:** either signal is judged only when the baseline requests the rule was live for, scaled to the window, are at least the rule's `min_requests`. Otherwise the rule has no share yet, as when it was just published, and neither fires for it; a surge of its traffic notifies as `traffic_surge`.
+    - **Silent baseline:** a rule that was live all through the baseline and matched nothing, then matches many, still notifies.
 - `rule_edge_5xx_ratio`, `rule_upstream_5xx_ratio` and `rule_auth_failure_ratio` also need the rule's share to be over `factor` times the fleet's share in the window. An upstream outage notifies as the fleet signal; failures concentrated on one rule still name the rule.
 - A rule that matches more than one in `factor` of all requests (half, at the default 2) can't pass the fleet share, so only the fleet signal reports it. If the fleet stays under its own floor, say 1.5% edge 5xx on a rule with 60% of traffic, which is 0.9% fleet-wide, nothing notifies.
 - A token check fails only on requests a rule with `auth` matched, so during an IdP outage the fleet's share is those rules' share of all requests, and each such rule fails all of its own. When they carry less than one in `factor` of all requests, `rule_auth_failure_ratio` notifies too. The UI lists it under `auth_failure_ratio`; in Alertmanager, an inhibit rule with source `alertname="EdgeProxyAuthFailureRatio"` and target `alertname="EdgeProxyRuleAuthFailureRatio"` mutes it.
@@ -54,8 +100,14 @@ With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** 
 | `edge_5xx_ratio` | 5xx the edge sent itself are over 2 times their baseline share and over 1%, with at least 20 of them | critical |
 | `upstream_5xx_ratio` | 5xx from the upstream are over 2 times their baseline share and over 2%, with at least 20 of them | critical |
 | `auth_failure_ratio` | Requests failing their token check are over 2 times their baseline share and over 5%, with at least 20 of them | warning |
-| `signal_surge` | A [client signal](../reference/expressions.md#client-signals) is over 3 times its baseline share of requests and over 5%, with at least 300 requests showing it. The summary names the signal with the largest share. Shares count only the requests of minutes whose edges reported signals, so a baseline from before they did is not read as a share of zero. A signal is judged only against baseline minutes whose config version had the same browser floor or trusted CDN headers as the window, so publishing or changing them does not trip it. While edges are upgraded from a release that reported no signals, a minute holds requests from both, so its share reads low; a baseline from those minutes can make the share after the upgrade look like a surge | warning |
+| `signal_surge` | A [client signal](../reference/expressions.md#client-signals) is over 3 times its baseline share of requests and over 5%, with at least 300 requests showing it. The summary names the signal with the largest share. [Notes](#client-signal-surge-notes) | warning |
 | `p99_latency` | p99 latency is over 1.5 times the baseline's and over 100ms, with at least 1,000 requests, so p99 rests on the 10 slowest or more | warning |
+
+### Client signal surge notes
+
+- Shares count only the requests of minutes whose edges reported signals, so a baseline from before they did is not read as a share of zero.
+- A signal is judged only against baseline minutes whose config version had the same browser floor or trusted CDN headers as the window, so publishing or changing them does not trip it.
+- While edges are upgraded from a release that reported no signals, a minute holds requests from both, so its share reads low. A baseline from those minutes can make the share after the upgrade look like a surge.
 
 **Per rule**, for every rule of the active and canary versions:
 
@@ -88,7 +140,13 @@ With `autopilot.manage`, each open traffic or rule anomaly on **Notifications** 
 |---|---|---|
 | `verified_bots_stale` | Shown as **Verified crawler ranges stopped refreshing**. A source's last `min_events` refreshes in a row failed (3), counting failures since its last success. Admin refreshes each list about every 10 minutes and again when a replica takes over as leader. One anomaly per configured source | warning |
 
-Its anomaly names the source: the URL is the `rule` label in Alertmanager, with `phase=verified_bots`, and the audit target is `source <url>`. The summary says how many refreshes failed and when the last one succeeded, and leaves out the error the source returned; that shows on **Fleet** under [Verified crawler ranges](../use/dashboard.md#fleet-and-stats). It resolves at the next check after a refresh succeeds, or once the source is removed from `VERIFIED_BOT_SOURCES`. While it holds, edges keep matching the last good ranges, so addresses that provider no longer owns still count as verified crawlers. It works with the autopilot off, is never held back for the autopilot, and the autopilot cannot investigate it: **Investigate** is hidden for it and the API refuses a case on it.
+The anomaly for a source:
+
+- **Naming:** the URL is the `rule` label in Alertmanager, with `phase=verified_bots`, and the audit target is `source <url>`.
+- **Summary:** it says how many refreshes failed and when the last one succeeded, and leaves out the error the source returned. That shows on **Fleet** under [Verified crawler ranges](../tour/monitor.md#verified-crawler-ranges).
+- **Resolves:** at the next check after a refresh succeeds, or once the source is removed from `VERIFIED_BOT_SOURCES`.
+- **While it holds:** edges keep matching the last good ranges, so addresses that provider no longer owns still count as verified crawlers.
+- **Autopilot:** it works with the autopilot off and is never held back for it. The autopilot cannot investigate it: **Investigate** is hidden for it and the API refuses a case on it.
 
 A request matched by a config or request-header rule counts toward that rule's outcome; request-header rules only see requests that reach the upstream. Rate-limit rules count every request their expression matched. The client counts behind `rule_subject_dominates` are estimated from a sample, as on **Stats**.
 
