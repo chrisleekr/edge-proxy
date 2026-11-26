@@ -156,7 +156,7 @@ Run these from a host that can reach the edge. `EDGE_HOST` is an edge's address,
     curl -i http://EDGE_HOST:9090/readyz
     ```
 
-2. A request through the edge. Send it from an address in `TRUSTED_PROXIES`, with the client-IP header your `CLIENT_IP_SOURCE` reads (here the `cloudfront` form, `ip:port`; use `CF-Connecting-IP: 203.0.113.7` for `cloudflare`), and add your `INGRESS_SECRET_HEADER` if you set one. Use a host and path your upstream serves. You should get the upstream's answer. A 400 means the peer isn't in `TRUSTED_PROXIES` or the client-IP header is missing or malformed.
+2. A request through the edge. Send it from an address in `TRUSTED_PROXIES`, with the client-IP header your `CLIENT_IP_SOURCE` reads (here the `cloudfront` form, `ip:port`; use `CF-Connecting-IP: 203.0.113.7` for `cloudflare`), and add your `INGRESS_SECRET_HEADER` if you set one. Use a host and path your upstream serves. You should get the upstream's answer. A 400 means the peer isn't in `TRUSTED_PROXIES` or the client-IP header is missing or malformed. With `CLIENT_IP_SOURCE=remote_addr` the client IP is the TCP peer, so send the request directly, with no client-IP header and no `TRUSTED_PROXIES` entry.
 
     ```bash
     curl -i -H 'Host: app.example.com' -H 'CloudFront-Viewer-Address: 203.0.113.7:4711' -H 'X-Request-Id: check-1' http://EDGE_HOST:8080/

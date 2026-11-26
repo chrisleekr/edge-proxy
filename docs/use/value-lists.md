@@ -94,7 +94,7 @@ The kind cannot change while a rule uses the list, since the rule reads its valu
 
 ## Example
 
-The value list `bad-agents` holds the scanner names, and the access rule `block-bad-agents` refuses a request whose user agent contains any of them. In `global.lists`:
+The value list `bad-agents` holds the scanner names, and the access rule `block-bad-agents` refuses a request whose user agent contains any of them. In `global`:
 
 ```json
 {

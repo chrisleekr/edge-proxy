@@ -323,7 +323,7 @@ Then:
 
 **Watch out**
 
-- A key that includes `header`, `cookie`, `query`, `host`, `method` or `ja4` needs `ip` or a `jwt_claim` in the key, or a site-wide rule keyed on `ip`. That is why the key is `["header:x-api-key", "ip"]`.
+- A key that includes `header`, `cookie`, `query`, `host`, `method` or `ja4` needs `ip` or a `jwt_claim` in the key, or a site-wide rule keyed on `ip`. That is why the key is `["header:x-api-key", "ip"]`. The `ip` part keeps clients apart but doesn't cap one IP: each new key value from it gets its own counter. Add a per-IP rule, such as [Set a site-wide ceiling per IP](#set-a-site-wide-ceiling-per-ip), for a ceiling across keys.
 - A header value is chosen by the client, so on its own it would let one client use endless fresh keys.
 - `reject` answers 400 `bad_request`. Use `fallback_ip` to count a keyless request under its IP instead.
 
@@ -409,12 +409,12 @@ Then:
 **Watch out**
 
 - `skip` lets a client bypass the rule by leaving the cookie out. Use it only when another rule, here `per-ip`, covers those requests.
-- A cookie value is chosen by the client, so the key also has `ip`. Without it, a client could send a fresh cookie with every request to get a fresh counter.
+- A cookie value is chosen by the client, so the key also has `ip`, which keeps clients apart. It doesn't stop a client getting a fresh counter with every fresh cookie; `per-ip` is what caps one IP's total.
 - A skipped rule takes no slot in the cap of 5 matching rules per request.
 
 ## Set a site-wide ceiling per IP
 
-One rule for every request: no client IP gets more than 600 requests a minute, whatever the path.
+One rule for every request that reaches rate limiting: no client IP gets more than 600 requests a minute, whatever the path. Clients on the trusted allowlist or matched by an always-allow rule skip rate-limit rules, and a CORS preflight the edge answers itself is never counted.
 
 ```mermaid
 flowchart TD

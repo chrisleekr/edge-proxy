@@ -86,7 +86,7 @@ The `main` issuer is also the one rules accept by default (`default_accepted`). 
 - `required` with no token, or `optional` or `required` with an invalid token or one from an issuer the rule doesn't accept, gives 401. `none` never checks a token. The challenge is `WWW-Authenticate: Bearer`, or `Bearer error="invalid_token"` when a token was sent.
 - The access phase runs before JSON Web Token (JWT) validation, so access rules can't match on claims. Use a rate limit or request header rule when you need a claim.
 - A client on the trusted allowlist, or one matched by an always-allow rule, is treated as `optional` on a required route, so it needs no token.
-- A token naming an accepted issuer whose keys the edge has never fetched passes with no claims, even on a `required` route. See [When the token is missing or bad](../tokens.md#when-the-token-is-missing-or-bad).
+- A token naming an accepted issuer whose keys the edge has never fetched passes with no claims, even on a `required` route, so the upstream must still refuse a request without a verified identity. See [When the token is missing or bad](../tokens.md#when-the-token-is-missing-or-bad).
 
 ## Accept a token when one is sent, but don't require it
 
@@ -223,7 +223,7 @@ Then:
 - `accepted` lists issuer IDs. A rule that leaves it out gets `auth.default_accepted`, and having neither is a validation error.
 - The audience is checked per issuer: the token's `aud` must match one of that issuer's `audiences`.
 - A token from an issuer the rule doesn't accept gives 401, as does an invalid token.
-- A token naming an accepted issuer whose keys the edge has never fetched passes with no claims, even on a `required` route. See [When the token is missing or bad](../tokens.md#when-the-token-is-missing-or-bad).
+- A token naming an accepted issuer whose keys the edge has never fetched passes with no claims, even on a `required` route, so the upstream must still refuse a request without a verified identity. See [When the token is missing or bad](../tokens.md#when-the-token-is-missing-or-bad).
 
 ## Allow admin pages only from the office
 

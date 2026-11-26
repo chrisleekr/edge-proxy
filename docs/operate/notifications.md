@@ -32,11 +32,12 @@ Set [`ALERTMANAGER_URL`](../deploy/admin.md#variables) to send them. Without it,
       routes:
         - matchers:
             - service="edge-proxy"
+            - severity="critical"
+          receiver: edge-proxy-pager
+          continue: true
+        - matchers:
+            - service="edge-proxy"
           receiver: edge-proxy-team
-          routes:
-            - matchers:
-                - severity="critical"
-              receiver: edge-proxy-pager
     receivers:
       - name: default
       - name: edge-proxy-team

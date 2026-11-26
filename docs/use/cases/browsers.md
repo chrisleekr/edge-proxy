@@ -6,12 +6,12 @@ Add each rule as described in [How to use a case](index.md#how-to-use-a-case).
 
 ## Let a web app and a public catalog call the API from browsers
 
-The web app at `app.example.com` can call the API with cookies. The catalog is readable from any site. Webhooks have no Cross-Origin Resource Sharing (CORS) at all.
+The web app at `app.example.com` can call the API with cookies. The catalog is readable from any site. On webhooks the edge applies no Cross-Origin Resource Sharing (CORS) policy: it adds no CORS headers and passes on any the upstream sends.
 
 ```mermaid
 flowchart TD
   req["Browser request<br/>to api.example.com"] --> path{"Path"}
-  path -->|/webhooks/| upst["to upstream<br/>no CORS headers"]
+  path -->|/webhooks/| upst["to upstream<br/>no CORS policy"]
   path -->|/catalog/| pub["public-read policy"]
   path -->|other| web["web-app policy"]
   web --> pre{"Preflight?"}

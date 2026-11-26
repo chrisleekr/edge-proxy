@@ -3,7 +3,7 @@
 Every page of the admin UI, with what it is for and what it does, grouped as in its menu. The screenshots come from the [demo](../get-started.md) data and are regenerated from the UI, so they match the current release.
 
 - [Monitor](monitor.md): Dashboard, Stats, the client page, War room, Routes, Fleet, Notifications, Autopilot and its memory.
-- [Policy](../use/policy.md): Rules and the rule editor, Value lists, IP lists, Templates, CORS policies, Issuers, Settings.
+- [Policy](policy.md): Rules and the rule editor, Value lists, IP lists, Templates, CORS policies, Issuers, Settings.
 - [Release](release.md): Tests and simulate, Publish, Versions.
 - [Admin](admin.md): Audit log, Users and tokens, Account.
 

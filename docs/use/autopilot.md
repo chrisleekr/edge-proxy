@@ -66,7 +66,7 @@ You turn autopilot on in the settings, read the cases it opens, and approve, ret
 6. Act on each rule under **Actions**. These need `autopilot.manage`.
     - **Approve blocking** lets an observing enforce rule block. It shows only in `observe` mode, and is refused until the rule has observed for `observe_for`.
     - **Retire** ends the rule. It asks for a reason.
-    - **Mark false positive** ends the rule and stops it being proposed again. It asks for a reason.
+    - **Mark false positive** ends the rule and refuses a proposal with the same expression and key for `max_lifetime` after it ends. A changed rule, or the same one after that, can still be proposed. It asks for a reason.
     - A rule you do nothing about runs out at its expiry. In `observe` mode that includes an enforce rule nobody approves.
 7. To stop one client from being counted or blocked, click **Exclude a client** on the sensor's case. Enter the client, host, path prefix and a reason, pick an expiry and click **Exclude** ([details](#exclusions)). **Revoke** on **Overview** ends one.
 8. To turn it off, click **Turn autopilot off** on **Overview** (needs `settings.manage`), give a reason and confirm. Every autopilot rule is retired and leaves the edges in one publish. Your own rules don't change ([details](#turning-it-off)).
@@ -420,7 +420,7 @@ A rule ends when it is:
 
 - Expired.
 - Expired unused: a sensor idle at its expiry, live at least `max_ttl` and matched no requests over the last `max_ttl`. The transition and audit row carry the window and counts that decided it.
-- Retired by a person (`POST /api/autopilot/rules/{id}/retire`, with `false_positive` to stop it being proposed again).
+- Retired by a person (`POST /api/autopilot/rules/{id}/retire`, with `false_positive` to refuse the same expression and key for `max_lifetime`).
 - Retired by the model. This is for sensors only: an enforcing rule ends at its expiry or by a person.
 - Adopted into your draft.
 - Rolled back by its guard.
@@ -434,7 +434,7 @@ Every change of state is an `autopilot_transitions` row and an audit event namin
 An exclusion is a client a person found legitimate on a host, and optionally a path prefix, such as a CI job polling an API that a sensor keeps flagging. Only a person makes or ends one; no model tool can.
 
 - Every autopilot rule proposed while it is active leaves that traffic out on the edges, as it leaves out the protected networks.
-- A sensor stops counting the client, and no enforce rule can block it there.
+- A sensor or enforce rule proposed while it is active doesn't count or block the client there. A rule proposed before keeps its content, since a rule never changes under its ID, so retire an enforce rule that still blocks the client.
 - Your own rules still apply to it.
 
 To add one, click **Exclude a client** on a sensor's case (`autopilot.manage`):
