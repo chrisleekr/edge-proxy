@@ -25,6 +25,8 @@ type version struct {
 	defaults settings
 	stats    *versionStats
 	rules    []ratelimit.Rule
+	// order is rlOrder of rules, worked out once rather than per request.
+	order    []int
 	backstop *ratelimit.Backstop
 	cors     map[string]*corsPolicy
 	headers  headerPlan
@@ -59,6 +61,7 @@ func newVersion(c *snapshot.Compiled, st *versionStats, prev *loaded, ks *keySto
 		cors: compileCORS(c.Config.Global.CORSPolicies), headers: compileHeaders(c), locale: newLocaleResolver(c),
 		issuers: compileIssuers(c, ks, keys, prev),
 	}
+	v.order = rlOrder(v.rules, c.SiteWide)
 	for _, r := range c.Config.ConfigRules {
 		if r.Settings.Ban != nil {
 			if v.banRules == nil {

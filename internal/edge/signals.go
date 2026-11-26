@@ -74,6 +74,35 @@ var toolTokens = func() [][]byte {
 	return out
 }()
 
+// A browser User-Agent matches no tool token, so a check per token costs
+// every browser request about a hundred scans. toolPairs marks each token's
+// first two bytes and toolByFirst groups the tokens by first byte, so one
+// pass over the User-Agent compares in full only where a token could start.
+var toolPairs, toolByFirst = func() (pairs [1 << 16 / 64]uint64, by [256][][]byte) {
+	for _, t := range toolTokens {
+		k := uint16(t[0])<<8 | uint16(t[1])
+		pairs[k/64] |= 1 << (k % 64)
+		by[t[0]] = append(by[t[0]], t)
+	}
+	return pairs, by
+}()
+
+// hasToolToken reports whether s contains any of toolTokens.
+func hasToolToken(s []byte) bool {
+	for i := 0; i+1 < len(s); i++ {
+		k := uint16(s[i])<<8 | uint16(s[i+1])
+		if toolPairs[k/64]&(1<<(k%64)) == 0 {
+			continue
+		}
+		for _, t := range toolByFirst[s[i]] {
+			if bytes.HasPrefix(s[i:], t) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // headlessTokens name automation browsers that say so in their User-Agent.
 // Lightpanda's default is "Lightpanda/1.0" and it refuses any User-Agent
 // containing "Mozilla" (src/Config.zig in
@@ -127,11 +156,8 @@ func signalsOf(h http.Header, c *client, floor [4]int) uint16 {
 			lower[i] = b + 'a' - 'A'
 		}
 	}
-	for _, t := range toolTokens {
-		if bytes.Contains(lower[:n], t) {
-			m |= sigUATool
-			break
-		}
+	if hasToolToken(lower[:n]) {
+		m |= sigUATool
 	}
 	for _, t := range headlessTokens {
 		if bytes.Contains(lower[:n], t) {

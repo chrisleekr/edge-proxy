@@ -1274,3 +1274,27 @@ func TestCountRuleOutcomes(t *testing.T) {
 		}
 	})
 }
+
+// A request matching none of 190 rate-limit rules, a third of them shadow,
+// still evaluates every rule's expression in step 8. The upstream is in
+// memory, so the cost of planning the checks shows.
+func BenchmarkRateLimitNoMatch(b *testing.B) {
+	c := testConfig(1)
+	c.Global.Backstop.Limit, c.Global.Backstop.Burst = 1_000_000_000, 1_000_000_000
+	for i := range 190 {
+		r := rlRule(fmt.Sprint("r", i), fmt.Sprintf(`http.request.uri.path eq "/r%d"`, i), "sliding_window", 100, "ip")
+		if i%3 == 0 {
+			r.Action = "log"
+		}
+		c.RateLimitRules = append(c.RateLimitRules, r)
+	}
+	s, req := inMemoryEdge(b, c, "/v1/items?id=1")
+	b.ReportAllocs()
+	for b.Loop() {
+		w := httptest.NewRecorder()
+		s.edge.ServeHTTP(w, req)
+		if w.Code != 200 {
+			b.Fatalf("status %d", w.Code)
+		}
+	}
+}

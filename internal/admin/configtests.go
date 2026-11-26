@@ -135,10 +135,30 @@ func checkTests(tests []ConfigTest) []expr.Issue {
 			if !slices.Contains(settingKeys, k) {
 				errs = append(errs, expr.Issue{Path: p + ".expect.settings." + k, Msg: "unknown setting; use " + strings.Join(settingKeys, ", ")})
 			}
+			// Only listed entries are checked, so an empty map would assert nothing.
+			if m, ok := t.Expect.Settings[k].(map[string]any); ok && len(m) == 0 {
+				errs = append(errs, expr.Issue{Path: p + ".expect.settings." + k, Msg: "list at least one entry"})
+			}
+			// A misspelled kind, a null template or a bare name could never match the simulated map, so refuse it at save rather than at run time.
+			if k == "responses" {
+				m, ok := t.Expect.Settings[k].(map[string]any)
+				if !ok {
+					errs = append(errs, expr.Issue{Path: p + ".expect.settings.responses", Msg: "must map each response kind to a template name"})
+				}
+				for _, kind := range slices.Sorted(maps.Keys(m)) {
+					if !slices.Contains(responseKinds, kind) {
+						errs = append(errs, expr.Issue{Path: p + ".expect.settings.responses." + kind, Msg: "unknown response kind; use " + strings.Join(responseKinds, ", ")})
+					} else if _, isName := m[kind].(string); !isName {
+						errs = append(errs, expr.Issue{Path: p + ".expect.settings.responses." + kind, Msg: "must be a template name"})
+					}
+				}
+			}
 		}
 	}
 	return errs
 }
+
+var responseKinds = slices.Sorted(maps.Keys(snapshot.ResponseStatuses()))
 
 var settingKeys = func() []string {
 	var out []string
@@ -188,6 +208,21 @@ func (e TestExpect) mismatches(got SimView) []string {
 		actual, _ := generic(got.Settings).(map[string]any)
 		for _, k := range slices.Sorted(maps.Keys(e.Settings)) {
 			want := generic(e.Settings[k])
+			// A map lists only the entries the test cares about, such as one
+			// response template, so each listed entry is checked on its own.
+			if wm, ok := want.(map[string]any); ok {
+				am, isMap := actual[k].(map[string]any)
+				if !isMap {
+					f = append(f, fmt.Sprintf("settings.%s: want a map with %v, got %v", k, wm, actual[k]))
+					continue
+				}
+				for _, j := range slices.Sorted(maps.Keys(wm)) {
+					if !reflect.DeepEqual(wm[j], am[j]) {
+						f = append(f, fmt.Sprintf("settings.%s.%s: want %v, got %v", k, j, wm[j], am[j]))
+					}
+				}
+				continue
+			}
 			if !reflect.DeepEqual(want, actual[k]) {
 				f = append(f, fmt.Sprintf("settings.%s: want %v, got %v", k, want, actual[k]))
 			}

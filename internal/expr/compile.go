@@ -11,8 +11,8 @@ import (
 )
 
 // Request gives compiled matchers access to request fields. The edge
-// implements it with lazily extracted, memoized values; a field is only
-// computed if some rule reads it.
+// implements it with lazily extracted, memoized values: a field is
+// computed once, on first use.
 type Request interface {
 	String(field string) string
 	// List returns every value of a keyed field (all headers with that name,
@@ -69,6 +69,13 @@ func Expand(n Node, lists map[string]ValueList) Node {
 }
 
 func compileGroup(g Node) Matcher {
+	// Expand turns "wildcard $list" into this shape; one leaf reads and
+	// folds the value once for every pattern instead of once per pattern.
+	if pats := wildcardPatterns(g); pats != nil {
+		r := g.Rules[0]
+		r.Value = Value{List: pats, IsList: true}
+		g.Rules = []Node{r}
+	}
 	children := make([]Matcher, len(g.Rules))
 	for i, r := range g.Rules {
 		if r.IsGroup() {
@@ -103,6 +110,22 @@ func compileGroup(g Node) Matcher {
 		m = func(req Request) bool { return !inner(req) }
 	}
 	return m
+}
+
+// wildcardPatterns returns the patterns of an "or" group whose rules are all
+// "wildcard" on one field and key, or nil.
+func wildcardPatterns(g Node) []string {
+	if g.Combinator != "or" {
+		return nil
+	}
+	pats := make([]string, len(g.Rules))
+	for i, r := range g.Rules {
+		if r.Operator != "wildcard" || r.Field != g.Rules[0].Field || r.Key != g.Rules[0].Key {
+			return nil
+		}
+		pats[i] = r.Value.One
+	}
+	return pats
 }
 
 // compileRule builds the matcher for one checked rule. Negated operators are
@@ -174,8 +197,16 @@ func stringPred(op string, v Value) func(string) bool {
 	case "ends_with":
 		return func(s string) bool { return strings.HasSuffix(s, c) }
 	case "wildcard":
-		w, _ := compileWildcard(c, true)
-		return w.match
+		// compileGroup passes merged patterns as a list; one condition has one.
+		pats := v.List
+		if len(pats) == 0 {
+			pats = []string{c}
+		}
+		ws := make(wildcards, len(pats))
+		for i, p := range pats {
+			ws[i], _ = compileWildcard(p, true)
+		}
+		return ws.match
 	case "strict_wildcard":
 		w, _ := compileWildcard(c, false)
 		return w.match

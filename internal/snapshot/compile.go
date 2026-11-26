@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -96,7 +97,8 @@ type Compiled struct {
 	HeaderRules []expr.Matcher
 	// HeaderValues[i][k] is the parsed value of rule i, op k (set and append).
 	HeaderValues [][]Template
-	Responses    map[string]Template
+	// Responses holds each template's bodies, its default first.
+	Responses map[string][]Body
 	// Locale is nil when no locales are supported.
 	Locale language.Matcher
 	// NeedsSchema is the lowest schema an edge must read to load this
@@ -151,7 +153,7 @@ const (
 	// so an edge upgraded first still loads versions saved under older
 	// schemas. Raising MinSchema needs admin to upgrade stored versions.
 	MinSchema       = 1
-	SupportedSchema = 13
+	SupportedSchema = 14
 	// MaxInflightSchema is the first schema whose edges read
 	// global.max_inflight. A config of any schema may set it; admin then
 	// publishes it only once every live edge reads that schema.
@@ -198,6 +200,10 @@ const (
 	// it needs its own schema. A config of any schema may use them; admin then
 	// waits for edges that read this schema.
 	ValueListsSchema = 13
+	// VariantsSchema is the first schema whose edges read a template's
+	// variants. A config of any schema may set them; admin then waits for
+	// edges that read this schema.
+	VariantsSchema = 14
 	// MaxListValues bounds one value list.
 	MaxListValues = 10_000
 	// MaxListUses bounds the value list values compiled across every rule: each
@@ -294,17 +300,14 @@ func orList(names []string) string {
 // is excluded: the key would have to be a shared secret in the snapshot.
 var JWTAlgorithms = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
 
-// reserved are request headers no rule may target. Lowercase.
+// reserved are request headers the edge or the HTTP framing manages, which
+// no rule may target. The edge's forward filter always keeps these. Lowercase.
 var reserved = map[string]bool{
 	"host": true, "content-length": true, "transfer-encoding": true,
 	"connection": true, "keep-alive": true, "proxy-connection": true,
 	"proxy-authenticate": true, "proxy-authorization": true, "te": true,
 	"trailer": true, "upgrade": true, "forwarded": true, "x-request-id": true,
 }
-
-// Reserved reports a header the edge or the HTTP framing manages, which no
-// rule may target. The edge's forward filter always keeps these.
-func Reserved(name string) bool { return reserved[strings.ToLower(name)] }
 
 // traceHeaders carry W3C trace context, which the edge always forwards and,
 // with tracing on, replaces with its own span's. Rules naming them only get
@@ -315,6 +318,12 @@ var traceHeaders = map[string]bool{"traceparent": true, "tracestate": true}
 // TraceHeader reports a W3C trace context header. The edge's forward filter
 // always keeps these.
 func TraceHeader(name string) bool { return traceHeaders[strings.ToLower(name)] }
+
+// AlwaysForwarded lists the reserved and trace header names, lowercase, so
+// the edge's allowlist filter can hold them as map keys.
+func AlwaysForwarded() []string {
+	return slices.Concat(slices.Collect(maps.Keys(reserved)), slices.Collect(maps.Keys(traceHeaders)))
+}
 
 // clientControlled fields can be set to anything by the client, so rules
 // must not rely on them to exclude traffic or to switch a block off.
@@ -382,11 +391,16 @@ func Compile(c *Config, d Deployment) (*Compiled, []expr.Issue, []expr.Issue) {
 	if slices.ContainsFunc(c.ConfigRules, func(r ConfigRule) bool { return r.Settings.Allow }) {
 		needs = max(needs, AllowSchema)
 	}
+	for _, r := range c.Global.Responses {
+		if len(r.Variants) > 0 {
+			needs = max(needs, VariantsSchema)
+		}
+	}
 	templates := len(c.Global.Responses)
 	c = upgrade(c)
 	v := &validator{
 		d: d, c: c, schema1: schema1, addedTemplates: len(c.Global.Responses) - templates,
-		out:     &Compiled{Config: c, Deployment: d, Responses: map[string]Template{}, NeedsSchema: needs},
+		out:     &Compiled{Config: c, Deployment: d, Responses: map[string][]Body{}, NeedsSchema: needs},
 		viewer:  setOf(d.ViewerFields, caseSensitive),
 		cdn:     cdnTrusted(c, d),
 		issuers: map[string]bool{},
@@ -498,8 +512,9 @@ func upgrade(c *Config) *Config {
 	return &u
 }
 
-// forbiddenHTML is the default forbidden template: a block usually refuses
-// a page request, and a browser shows HTML.
+// forbiddenHTML is the forbidden template upgrade() adds to a policy saved
+// before BotSchema: a block usually refuses a page request, and a browser
+// shows HTML.
 var forbiddenHTML = Response{Status: 403, ContentType: "text/html; charset=utf-8",
 	Body: `<!doctype html><html lang="en"><meta charset="utf-8"><title>Forbidden</title><h1>Forbidden</h1><p>This request was refused. Request ID: {{request_id}}</p></html>`}
 
@@ -735,7 +750,6 @@ func (v *validator) templates(rs map[string]Response) {
 	if len(rs) > MaxListLen+v.addedTemplates {
 		v.err("global.responses", "has %d templates; at most %d are allowed", len(rs), MaxListLen)
 	}
-	samples := map[string]string{"retry_after": "1", "request_id": "r1", "status": "429"}
 	for _, name := range slices.Sorted(maps.Keys(rs)) {
 		r := rs[name]
 		p := fmt.Sprintf("global.responses[%q]", name)
@@ -743,31 +757,77 @@ func (v *validator) templates(rs map[string]Response) {
 		if r.Status < 400 || r.Status > 599 {
 			v.err(p+".status", "must be 400 to 599")
 		}
-		if !slices.Contains(ContentTypes, r.ContentType) {
-			v.err(p+".content_type", "must be one of %s", strings.Join(ContentTypes, ", "))
-		}
-		if len(r.Body) > MaxBodyTemplate {
-			v.err(p+".body", "is %d bytes; at most %d are allowed", len(r.Body), MaxBodyTemplate)
-		}
-		t, err := parseTemplate(r.Body)
-		if err != nil {
-			v.err(p+".body", "%v", err)
+		// Bounds the duplicate scan below, which admin runs on unsaved input.
+		if len(r.Variants) > len(ContentTypes)-1 {
+			v.err(p+".variants", "has %d bodies; at most %d are allowed, one per other content type", len(r.Variants), len(ContentTypes)-1)
 			continue
 		}
-		bad := false
-		for _, ph := range t.Placeholders() {
-			if _, ok := samples[ph.Name]; !ok || ph.Arg != "" {
-				v.err(p+".body", "unknown placeholder {{%s}}; use {{retry_after}}, {{request_id}} or {{status}}", ph.Name)
-				bad = true
+		bodies := make([]Body, 0, 1+len(r.Variants))
+		for i, b := range append([]Variant{{r.ContentType, r.Body}}, r.Variants...) {
+			bp := p
+			if i > 0 {
+				bp = fmt.Sprintf("%s.variants[%d]", p, i-1)
 			}
-		}
-		if !bad && strings.HasSuffix(r.ContentType, "json") {
-			if out := t.Render(nil, func(ph Placeholder) string { return samples[ph.Name] }); !json.Valid(out) {
-				v.err(p+".body", "is not valid JSON after filling placeholders with sample values")
+			switch {
+			case !slices.Contains(ContentTypes, b.ContentType):
+				v.err(bp+".content_type", "must be one of %s", strings.Join(ContentTypes, ", "))
+			case slices.ContainsFunc(bodies, func(o Body) bool { return o.ContentType == b.ContentType }):
+				v.err(bp+".content_type", "is already a body of this template; each content type can have one")
 			}
+			t, _, err := sampleBody(r.Status, b.ContentType, b.Body)
+			if err != nil {
+				v.err(bp+".body", "%v", err)
+				continue
+			}
+			mt, _, _ := strings.Cut(b.ContentType, ";")
+			bodies = append(bodies, Body{ContentType: b.ContentType, MediaType: mt, Template: t})
 		}
-		v.out.Responses[name] = t
+		v.out.Responses[name] = bodies
 	}
+}
+
+// Body is one compiled body of a response template.
+type Body struct {
+	ContentType string
+	// MediaType is ContentType without parameters, which Accept is matched against.
+	MediaType string
+	Template  Template
+}
+
+// SampleBody checks a template body as validation does and returns it filled
+// with sample values: the template's status, 1 for retry_after and r1 for
+// request_id. Admin's preview shows it.
+func SampleBody(status int, contentType, body string) (string, error) {
+	_, out, err := sampleBody(status, contentType, body)
+	return string(out), err
+}
+
+func sampleBody(status int, contentType, body string) (Template, []byte, error) {
+	if len(body) > MaxBodyTemplate {
+		return Template{}, nil, fmt.Errorf("is %d bytes; at most %d are allowed", len(body), MaxBodyTemplate)
+	}
+	t, err := parseTemplate(body)
+	if err != nil {
+		return Template{}, nil, err
+	}
+	for _, ph := range t.Placeholders() {
+		if (ph.Name != "retry_after" && ph.Name != "request_id" && ph.Name != "status") || ph.Arg != "" {
+			return Template{}, nil, fmt.Errorf("unknown placeholder {{%s}}; use {{retry_after}}, {{request_id}} or {{status}}", ph.Name)
+		}
+	}
+	out := t.Render(nil, func(ph Placeholder) string {
+		switch ph.Name {
+		case "retry_after":
+			return "1"
+		case "request_id":
+			return "r1"
+		}
+		return strconv.Itoa(status)
+	})
+	if strings.HasSuffix(contentType, "json") && !json.Valid(out) {
+		return Template{}, nil, errors.New("is not valid JSON after filling placeholders with sample values")
+	}
+	return t, out, nil
 }
 
 // responseMap checks a kind -> template map, used by defaults and rules.
@@ -808,6 +868,12 @@ func (v *validator) cors(ps map[string]CORSPolicy) {
 			}
 			return originProblem(o)
 		})
+		// A warning, not an error: published versions may hold such an origin, and refusing it would stop edges loading them and block a revert to them.
+		for i, o := range cp.Origins {
+			if msg := originNeverSent(o); msg != "" {
+				v.warn(fmt.Sprintf("%s.origins[%d]", p, i), "%s", msg)
+			}
+		}
 		v.list(p+".methods", cp.Methods, caseSensitive, func(m string) string {
 			if !expr.IsToken(m) || strings.ToUpper(m) != m {
 				return "must be an uppercase method name"
@@ -841,6 +907,29 @@ func originProblem(o string) string {
 	}
 	if strings.ToLower(o) != o {
 		return "must be lowercase; browsers send origins in lowercase"
+	}
+	return ""
+}
+
+// originNeverSent explains why a browser never sends o, which the edge
+// compares as a whole string, or returns "".
+func originNeverSent(o string) string {
+	u, err := url.Parse(o)
+	if err != nil || o == "*" {
+		return ""
+	}
+	// Go returns the raw digits with no range check, but browsers refuse a
+	// port above 65535 and write the rest as a plain base-10 number.
+	port, _ := strconv.Atoi(u.Port())
+	switch {
+	case strings.Contains(u.Host, "*"):
+		return "matches no request: origins are compared exactly, so * is not a subdomain pattern; list each origin"
+	case strings.HasSuffix(u.Host, ":"), u.Port() != "" && strconv.Itoa(port) != u.Port(), port > 65535:
+		return "matches no request: browsers send the port as a plain number no higher than 65535, or none"
+	case port == 443 && u.Scheme == "https", port == 80 && u.Scheme == "http":
+		return "matches no request: browsers leave the default port out of Origin; write " + strings.TrimSuffix(o, ":"+u.Port())
+	case strings.ContainsFunc(u.Host, func(r rune) bool { return r >= utf8.RuneSelf }):
+		return "matches no request: browsers send the punycode form (xn--) of an international host name"
 	}
 	return ""
 }

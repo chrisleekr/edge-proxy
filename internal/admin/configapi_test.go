@@ -674,8 +674,12 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 				Name   string
 				Status int
 			} `json:"response_kinds"`
-			HeaderOps       []string         `json:"header_ops"`
-			ContentTypes    []string         `json:"content_types"`
+			HeaderOps      []string `json:"header_ops"`
+			ContentTypes   []string `json:"content_types"`
+			ResponseBodies map[string][]struct {
+				ContentType string `json:"content_type"`
+				Body        string
+			} `json:"response_bodies"`
 			JWTAlgorithms   []string         `json:"jwt_algorithms"`
 			BlockModes      []string         `json:"block_modes"`
 			DistinctOfKinds []string         `json:"distinct_of_kinds"`
@@ -698,6 +702,19 @@ func TestSimulateAndExpressionHelpers(t *testing.T) {
 		!slices.Equal(choices.BlockModes, snapshot.BlockModes) || !slices.Equal(choices.DistinctOfKinds, snapshot.DistinctOfKinds) ||
 		!slices.EqualFunc(choices.Signals, expr.Signals, func(a, b expr.SignalDef) bool { return a.Name == b.Name && slices.Equal(a.Needs, b.Needs) }) {
 		t.Fatalf("rule choices %+v", choices)
+	}
+	// The editor starts new bodies from these, so every kind has the defaults.
+	for _, k := range choices.ResponseKinds {
+		got := choices.ResponseBodies[k.Name]
+		want := snapshot.DefaultBodies(k.Name)
+		if len(got) != len(want) || len(got) != 3 {
+			t.Fatalf("%s has %d default bodies, want %d", k.Name, len(got), len(want))
+		}
+		for i := range want {
+			if got[i].ContentType != want[i].ContentType || got[i].Body != want[i].Body {
+				t.Fatalf("%s body %d is %+v, want %+v", k.Name, i, got[i], want[i])
+			}
+		}
 	}
 
 	parsed := decode[struct{ AST expr.Node }](t, ed.do("POST", "/api/expr/parse", map[string]string{"text": `http.host eq "api.example.com"`}))
@@ -1100,6 +1117,61 @@ func TestConfigTestsAssertTheBan(t *testing.T) {
 	}
 }
 
+// A config test checks only the response templates it lists, so an editor
+// can assert one template without restating every kind.
+func TestConfigTestsAssertOneResponseTemplate(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	test := func(responses any) ConfigTest {
+		return ConfigTest{Name: "login answers 429 with its template", Request: TestRequest{Host: "api.example.com", Path: "/login", IP: "203.0.113.96"},
+			Expect: TestExpect{Settings: map[string]any{"responses": responses}}}
+	}
+	saves := 0
+	run := func(t *testing.T, responses map[string]any) TestResult {
+		t.Helper()
+		res := decode[struct {
+			TestResults []TestResult `json:"test_results"`
+		}](t, ed.save(fmt.Sprintf(`"%d"`, saves), testConfig(), test(responses)))
+		saves++
+		if len(res.TestResults) != 1 {
+			t.Fatalf("results %+v", res.TestResults)
+		}
+		return res.TestResults[0]
+	}
+	t.Run("the listed template matches", func(t *testing.T) {
+		if r := run(t, map[string]any{"rate_limited": "rate_limited"}); !r.Pass {
+			t.Fatalf("failures %v", r.Failures)
+		}
+	})
+	t.Run("a different template is reported by kind", func(t *testing.T) {
+		r := run(t, map[string]any{"rate_limited": "forbidden"})
+		if r.Pass || len(r.Failures) != 1 || r.Failures[0] != "settings.responses.rate_limited: want forbidden, got rate_limited" {
+			t.Fatalf("result %+v", r)
+		}
+	})
+	refused := func(t *testing.T, responses any, path string) {
+		t.Helper()
+		resp := ed.do("PUT", "/api/draft", map[string]any{"config": testConfig(), "tests": []ConfigTest{test(responses)}}, "If-Match", fmt.Sprintf(`"%d"`, saves))
+		p := decode[problem](t, resp)
+		if resp.StatusCode != 422 || len(p.Errors) != 1 || p.Errors[0].Path != path {
+			t.Fatalf("%d %+v", resp.StatusCode, p)
+		}
+	}
+	t.Run("an empty list is refused", func(t *testing.T) {
+		refused(t, map[string]any{}, "tests[0].expect.settings.responses")
+	})
+	t.Run("a misspelled kind is refused at save", func(t *testing.T) {
+		refused(t, map[string]any{"rate_limted": "rate_limited"}, "tests[0].expect.settings.responses.rate_limted")
+	})
+	t.Run("a null template is refused at save", func(t *testing.T) {
+		refused(t, map[string]any{"rate_limited": nil}, "tests[0].expect.settings.responses.rate_limited")
+	})
+	t.Run("a template name without its kind is refused at save", func(t *testing.T) {
+		refused(t, "rate_limited", "tests[0].expect.settings.responses")
+	})
+}
+
 func TestSchemaCDNHeaders(t *testing.T) {
 	headers := func(t *testing.T, set map[string]string) []string {
 		t.Helper()
@@ -1204,4 +1276,62 @@ func TestSavingACDNSignalNeedsTrustedHeaders(t *testing.T) {
 		t.Fatalf("status %d: %s", resp.StatusCode, b)
 	}
 	status(t, ed.save(`"0"`, cfg(&[]string{"Cf-Bot-Score", "Cf-Verified-Bot"})), 200)
+}
+
+// A map expectation lists entries of a map setting. Against a setting that
+// is not a map, such as the body limit, it must fail rather than pass on
+// entries read from nothing.
+func TestConfigTestMapExpectationOnAScalarSettingFails(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	test := ConfigTest{Name: "body limit as a map", Request: TestRequest{Host: "api.example.com", Path: "/login", IP: "203.0.113.96"},
+		Expect: TestExpect{Settings: map[string]any{"body_limit": map[string]any{"unexpected": nil}}}}
+	res := decode[struct {
+		TestResults []TestResult `json:"test_results"`
+	}](t, ed.save(`"0"`, testConfig(), test))
+	if len(res.TestResults) != 1 {
+		t.Fatalf("results %+v", res.TestResults)
+	}
+	r := res.TestResults[0]
+	if r.Pass || len(r.Failures) != 1 || !strings.HasPrefix(r.Failures[0], "settings.body_limit: want a map") {
+		t.Fatalf("result %+v", r)
+	}
+}
+
+// The preview shows a body as the edge would render it, from the same code
+// that validates a save.
+func TestTemplatePreview(t *testing.T) {
+	h := newHarness(t)
+	h.user("vera", "viewer")
+	vera := h.signedIn("vera")
+	cases := []struct {
+		name string
+		in   map[string]any
+		code int
+		want string
+	}{
+		{"a JSON body shows the template's status", map[string]any{"status": 429, "content_type": "application/problem+json", "body": `{"status":{{status}},"retry":{{retry_after}}}`}, 200, `{"status":429,"retry":1}`},
+		{"an HTML body shows the request ID sample", map[string]any{"status": 403, "content_type": "text/html; charset=utf-8", "body": "<h1>{{status}}</h1><p>{{request_id}}"}, 200, "<h1>403</h1><p>r1"},
+		{"an unknown placeholder is refused", map[string]any{"status": 403, "content_type": "text/plain; charset=utf-8", "body": "{{nope}}"}, 422, "unknown placeholder {{nope}}"},
+		{"a content type a template can't have is refused", map[string]any{"status": 403, "content_type": "image/png", "body": "x"}, 422, "content_type must be one of"},
+		{"a JSON body that is not JSON is refused", map[string]any{"status": 403, "content_type": "application/json", "body": "oops"}, 422, "not valid JSON"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := vera.do("POST", "/api/templates/preview", tc.in)
+			if resp.StatusCode != tc.code {
+				t.Fatalf("status %d, want %d", resp.StatusCode, tc.code)
+			}
+			if tc.code == 200 {
+				if got := decode[map[string]string](t, resp)["body"]; got != tc.want {
+					t.Fatalf("body %q, want %q", got, tc.want)
+				}
+				return
+			}
+			if p := decode[problem](t, resp); !strings.Contains(p.Detail, tc.want) {
+				t.Fatalf("detail %q, want %q", p.Detail, tc.want)
+			}
+		})
+	}
 }

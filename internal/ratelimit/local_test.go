@@ -214,6 +214,52 @@ func TestSlot(t *testing.T) {
 	}
 }
 
+// slotRef is slot computed bit by bit, as the Valkey Cluster spec defines
+// CRC16-XMODEM: the obviously correct reference for the table version.
+func slotRef(key string) uint16 {
+	if i := strings.IndexByte(key, '{'); i >= 0 {
+		if j := strings.IndexByte(key[i+1:], '}'); j > 0 {
+			key = key[i+1 : i+1+j]
+		}
+	}
+	var crc uint16
+	for i := 0; i < len(key); i++ {
+		crc ^= uint16(key[i]) << 8
+		for range 8 {
+			if crc&0x8000 != 0 {
+				crc = crc<<1 ^ 0x1021
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc % 16384
+}
+
+// A wrong table entry would send keys to the wrong node's breaker, so any
+// key, including one from a client-chosen subject, must hash as the
+// bitwise reference does.
+func FuzzSlot(f *testing.F) {
+	f.Add("rl:sliding_window:60000:login:{ip:198.51.100.7}")
+	f.Add("123456789")
+	f.Add("foo{{bar}}zap")
+	f.Add("\x00\xff\x80\x7f")
+	f.Fuzz(func(t *testing.T, key string) {
+		if got, want := slot(key), slotRef(key); got != want {
+			t.Fatalf("slot(%q) = %d, reference %d", key, got, want)
+		}
+	})
+}
+
+// Cost of picking a cluster breaker for a key shaped like a rule's.
+func BenchmarkSlot(b *testing.B) {
+	key := "rl:sliding_window:60000:login:{ip:198.51.100.7|path:/v1/login}"
+	b.ReportAllocs()
+	for b.Loop() {
+		slot(key)
+	}
+}
+
 func TestBans(t *testing.T) {
 	v4 := netip.MustParseAddr("198.51.100.7")
 	live := map[string]bool{"trap": true, "day": true, "minute": true, "week": true}

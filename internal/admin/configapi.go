@@ -31,6 +31,7 @@ func (s *Server) configRoutes() {
 	s.handle("POST /api/expr/parse", "config.read", s.exprParse)
 	s.handle("POST /api/expr/render", "config.read", s.exprRender)
 	s.handle("POST /api/expr/validate", "config.read", s.exprValidate)
+	s.handle("POST /api/templates/preview", "config.read", s.templatePreview)
 	s.handle("GET /api/draft", "config.read", s.getDraft)
 	s.handle("PUT /api/draft", "config.write", s.putDraft)
 	s.handle("POST /api/draft/check", "config.read", s.checkDraft)
@@ -114,6 +115,11 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 	for _, k := range slices.Sorted(maps.Keys(statuses)) {
 		kindStatuses = append(kindStatuses, kindStatus{k, statuses[k]})
 	}
+	// The editor starts a new body from its kind's default, so it keeps no copy.
+	bodies := map[string][]snapshot.Variant{}
+	for _, k := range kindStatuses {
+		bodies[k.Name] = snapshot.DefaultBodies(k.Name)
+	}
 	// The rule editor offers these as choices, so none can be misspelled.
 	rules := map[string]any{
 		"algorithms":        snapshot.Algorithms,
@@ -127,6 +133,7 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 		"header_ops":        snapshot.HeaderOps,
 		"response_kinds":    kindStatuses,
 		"content_types":     snapshot.ContentTypes,
+		"response_bodies":   bodies,
 		"jwt_algorithms":    snapshot.JWTAlgorithms,
 		"block_modes":       snapshot.BlockModes,
 		"distinct_of_kinds": snapshot.DistinctOfKinds,
@@ -150,6 +157,27 @@ func (s *Server) exprSchema(w http.ResponseWriter, _ *http.Request, _ *principal
 		}
 	}
 	return writeJSON(w, http.StatusOK, map[string]any{"fields": fields, "operators": ops, "rules": rules, "cdn_headers": cdn, "cdn_source_headers": cdnSources, "cdn_trusted_default": cdnDefault})
+}
+
+// templatePreview fills a template body with sample values, as validation
+// does, so the admin UI shows what the edge would send.
+func (s *Server) templatePreview(w http.ResponseWriter, r *http.Request, _ *principal) error {
+	var in struct {
+		Status      int    `json:"status"`
+		ContentType string `json:"content_type"`
+		Body        string `json:"body"`
+	}
+	if err := readJSON(w, r, &in); err != nil {
+		return err
+	}
+	if !slices.Contains(snapshot.ContentTypes, in.ContentType) {
+		return fail(http.StatusUnprocessableEntity, "content_type must be one of "+strings.Join(snapshot.ContentTypes, ", "))
+	}
+	out, err := snapshot.SampleBody(in.Status, in.ContentType, in.Body)
+	if err != nil {
+		return fail(http.StatusUnprocessableEntity, "body "+err.Error())
+	}
+	return writeJSON(w, http.StatusOK, map[string]any{"body": out})
 }
 
 func (s *Server) exprParse(w http.ResponseWriter, r *http.Request, _ *principal) error {

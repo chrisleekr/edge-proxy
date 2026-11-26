@@ -158,35 +158,47 @@ func (st *reqState) planChecks(v *version, out []rlCheck) (checks []rlCheck, cap
 		}
 	}
 	var n, nCount int
-	for _, shadow := range [2]bool{false, true} {
-		for i, m := range v.c.RateLimitRules {
-			// SiteWide comes from the normalized expression; the raw one may wrap true.
-			if v.rules[i].Shadow != shadow || slices.Contains(v.c.SiteWide, i) || !m(&st.fields) || v.expired(i, now) {
-				continue
+	for _, i := range v.order {
+		if !v.c.RateLimitRules[i](&st.fields) || v.expired(i, now) {
+			continue
+		}
+		slots, limit := &n, maxMatchedRateLimit
+		if v.rules[i].Count {
+			slots, limit = &nCount, maxCountRules
+		}
+		if *slots == limit {
+			capped = true
+			// Simulate builds versions without stats.
+			if v.stats != nil {
+				v.stats.rules[i].capped.Add(1)
 			}
-			slots, limit := &n, maxMatchedRateLimit
-			if v.rules[i].Count {
-				slots, limit = &nCount, maxCountRules
-			}
-			if *slots == limit {
-				capped = true
-				// Simulate builds versions without stats.
-				if v.stats != nil {
-					v.stats.rules[i].capped.Add(1)
-				}
-				continue
-			}
-			c, ok, rej := st.check(v, i)
-			if rej {
-				return checks, capped, true
-			}
-			if ok {
-				checks = append(checks, c)
-				*slots++
-			}
+			continue
+		}
+		c, ok, rej := st.check(v, i)
+		if rej {
+			return checks, capped, true
+		}
+		if ok {
+			checks = append(checks, c)
+			*slots++
 		}
 	}
 	return checks, capped, false
+}
+
+// rlOrder is the order planChecks evaluates the non-site-wide rules in:
+// blocking rules first, then shadow ones, each in rule order.
+func rlOrder(rules []ratelimit.Rule, siteWide []int) []int {
+	order := make([]int, 0, len(rules))
+	for _, shadow := range [2]bool{false, true} {
+		for i := range rules {
+			// SiteWide comes from the normalized expression; the raw one may wrap true.
+			if rules[i].Shadow == shadow && !slices.Contains(siteWide, i) {
+				order = append(order, i)
+			}
+		}
+	}
+	return order
 }
 
 // expired reports whether rule i has expired at now, in Unix

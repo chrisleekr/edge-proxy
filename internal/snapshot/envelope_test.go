@@ -74,6 +74,27 @@ func TestCompileWarns(t *testing.T) {
 		{"negated HTTP version wildcard written as the CDN sends it", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`not http.request.version wildcard "http/1.*"`)
 		}, "rate_limit_rules[1].expression", `"http/1.*" can't match`},
+		{"CORS origin written as a subdomain pattern", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"https://app.example.com", "https://*.example.com"}}
+		}, `global.cors_policies["app"].origins[1]`, "* is not a subdomain pattern"},
+		{"CORS origin with the default port", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"https://app.example.com:443"}}
+		}, `global.cors_policies["app"].origins[0]`, "write https://app.example.com"},
+		{"CORS origin with the default http port", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"http://app.example.com:80"}}
+		}, `global.cors_policies["app"].origins[0]`, "write http://app.example.com"},
+		{"CORS origin with a port written with a leading zero", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"https://app.example.com:0443"}}
+		}, `global.cors_policies["app"].origins[0]`, "plain number no higher than 65535"},
+		{"CORS origin with an empty port", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"https://app.example.com:"}}
+		}, `global.cors_policies["app"].origins[0]`, "plain number no higher than 65535"},
+		{"CORS origin with a port above 65535", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"https://app.example.com:65536"}}
+		}, `global.cors_policies["app"].origins[0]`, "plain number no higher than 65535"},
+		{"CORS origin with an international host name", func(c *Config) {
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{"https://bücher.example"}}
+		}, `global.cors_policies["app"].origins[0]`, "punycode"},
 		{"limit skipped through a negated group", func(c *Config) {
 			c.RateLimitRules[1].Expression = mustParse(`http.request.uri.path eq "/v1/login" and not (http.user_agent contains "monitor" or ssl)`)
 		}, "rate_limit_rules[1].expression", "client-controlled http.user_agent"},
@@ -92,6 +113,31 @@ func TestCompileWarns(t *testing.T) {
 				}
 			}
 			t.Fatalf("no warning at %q mentioning %q; got %v", tc.path, tc.msg, expr.Issues(warns))
+		})
+	}
+}
+
+// Origins a browser does send, including another scheme's default port and a
+// punycode host, must not draw an origin warning.
+func TestCORSOriginsBrowsersSendAreNotWarned(t *testing.T) {
+	for _, tc := range []struct{ name, origin string }{
+		{"https with port 80 is not its default port", "https://app.example.com:80"},
+		{"http with port 443 is not its default port", "http://app.example.com:443"},
+		{"international host in punycode form", "https://xn--bcher-kva.example"},
+		{"localhost with a dev port", "http://localhost:3000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig()
+			c.Global.CORSPolicies["app"] = CORSPolicy{Origins: []string{tc.origin}}
+			out, warns, errs := Compile(c, testDeployment)
+			if out == nil {
+				t.Fatalf("does not compile: %v", expr.Issues(errs))
+			}
+			for _, w := range warns {
+				if strings.Contains(w.Path, ".origins[") {
+					t.Errorf("unexpected origin warning: %v", expr.Issues(warns))
+				}
+			}
 		})
 	}
 }

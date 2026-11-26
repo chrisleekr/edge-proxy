@@ -510,6 +510,7 @@ Admin users enter JWKS URLs that admin and edges then fetch, and admin fetches t
 - **A refused preflight carries no `Access-Control-*` headers** rather than an error status, which the browser treats as a failed check. What a preflight answer and the allowed origin look like is in [CORS](use/policy.md#cors).
 - `ModifyResponse` strips upstream `Access-Control-*` headers when a policy applied, so the edge's policy is the only one the browser sees.
 - **Validation rejects `*` together with credentials.**
+- **Origins are matched as whole strings**, as browsers serialize them ([HTML Standard, serialization of an origin](https://html.spec.whatwg.org/multipage/browsers.html#ascii-serialisation-of-an-origin)). An origin a browser never sends (a `*` in the host, the scheme's default port, a port not written as a plain number up to 65535, a non-ASCII host) is a validation warning, not an error: published versions may hold one, and an error would stop edges loading them and block a revert to them.
 
 ## 7. Request header rules
 
@@ -563,24 +564,25 @@ The operations, placeholders and reserved headers are listed in [Header rules](u
 
 ## 9. Responses
 
-Templates are global. The `responses` config setting maps response kinds to templates per request, e.g. JSON for `/api/`, HTML elsewhere.
+Templates are global. A template is one default body plus `variants`, and the `responses` config setting maps response kinds to templates per request, e.g. a different template for some paths.
 
 ```yaml
 responses:
-  rate_limited_json:
+  rate_limited:
     status: 429
     content_type: application/json
     body: '{"error":"rate_limited","retry_after":{{retry_after}},"request_id":"{{request_id}}"}'
-  rate_limited_html:
-    status: 429
-    content_type: text/html; charset=utf-8
-    body: '<!doctype html><title>Too many requests</title><p>Try again in {{retry_after}} seconds.</p>'
+    variants:
+      - content_type: text/html; charset=utf-8
+        body: '<!doctype html><title>Too many requests</title><p>Try again in {{retry_after}} seconds.</p>'
 ```
 
 - **Kinds and their required status:** `bad_request` 400, `unauthorized` 401, `payload_too_large` 413, `rate_limited` 429, `bad_gateway` 502, `unavailable` 503, `overloaded` 503, `gateway_timeout` 504. `global.defaults.responses` must map every kind, because the edge can send any of them on any request.
 - **Headers on every edge-generated response:** `Cache-Control: no-store`; `Retry-After` on 429 and 503; CORS headers from step 4 onward.
 - **Placeholders:** `{{retry_after}}`, `{{request_id}}`, `{{status}}`. All are edge-generated, so nothing from the request can be injected. Templates are split into literal and placeholder parts at compile time and rendered with appends. `{{request_id}}` is safe in JSON and HTML only because the edge accepts an incoming `X-Request-Id` solely in a restricted character set ([§11](#11-proxy-and-http-server)).
-- **Validation:** status 400–599, body ≤ 32 KB, allowed content types only, JSON valid after sample substitution.
+- **Bodies per content type:** a template's `content_type` and `body` are its default body, and `variants` adds one body per other content type. `respond` picks the body, so it covers every kind, including the overload shed and the rejections sent before rules resolve. Rules can't read `Accept` with q-values. The first `Accept` line is read once at step 1, and one over 256 bytes is ignored so the default is sent. Each body takes the q-value of its most specific matching range (exact, `type/*`, `*/*`; types compare case-insensitively, a malformed q drops its range), the highest q above 0 wins, and ties and no match go to the earlier body, so the default is sent and the edge never answers 406 (RFC 9110 §12.5.1). `application/json` does not match a problem+json body. A template with more than one body adds `Vary: Accept`, next to any `Vary: Origin` CORS set. The parse is one pass with no allocation.
+- **Default bodies:** the starter gives every kind problem+json (the default, which `Accept: */*` and no `Accept` get), a small HTML page and plain text. Admin serves them in the `response_bodies` entry of the expression schema and renders a preview with `POST /api/templates/preview`, which uses the validator's own sample rendering.
+- **Validation:** status 400–599, each body ≤ 32 KB, allowed content types only with no content type twice in a template (so at most one variant per other content type), JSON valid after sample substitution (`{{status}}` is the template's status, `{{retry_after}}` is 1, `{{request_id}}` is `r1`). A body's content reports its first problem; its content type is checked separately. Variants need schema 14.
 
 ## 10. Client identity and viewer metadata
 
@@ -628,6 +630,8 @@ responses:
 - The edge doesn't route. `Host` is forwarded unchanged and the upstream routes by host and path, as it did before the edge was added.
 - **HTTPS upstream:** the TLS server name and the certificate check use the request's host, the same name as `Host`. A load balancer or Istio gateway that picks its certificate and listener by SNI then serves that host. The dialer always connects to `UPSTREAM_URL`'s address; the host only names the server. A host the upstream has no certificate for fails with 502.
 - One shared `http.Transport`. Its idle pool is keyed by host for an HTTPS upstream, and clients choose the host, so the total is capped as well (`UPSTREAM_MAX_IDLE`).
+- An idle upstream connection is closed after 50s, below the 60s idle timeout common to load balancers and gateways, so the edge closes it first: Go doesn't resend a non-idempotent request, such as a POST, that meets a connection the upstream has just closed, and the client would get a 502.
+- The transport's own compression is off. It adds no `Accept-Encoding` to a request that has none and never decompresses a response, so the body reaches the client as the upstream sent it, `Content-Length` included.
 - **The edge never retries upstream requests.** A request may not be safe to repeat, and retries multiply load during an incident. (Go's `Transport` itself may retry a request that failed on a reused idle connection before any response; that's the stdlib's own behavior and stays.)
 
 **Streaming:**
@@ -734,7 +738,7 @@ request_header_rules: [...]
 - An edge keeps its current snapshot if a new one has a higher major `schema`.
 - A build reads every `schema` from `MinSchema` to its `max_schema`, so a version saved under an older schema still loads on an upgraded edge.
 - A field added in a later schema is omitted from JSON when unset. A config that doesn't use it then encodes exactly as before, so edges not yet upgraded, which reject unknown fields, keep loading snapshots from an admin upgraded first. Tests pin the schema 1, 3, 4 and 5 encodings.
-- A config of any schema may set such a field. `Compile` then reports the schema an edge must read (`NeedsSchema`), and admin publishes it only when every live edge reads that schema. So a stored schema 1 policy can use `global.max_inflight` (schema 3) without migrating. A rate-limit rule's `expires_at` needs schema 5, `global.client_allowlist` needs schema 6, `global.browser_floor` needs schema 7, and `global.cdn_trusted_headers`, like a rule naming a CDN signal (`cdn_likely_automated`, `crawler_impersonated`, `cdn_tor` or `browser_tls_old`), needs schema 8. A config rule's `ban` setting needs schema 9, and a rule reading `client.denylisted` needs schema 10, and a rule reading `client.ip_lists` needs schema 11. `global.lists` and a `$name` value need schema 13, and an access rule's `allow` needs schema 12.
+- A config of any schema may set such a field. `Compile` then reports the schema an edge must read (`NeedsSchema`), and admin publishes it only when every live edge reads that schema. So a stored schema 1 policy can use `global.max_inflight` (schema 3) without migrating. A rate-limit rule's `expires_at` needs schema 5, `global.client_allowlist` needs schema 6, `global.browser_floor` needs schema 7, and `global.cdn_trusted_headers`, like a rule naming a CDN signal (`cdn_likely_automated`, `crawler_impersonated`, `cdn_tor` or `browser_tls_old`), needs schema 8. A config rule's `ban` setting needs schema 9, and a rule reading `client.denylisted` needs schema 10, and a rule reading `client.ip_lists` needs schema 11. `global.lists` and a `$name` value need schema 13, an access rule's `allow` needs schema 12, and a template with `variants` needs schema 14.
 - Schema 2 has no `upstream` config setting and no 421 `misdirected` response kind, because the edge forwards everything to one upstream. Compile reads a schema 1 config by dropping its `misdirected` template choices from a copy, so the stored version is served unchanged; a schema 1 rule that sets `upstream` fails to decode, because its routing can't be kept.
 - Admin won't publish a schema the oldest reporting edge can't read. Each stats report carries the edge's `max_schema`; publish, revert and import return 409 naming the edge while it is live (reported within the last minute).
 - Admin won't publish while a live edge runs with different deployment settings (`CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `CDN_HEADERS`, `INGRESS_SECRET_HEADER`, `ALLOW_REGEX`) than admin validates against. That edge would reject the config and keep its old snapshot, and the guard would only ever see `insufficient_data`. Each stats report carries a fingerprint of the edge's `snapshot.Deployment`; publish and import return 409 naming the edge. Reverts and guard rollbacks skip the check: they restore content edges already served, and an edge token reporting a bogus fingerprint must not block the way back. Edges that report no fingerprint aren't checked.

@@ -172,6 +172,34 @@ func FuzzClientSignalsMatchReference(f *testing.F) {
 	f.Add("Googlebot/2.1", "", "", "", "", "", "", true, "2.0", "", "", "TRUE", "", "", false, true, false, false)
 	f.Add("", "", "", "", "", "", "", true, "2.0", "", "15", "", "", "T1", true, true, false, true)
 	f.Add(chromeUA, "en", "navigate", hints("124"), "", "", "", true, "2.0", chromeJA4, "7", "true", "TLSv1.2:ECDHE-RSA-AES128-GCM-SHA256:fullHandshake", "", true, true, true, false)
+	// User-Agents for the token scans, with a refused crawler verdict so the
+	// crawler tokens are read too: real browsers, tokens at the start, middle
+	// and end, tokens sharing a prefix, and tokens around the uaScan cut.
+	for _, ua := range []string{
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+		"Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+		"Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP1A.240305.019; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/123.0.6312.118 Mobile Safari/537.36 Instagram 325.0.0.35.91 Android (34/14; 420dpi; 1080x2205; Google/google; Pixel 8; shiba; shiba; en_US; 589206393)",
+		"python-requests/2.32.3",
+		"Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
+		"Mozilla/4.0 (Hydra)",
+		"HeadlessChrome/120.0.0.0",
+		"Mozilla/5.0 (Unknown; Linux x86_64) AppleWebKit/538.1 (KHTML, like Gecko) PhantomJS/2.1.1 Safari/538.1",
+		"Ruby",
+		"Googlebot/2.1",
+		"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+		"Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) BaiduSpider",
+		"Mozilla/6.0", "Mozilla/5.g", "Mozlila/5.0", "Mozilla/5.0 Mozlil", "mo",
+		strings.Repeat("a", uaScan-5) + "curl/",
+		strings.Repeat("a", uaScan-4) + "curl/",
+		strings.Repeat("a", uaScan-14) + "HeadlessChrome",
+		strings.Repeat("a", uaScan-13) + "HeadlessChrome",
+		strings.Repeat("a", uaScan-9) + "googlebot",
+		strings.Repeat("a", uaScan-8) + "googlebot",
+		"c",
+	} {
+		f.Add(ua, "en", "navigate", "", "", "", "", true, "2.0", "", "", "false", "", "", false, true, false, false)
+	}
 	f.Fuzz(func(t *testing.T, ua, acceptLanguage, secFetch, hintsValue, upgrade, connection, wsKey string, ssl bool, version, ja4, score, verified, tlsValue, country string, hasScore, hasVerified, hasTLS, hasCountry bool) {
 		floor := [4]int{chromium: 130, firefox: 130}
 		// ssl is true only with an ssl source. The harness gives one to every

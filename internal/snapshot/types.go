@@ -123,9 +123,20 @@ type CORSPolicy struct {
 	MaxAge         Duration `json:"max_age"`
 }
 
-// Response is a template for an edge-generated response.
+// Response is a template for an edge-generated response. ContentType and
+// Body are its default body.
 type Response struct {
 	Status      int    `json:"status"`
+	ContentType string `json:"content_type"`
+	Body        string `json:"body"`
+	// Variants are bodies for other content types. The edge sends the one the
+	// request's Accept prefers, else the default. Added in schema 14, omitted
+	// when empty.
+	Variants []Variant `json:"variants,omitempty"`
+}
+
+// Variant is one more body of a template, for another content type.
+type Variant struct {
 	ContentType string `json:"content_type"`
 	Body        string `json:"body"`
 }

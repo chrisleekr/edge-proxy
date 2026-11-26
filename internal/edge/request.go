@@ -185,8 +185,9 @@ func (f *fields) List(name, key string) []string {
 	}
 }
 
-// signalBits computes the request's client signals on first use: only
-// requests a rule reads them for pay for them.
+// signalBits computes the request's client signals once, on first use.
+// Stats count the signals of every request that reaches the config step, so
+// every such request computes them, whether or not a rule reads them.
 func (f *fields) signalBits() uint16 {
 	if f.parsed&parsedSignals == 0 {
 		f.signals = signalsOf(f.r.Header, f.c, f.floor)

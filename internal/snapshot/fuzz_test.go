@@ -108,6 +108,21 @@ func FuzzDecodeAndCompile(f *testing.F) {
 		f.Fatalf("value lists seed doesn't compile: %v", expr.Issues(errs))
 	}
 	f.Add(gb)
+	// A template with HTML and text variants, as the starter publishes.
+	withBodies := validEnvelope()
+	withVariants(withBodies.Active, Variant{ContentType: "text/html; charset=utf-8", Body: "<p>{{retry_after}}"}, Variant{ContentType: "text/plain; charset=utf-8", Body: "{{status}}"})
+	vb, err := json.Marshal(withBodies)
+	if err != nil {
+		f.Fatal(err)
+	}
+	ve, err := Decode(bytes.NewReader(vb))
+	if err != nil {
+		f.Fatalf("variants seed doesn't decode: %v", err)
+	}
+	if _, errs := CompileEnvelope(ve, testDeployment); errs != nil {
+		f.Fatalf("variants seed doesn't compile: %v", expr.Issues(errs))
+	}
+	f.Add(vb)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e, err := Decode(bytes.NewReader(data))
 		if err != nil {

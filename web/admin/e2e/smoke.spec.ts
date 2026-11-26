@@ -1401,6 +1401,81 @@ test('Find opens a case and a note', async () => {
   await expect(page.getByRole('heading', { name: `Note ${n}`, exact: true })).toBeVisible();
 });
 
+test('a template opens from the list, and an HTML body added to it previews in a sandboxed frame', async () => {
+  await nav('Templates');
+  await page.getByRole('link', { name: /^rate_limited\b/ }).click();
+  await expect(page.getByRole('heading', { name: 'rate_limited', exact: true })).toBeVisible();
+  // The starter's template already has an HTML body; remove it to add one.
+  await page.getByRole('tab', { name: /^HTML/ }).click();
+  await page.getByRole('button', { name: 'Remove HTML' }).click();
+  await expect(page.getByRole('tab', { name: /^HTML/ })).toHaveCount(0);
+  await page.getByLabel('Add content type').selectOption({ label: 'HTML' });
+  await expect(page.getByRole('tab', { name: /^HTML/ })).toHaveAttribute('aria-selected', 'true');
+  const frame = page.locator('iframe[title="Preview"]');
+  await expect(frame).toHaveAttribute('sandbox', '');
+  await expect(page.frameLocator('iframe[title="Preview"]').getByRole('heading', { name: 'Too many requests' })).toBeVisible();
+});
+
+test('Add default HTML and text pages restores the bodies a template lacks', async () => {
+  await nav('Templates');
+  await page.getByRole('link', { name: /^rate_limited\b/ }).click();
+  await page.getByRole('tab', { name: /^text/ }).click();
+  await page.getByRole('button', { name: /^Remove text/ }).click();
+  await nav('Templates');
+  await expect(page.getByText('Adds them to 1 template.')).toBeVisible();
+  await page.getByRole('button', { name: 'Add default HTML and text pages' }).click();
+  await expect(page.getByRole('button', { name: 'Add default HTML and text pages' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /^rate_limited\b/ })).toContainText('JSON problem, HTML, text');
+});
+
+test('Make default moves a body to the front, and the default can be restored', async () => {
+  await nav('Templates');
+  await page.getByRole('link', { name: /^rate_limited\b/ }).click();
+  await page.getByRole('tab', { name: /^HTML/ }).click();
+  await page.getByRole('button', { name: 'Make default' }).click();
+  await expect(page.getByRole('tab', { name: 'HTML, default' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: /^JSON problem/ })).toHaveCount(1);
+  // Put the original order back for the tests after this one.
+  await page.getByRole('tab', { name: /^JSON problem/ }).click();
+  await page.getByRole('button', { name: 'Make default' }).click();
+  await expect(page.getByRole('tab', { name: /^JSON problem, default/ })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('an unknown placeholder in a body shows in its preview and names the body in the save bar', async () => {
+  await nav('Templates');
+  await page.getByRole('link', { name: /^rate_limited\b/ }).click();
+  await page.getByRole('tab', { name: /^HTML/ }).click();
+  await page.getByLabel('Body of rate_limited, HTML').click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.insertText('{{nope}}');
+  await expect(page.getByText('Preview', { exact: true }).locator('..').getByRole('alert')).toContainText('unknown placeholder');
+  await expect(page.getByText('template rate_limited, HTML, body').first()).toBeVisible();
+  // Delete what was typed so the body is the one it was.
+  for (let n = 0; n < '{{nope}}'.length; n++) await page.keyboard.press('Backspace');
+  await expect(page.getByText('template rate_limited, HTML, body')).toHaveCount(0);
+});
+
+test('a viewer switches tabs and previews a template but cannot change it', async ({ browser }) => {
+  await withSavedDraft({}, [], async () => {
+    const other = await (await browser.newContext()).newPage();
+    await other.goto('/');
+    await other.getByLabel('Username').fill(viewer);
+    await other.getByLabel('Password').fill(password);
+    await other.getByRole('button', { name: 'Sign in' }).click();
+    await expect(other.getByRole('navigation', { name: 'Main' })).toBeVisible();
+    await other.goto('/templates/rate_limited');
+    await expect(other.getByText('Your role can read the policy but not change it.')).toBeVisible();
+    const second = other.getByRole('tab').nth(1);
+    await second.click();
+    await expect(second).toHaveAttribute('aria-selected', 'true');
+    await expect(other.getByText('Preview', { exact: true })).toBeVisible();
+    await expect(other.getByLabel('Add content type')).toHaveCount(0);
+    await expect(other.getByRole('button', { name: 'Make default' })).toHaveCount(0);
+    await expect(other.getByRole('button', { name: 'Delete template' })).toHaveCount(0);
+    await other.context().close();
+  });
+});
+
 test('the sidebar groups pages by job', async () => {
   await page.goto('/');
   const main = page.getByRole('navigation', { name: 'Main' });
@@ -1489,6 +1564,7 @@ test('at 1280 pixels wide no page scrolls sideways or has a serious accessibilit
     ['/rules', 'Rules'],
     ['/rules/rate_limit/login', 'Edit login'],
     ['/templates', 'Templates'],
+    ['/templates/rate_limited', 'rate_limited'],
     ['/cors', 'CORS policies'],
     ['/issuers', 'Issuers'],
     ['/settings', 'Settings'],

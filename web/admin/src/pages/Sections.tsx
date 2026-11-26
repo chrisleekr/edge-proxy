@@ -6,7 +6,7 @@ import { Link, navigate, useLeaveGuard } from '../router';
 import { phases, ruleLink, rulesOf } from '../phases';
 import { GuardForm, guardWhere } from '../GuardForm';
 import { Amount, Choice, Count, Errors, kindWhen, Labeled, Lines, setField, sizeUnits, timeUnits, without } from '../RuleForms';
-import { Badge, Button, CanWrite, Card, Check, CodeEditor, ConfirmButton, Editable, ErrorBox, type Field, Hint, Input, JsonEditor, Jump, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
+import { Badge, Button, CanWrite, Card, Check, ConfirmButton, Editable, ErrorBox, type Field, Hint, Input, JsonEditor, Jump, Notice, Page, Pending, ReadOnlyNote, Reference } from '../ui';
 
 // The section forms edit the draft directly. The draft's own check, run by
 // the server on every edit, puts each problem under its field and keeps
@@ -73,7 +73,7 @@ function Text({ label, hint, issues, value, onChange, placeholder }: { label: st
 }
 
 // contentLabel names a content type in a word for an entry's summary.
-const contentLabel = (t: Json) =>
+export const contentLabel = (t: Json) =>
   typeof t !== 'string' ? undefined : t.startsWith('application/problem+json') ? 'JSON problem' : t.startsWith('application/json') ? 'JSON' : t.startsWith('text/html') ? 'HTML' : t.startsWith('text/plain') ? 'text' : t;
 
 // AddNamed adds an entry to a map keyed by name. A name already in the map
@@ -147,20 +147,63 @@ function Entry({
 // configRules lists the access rules with their settings, for "used by".
 const configRules = (c: Config) => (c.config_rules ?? []).map((r) => ({ id: r.id, settings: r.settings ?? {} }));
 
-type Templates = Record<string, JsonObject>;
+export type Body = { content_type: string; body: string };
+export type Template = { status?: number | undefined; content_type?: string; body?: string; variants?: Body[] };
+type Templates = Record<string, Template>;
+
+// bodiesOf lists a template's bodies, its default first, as the edge orders them.
+// The JSON editor can store any value as variants; only an array of objects is read, and validation reports the rest.
+export const bodiesOf = (t: Template): Body[] => [
+  { content_type: t.content_type ?? '', body: t.body ?? '' },
+  ...(Array.isArray(t.variants) ? t.variants.filter((v): v is Body => typeof v === 'object' && v !== null) : []),
+];
+
+// withBodies stores bodies back: the first is the default, the rest are variants.
+export const withBodies = (t: Template, [first, ...rest]: Body[]): Template => {
+  const { variants: _, ...base } = t;
+  return { ...base, content_type: first!.content_type, body: first!.body, ...(rest.length ? { variants: rest } : {}) };
+};
+
+// templateKind is the kind whose default bodies fit a template: one that uses
+// it as its default, else the first kind with its status.
+export const templateKind = (c: Config, name: string, status: unknown, kinds: { name: string; status: number }[]) => {
+  const defaults = (c.global.defaults.responses ?? {}) as Record<string, string>;
+  return kinds.find((k) => defaults[k.name] === name)?.name ?? kinds.find((k) => k.status === status)?.name;
+};
+
+// templateUsers names what sends a template: kinds that default to it, and rules.
+export const templateUsers = (c: Config, name: string, kinds: { name: string }[]) => {
+  const defaults = (c.global.defaults.responses ?? {}) as Record<string, string>;
+  return [
+    ...kinds.filter((k) => defaults[k.name] === name).map((k) => `the default for ${k.name.replaceAll('_', ' ')}`),
+    ...configRules(c)
+      .filter((r) => Object.values((r.settings.responses ?? {}) as Record<string, Json>).includes(name))
+      .map((r) => `rule ${r.id}`),
+  ];
+};
+
+// The bulk action adds only the page types, so a template's default body and
+// any JSON body it has stay as they are.
+const pageTypes = ['text/html; charset=utf-8', 'text/plain; charset=utf-8'];
 
 export function Templates() {
   const d = useDraft();
+  const canWrite = useContext(CanWrite);
   const schema = useSchema();
   if (!schema.data) return <Pending error={schema.error} />;
-  const { response_kinds: kinds, content_types } = schema.data.rules;
+  const { response_kinds: kinds, response_bodies } = schema.data.rules;
   const all = (d.config.global.responses ?? {}) as Templates;
   const names = Object.keys(all).sort();
   const setAll = (t: Templates) => d.setConfig((c) => ({ ...c, global: { ...c.global, responses: t } }));
-  // A template answers only with the status of the kinds it is used for.
-  const statuses = [...new Set(kinds.map((k) => k.status))].sort();
-  const statusLabels = Object.fromEntries(statuses.map((s) => [String(s), `${s}, for ${kinds.filter((k) => k.status === s).map((k) => k.name.replaceAll('_', ' ')).join(' and ')}`]));
   const defaults = (d.config.global.defaults.responses ?? {}) as Record<string, string>;
+  const withPages = (n: string, t: Template) => {
+    const have = bodiesOf(t);
+    const k = templateKind(d.config, n, t.status, kinds);
+    const more = (response_bodies[k ?? ''] ?? []).filter((b) => pageTypes.includes(b.content_type) && !have.some((h) => h.content_type === b.content_type));
+    return more.length ? withBodies(t, [...have, ...more]) : t;
+  };
+  const pages = names.filter((n) => withPages(n, all[n]!) !== all[n]).length;
+  const addPages = () => setAll(Object.fromEntries(names.map((n) => [n, withPages(n, all[n]!)])));
   return (
     <Page title="Templates">
       <ReadOnlyNote />
@@ -170,48 +213,30 @@ export function Templates() {
         get={(c) => c.global.responses}
         set={(c, v) => ({ ...c, global: { ...c.global, responses: v } })}
         intro="Responses the edge sends itself, such as the 429 for a rate limit. Name one for each kind below, or in an access rule's response templates."
-        info="The edge answers some requests without asking the upstream: bad requests, missing tokens, rate limits, timeouts. A template sets the status, content type and body of that answer. Every one is sent with Cache-Control: no-store."
+        info="The edge answers some requests without asking the upstream: bad requests, missing tokens, rate limits, timeouts. A template sets the status and the bodies of that answer, one per content type, and the edge sends the one the request's Accept prefers. Every one is sent with Cache-Control: no-store."
       >
         {names.length === 0 && <p className="text-body">No templates yet.</p>}
         {names.map((name) => {
-          const p = `global.responses[${q(name)}]`;
           const t = all[name]!;
-          const set = (k: string, v: Json) => setAll({ ...all, [name]: setField(t, k, v) });
+          const users = templateUsers(d.config, name, kinds);
           return (
-            <Entry
-              key={name}
-              title={name}
-              summary={[t.status, contentLabel(t.content_type)].filter(Boolean).join(', ')}
-              usedBy={[
-                ...kinds.filter((k) => defaults[k.name] === name).map((k) => `the default for ${k.name.replaceAll('_', ' ')}`),
-                ...configRules(d.config)
-                  .filter((r) => Object.values((r.settings.responses ?? {}) as Record<string, Json>).includes(name))
-                  .map((r) => `rule ${r.id}`),
-              ]}
-              problems={d.at(p).length > 0}
-              issues={only(d.at(p), p)}
-              remove={`Remove template ${name}`}
-              onRemove={() => setAll(Object.fromEntries(Object.entries(all).filter(([n]) => n !== name)))}
-            >
-              <Labeled label="Status" issues={d.at(`${p}.status`)}>
-                <Choice value={typeof t.status === 'number' ? String(t.status) : undefined} options={statuses.map(String)} labels={statusLabels} onChange={(v) => set('status', v === undefined ? undefined : Number(v))} />
-              </Labeled>
-              <Labeled label="Content type" issues={d.at(`${p}.content_type`)}>
-                <Choice value={t.content_type as string | undefined} options={content_types} onChange={(v) => set('content_type', v)} />
-              </Labeled>
-              <div className="flex flex-col gap-1 text-sm">
-                <span className="font-medium text-heading">Body</span>
-                <CodeEditor key={d.discards} label={`Body of ${name}`} value={typeof t.body === 'string' ? t.body : ''} onChange={(b) => set('body', b)} />
-                <span className="text-body">
-                  Sent as written. <code>{'{{status}}'}</code>, <code>{'{{retry_after}}'}</code> and <code>{'{{request_id}}'}</code> are filled in per request. A JSON body must still be JSON once they are, such as{' '}
-                  <code>{'{"title":"Slow down","retry_after":{{retry_after}}}'}</code>.
-                </span>
-                <Errors issues={d.at(`${p}.body`)} />
-              </div>
-            </Entry>
+            <Link key={name} to={`/templates/${encodeURIComponent(name)}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-control border border-line px-4 py-3 hover:bg-soft">
+              <span className="font-mono text-sm font-medium text-heading">{name}</span>
+              <span className="text-sm text-body">{[t.status, ...bodiesOf(t).map((b) => contentLabel(b.content_type))].filter(Boolean).join(', ')}</span>
+              <span className={`text-sm ${users.length ? 'text-body' : 'text-warning'}`}>{users.length ? `used by ${users.join(', ')}` : 'not used'}</span>
+              {d.at(`global.responses[${q(name)}]`).length > 0 && <span className="text-sm text-danger">has problems</span>}
+            </Link>
           );
         })}
-        <AddNamed label="New template name" button="Add template" example="slow-down" taken={names} onAdd={(n) => setAll({ ...all, [n]: { body: '' } })} />
+        {canWrite && pages > 0 && (
+          <div>
+            <Button onClick={addPages}>Add default HTML and text pages</Button>
+            <Hint>
+              Adds them to {pages} template{pages === 1 ? '' : 's'}. Browsers then get a page, and API clients keep the default body.
+            </Hint>
+          </div>
+        )}
+        <AddNamed label="New template name" button="Add template" example="slow-down" taken={names} onAdd={(n) => (setAll({ ...all, [n]: { body: '' } }), navigate(`/templates/${encodeURIComponent(n)}`))} />
       </Section>
       <Section
         title="Default response per kind"
@@ -297,7 +322,7 @@ export function CORS() {
                 at={d.at}
                 path={`${p}.origins`}
                 placeholder="such as https://app.example.com"
-                hint="Scheme and host as the browser shows them, lowercase and with no path, such as https://app.example.com or http://localhost:3000. * allows any site, but not with cookies."
+                hint="Scheme and host as the browser sends them in Origin: lowercase, no path, no default port (:443, :80) and an international name in its xn-- form, such as https://app.example.com or http://localhost:3000. * allows any site, but not with cookies."
               />
               <fieldset className="flex flex-col gap-1 text-sm">
                 <legend className="font-medium text-heading">Methods</legend>
@@ -802,7 +827,7 @@ export function Settings({ canManage }: { canManage: boolean }) {
           </Labeled>
           <Text
             label="Header for the upstream"
-            hint="Starts with X-Edge-, such as X-Edge-Locale. Leave empty to send none."
+            hint="Starts with X-Edge-. Empty sends X-Edge-Locale."
             issues={d.at('global.locale.output_header')}
             value={locale.output_header}
             onChange={(v) => setLocale('output_header', v || undefined)}

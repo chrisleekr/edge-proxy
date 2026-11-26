@@ -120,6 +120,46 @@ func FuzzWildcardMatchesRegexp(f *testing.F) {
 	})
 }
 
+// Wildcard conditions on one field under "or", as a value list expands to,
+// compile to one leaf that folds the value once. It matches exactly when one
+// of the conditions compiled alone does, for the user agent and for every
+// value of a header. patterns holds one pattern per line.
+func FuzzWildcardListMatchesEachPattern(f *testing.F) {
+	f.Add("*bot*\ncurl/*\n*Spider*", "Mozilla/5.0 (compatible; Googlebot/2.1)", false)
+	f.Add("*bot*\ncurl/*", "CURL/8.4.0", true)
+	f.Add("*bot*\nwget/*", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", false)
+	f.Add("*a*b\n*b*a", strings.Repeat("A", 600)+"b", false)
+	f.Fuzz(func(t *testing.T, patterns, s string, header bool) {
+		field, key := "http.user_agent", ""
+		if header {
+			field, key = "http.request.headers", "x-agent"
+		}
+		or := Node{Combinator: "or"}
+		var each []Matcher
+		for p := range strings.SplitSeq(patterns, "\n") {
+			n := Node{Field: field, Key: key, Operator: "wildcard", Value: Value{One: p}}
+			m, is := Compile(n, testEnv)
+			if is != nil {
+				return
+			}
+			or.Rules = append(or.Rules, n)
+			each = append(each, m)
+		}
+		merged, is := Compile(or, testEnv)
+		if is != nil {
+			return
+		}
+		req := &fakeReq{str: map[string]string{field: s}, lists: map[string][]string{field + "|X-Agent": {"other", s}}}
+		want := false
+		for _, m := range each {
+			want = want || m(req)
+		}
+		if got := merged(req); got != want {
+			t.Fatalf("%s on %q = %v, conditions one by one say %v", Render(or), s, got, want)
+		}
+	})
+}
+
 func asciiLower(s string) string {
 	b := []byte(s)
 	for i, c := range b {

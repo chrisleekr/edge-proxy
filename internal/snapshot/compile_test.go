@@ -35,7 +35,7 @@ func TestRealisticConfigCompiles(t *testing.T) {
 	if got != "acme" {
 		t.Errorf("X-Tenant renders %q", got)
 	}
-	body := out.Responses["rate_limited_json"].Render(nil, func(p Placeholder) string {
+	body := out.Responses["rate_limited_json"][0].Template.Render(nil, func(p Placeholder) string {
 		return map[string]string{"retry_after": "30", "request_id": "r-1"}[p.Name]
 	})
 	if string(body) != `{"error":"rate_limited","retry_after":30,"request_id":"r-1"}` {

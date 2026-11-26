@@ -49,17 +49,23 @@ func compileForward(f snapshot.Forward) *forwardFilter {
 			ff.names[textproto.CanonicalMIMEHeaderKey(n)] = true
 		}
 	}
+	// Headers validation reserves (Connection, Upgrade and Te, which
+	// ReverseProxy sets before Rewrite) and trace context are always kept.
+	// Header maps hold canonical keys, so apply needs one map read per header.
+	if ff.mode == forwardAllowlist {
+		for _, n := range snapshot.AlwaysForwarded() {
+			ff.names[textproto.CanonicalMIMEHeaderKey(n)] = true
+		}
+	}
 	return ff
 }
 
-// apply keeps or drops headers. Headers validation reserves (Connection,
-// Upgrade and Te, which ReverseProxy sets before Rewrite) and trace context
-// are always kept.
+// apply keeps or drops headers.
 func (f *forwardFilter) apply(h http.Header) {
 	switch f.mode {
 	case forwardAllowlist:
 		for k := range h {
-			if !f.names[k] && !snapshot.Reserved(k) && !snapshot.TraceHeader(k) {
+			if !f.names[k] {
 				delete(h, k)
 			}
 		}

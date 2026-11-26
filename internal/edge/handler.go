@@ -193,6 +193,7 @@ type reqState struct {
 	start     time.Time
 	headersAt time.Time // when the upstream's response headers arrived
 	stream    bool      // SSE or WebSocket, by the request
+	accept    string    // the first Accept line, read at step 1
 	requestID string
 	client    client
 	fields    fields
@@ -271,7 +272,9 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	if ld != nil {
 		limit = ld.maxInflight
 	}
-	st.stream = isStream(r)
+	// Read once: it marks an SSE request here and picks a template body in respond.
+	st.accept, _ = first(r.Header["Accept"])
+	st.stream = isStream(r, st.accept)
 	if st.stream {
 		cnt, limit, rsn = &e.m.streams, e.cfg.MaxStreams, reasonStreamsOverloaded
 	}
@@ -383,9 +386,11 @@ func (e *Edge) serve(st *reqState, r *http.Request) {
 	e.proxy(st, r)
 }
 
-// isStream reports a WebSocket upgrade or an SSE request.
-func isStream(r *http.Request) bool {
-	return r.Header.Get("Upgrade") != "" || strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+// isStream reports a WebSocket upgrade or an SSE request. The server
+// canonicalizes header names, so map reads skip Header.Get's canonicalization.
+func isStream(r *http.Request, accept string) bool {
+	up, _ := first(r.Header["Upgrade"])
+	return up != "" || strings.Contains(accept, "text/event-stream")
 }
 
 func identifyReason(err error) reason {
@@ -511,9 +516,22 @@ func (e *Edge) respond(st *reqState, k kind) {
 		name = st.set.responses[k]
 	}
 	tpl := ver.c.Config.Global.Responses[name]
+	bodies := ver.c.Responses[name]
+	b := bodies[0]
+	if len(bodies) > 1 {
+		// The body depends on Accept, so a cache in front must key on it
+		// (RFC 9110 §12.5.5). Add keeps a Vary: Origin that CORS set; set
+		// reuses v's backing array when there is none.
+		if _, ok := h["Vary"]; ok {
+			h.Add("Vary", "Accept")
+		} else {
+			v.set(h, "Vary", "Accept")
+		}
+		b = bodies[pickBody(st.accept, bodies)]
+	}
 	buf := e.pool.Get()
 	defer e.pool.Put(buf)
-	body := ver.c.Responses[name].Render(buf[:0], func(ph snapshot.Placeholder) string {
+	body := b.Template.Render(buf[:0], func(ph snapshot.Placeholder) string {
 		switch ph.Name {
 		case "retry_after":
 			return strconv.Itoa(max(st.retry, 1))
@@ -523,7 +541,7 @@ func (e *Edge) respond(st *reqState, k kind) {
 			return strconv.Itoa(tpl.Status)
 		}
 	})
-	v.set(h, "Content-Type", tpl.ContentType)
+	v.set(h, "Content-Type", b.ContentType)
 	v.set(h, "Content-Length", strconv.Itoa(len(body)))
 	st.sw.WriteHeader(tpl.Status)
 	_, _ = st.sw.Write(body)
