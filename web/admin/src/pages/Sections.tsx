@@ -152,7 +152,11 @@ export type Template = { status?: number | undefined; content_type?: string; bod
 type Templates = Record<string, Template>;
 
 // bodiesOf lists a template's bodies, its default first, as the edge orders them.
-export const bodiesOf = (t: Template): Body[] => [{ content_type: t.content_type ?? '', body: t.body ?? '' }, ...(t.variants ?? [])];
+// The JSON editor can store any value as variants; only an array of objects is read, and validation reports the rest.
+export const bodiesOf = (t: Template): Body[] => [
+  { content_type: t.content_type ?? '', body: t.body ?? '' },
+  ...(Array.isArray(t.variants) ? t.variants.filter((v): v is Body => typeof v === 'object' && v !== null) : []),
+];
 
 // withBodies stores bodies back: the first is the default, the rest are variants.
 export const withBodies = (t: Template, [first, ...rest]: Body[]): Template => {

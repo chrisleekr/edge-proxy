@@ -21,7 +21,10 @@ const maxBodies = 4
 // each body takes the q-value of its most specific matching range, and the
 // highest q above 0 wins. Ties and no match go to the earlier body, so
 // bodies[0], the default, is sent rather than a 406, and so is an accept longer
-// than maxAccept. One pass over accept serves every body.
+// than maxAccept. One pass over accept serves every body. Media type
+// parameters other than q are ignored, so text/html;charset=utf-8 ranks as
+// text/html: clients send none, and the cost of a miss is only which error
+// body format is sent.
 func pickBody(accept string, bodies []snapshot.Body) int {
 	if len(accept) > maxAccept {
 		return 0

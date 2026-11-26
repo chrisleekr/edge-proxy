@@ -1278,6 +1278,27 @@ func TestSavingACDNSignalNeedsTrustedHeaders(t *testing.T) {
 	status(t, ed.save(`"0"`, cfg(&[]string{"Cf-Bot-Score", "Cf-Verified-Bot"})), 200)
 }
 
+// A map expectation lists entries of a map setting. Against a setting that
+// is not a map, such as the body limit, it must fail rather than pass on
+// entries read from nothing.
+func TestConfigTestMapExpectationOnAScalarSettingFails(t *testing.T) {
+	h := newHarness(t)
+	h.user("ed", "editor")
+	ed := h.signedIn("ed")
+	test := ConfigTest{Name: "body limit as a map", Request: TestRequest{Host: "api.example.com", Path: "/login", IP: "203.0.113.96"},
+		Expect: TestExpect{Settings: map[string]any{"body_limit": map[string]any{"unexpected": nil}}}}
+	res := decode[struct {
+		TestResults []TestResult `json:"test_results"`
+	}](t, ed.save(`"0"`, testConfig(), test))
+	if len(res.TestResults) != 1 {
+		t.Fatalf("results %+v", res.TestResults)
+	}
+	r := res.TestResults[0]
+	if r.Pass || len(r.Failures) != 1 || !strings.HasPrefix(r.Failures[0], "settings.body_limit: want a map") {
+		t.Fatalf("result %+v", r)
+	}
+}
+
 // The preview shows a body as the edge would render it, from the same code
 // that validates a save.
 func TestTemplatePreview(t *testing.T) {

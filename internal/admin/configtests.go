@@ -211,7 +211,11 @@ func (e TestExpect) mismatches(got SimView) []string {
 			// A map lists only the entries the test cares about, such as one
 			// response template, so each listed entry is checked on its own.
 			if wm, ok := want.(map[string]any); ok {
-				am, _ := actual[k].(map[string]any)
+				am, isMap := actual[k].(map[string]any)
+				if !isMap {
+					f = append(f, fmt.Sprintf("settings.%s: want a map with %v, got %v", k, wm, actual[k]))
+					continue
+				}
 				for _, j := range slices.Sorted(maps.Keys(wm)) {
 					if !reflect.DeepEqual(wm[j], am[j]) {
 						f = append(f, fmt.Sprintf("settings.%s.%s: want %v, got %v", k, j, wm[j], am[j]))
