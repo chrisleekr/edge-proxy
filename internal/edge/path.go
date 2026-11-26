@@ -47,12 +47,17 @@ func matchPath(r *http.Request) (string, error) {
 	// An upstream that doesn't resolve ".." routes /admin/../public under
 	// /admin while a resolved path would match /public. Dropping "." or
 	// "//" only moves a path into a prefix it was already under.
-	if !ok || strings.Contains(p+"/", "/../") {
+	// A ".." segment is "/../" inside the path or "/.." at its end. Checked
+	// apart, as concatenating p and "/" allocates for paths over 31 bytes.
+	if !ok || strings.Contains(p, "/../") || strings.HasSuffix(p, "/..") {
 		return "", errAmbiguousPath
 	}
 	c := path.Clean(p)
 	// Clean drops a trailing slash, but /admin/ and /admin are different routes.
 	if strings.HasSuffix(p, "/") && c != "/" {
+		if p[:len(p)-1] == c {
+			return p, nil // already clean: appending "/" again would allocate
+		}
 		c += "/"
 	}
 	return c, nil

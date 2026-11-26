@@ -89,7 +89,7 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 |---|---|---|
 | `UPSTREAM_URL` | required | `http(s)://host[:port][/path]` of your load balancer or gateway, such as an ALB or an Istio gateway Service, with no query or fragment. `Host` is forwarded unchanged so it can route. Over HTTPS the edge sends the request's host as the TLS server name and checks the certificate against it, so the upstream must present a certificate for each host it serves; the connection still goes to this URL's address. Only the deployment sets it: policy can't, and admin shows it read-only on **Fleet** |
 | `UPSTREAM_DIAL_TIMEOUT` | `5s` | Connect and TLS handshake timeout |
-| `UPSTREAM_MAX_IDLE` | `256` | Idle connections kept to the upstream, in total. Over HTTPS each host has its own pool within this total |
+| `UPSTREAM_MAX_IDLE` | `256` | Idle connections kept to the upstream, in total. Over HTTPS each host has its own pool within this total. Each is closed after 50s idle, so keep the upstream's idle timeout above that |
 
 ## Policy source
 

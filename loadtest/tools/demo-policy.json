@@ -108,7 +108,13 @@
         "friendly-429": {
           "status": 429,
           "content_type": "text/html; charset=utf-8",
-          "body": "<!doctype html><title>Slow down</title><h1>Too many requests</h1><p>Try again in {{retry_after}} seconds.</p><p><small>Request {{request_id}}</small></p>"
+          "body": "<!doctype html><title>Slow down</title><h1>Too many requests</h1><p>Try again in {{retry_after}} seconds.</p><p><small>Request {{request_id}}</small></p>",
+          "variants": [
+            {
+              "content_type": "application/problem+json",
+              "body": "{\"status\":{{status}},\"title\":\"Too Many Requests\",\"retry_after\":{{retry_after}}}"
+            }
+          ]
         },
         "json-429": {
           "status": 429,

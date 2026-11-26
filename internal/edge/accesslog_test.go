@@ -1,10 +1,17 @@
 package edge
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -12,7 +19,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/chrisleekr/edge-proxy/internal/ratelimit"
 	"github.com/chrisleekr/edge-proxy/internal/snapshot"
 )
 
@@ -772,5 +781,156 @@ func TestAccessLogRateLimitNumbersFromValkey(t *testing.T) {
 	until, err := time.Parse(time.RFC3339, entries[0].(map[string]any)["blocked_until"].(string))
 	if err != nil || time.Until(until) < 4*time.Minute || time.Until(until) > 6*time.Minute {
 		t.Fatalf("blocked_until %v (%v), want about 5 minutes ahead", entries[0], err)
+	}
+}
+
+// goldenVersion has a log-only and a blocking access rule, a rate-limit rule
+// and a header rule, so a record can list them as the edge ran them.
+func goldenVersion() *version {
+	c := testConfig(7)
+	c.ConfigRules = []snapshot.ConfigRule{
+		{ID: "watch-tools", Settings: snapshot.Settings{Block: new("log")}},
+		{ID: "trap", Settings: snapshot.Settings{Block: new("block")}},
+	}
+	c.RateLimitRules = []snapshot.RateLimitRule{rlRule("per-ip", "true", "sliding_window", 100, "ip")}
+	c.RequestHeaderRules = []snapshot.HeaderRule{marker("add-locale", "true", "X-Locale", "en")}
+	return &version{c: &snapshot.Compiled{Config: c}, rules: ratelimit.Compile(c.RateLimitRules)}
+}
+
+// browserRecord is a sampled page view from a browser through the CDN, with
+// a signed-in user and a traced request.
+func browserRecord(v *version) accessRecord {
+	rec := accessRecord{
+		method: "GET", host: "Shop.Example.com:443", path: "/products/42", query: "utm_source=mail&id=1&id=2&q%20x=1&bare&%61b=2&ref=", requestID: "req-1",
+		cohort: "active", action: "allow", auth: "verified", status: 200, client: netip.MustParseAddr("2001:db8::7"),
+		version: 7, asn: 13335, hasASN: true, upstream: true, signals: sigBrowserOutdated, ipLists: []string{"office"}, duration: 1534 * time.Microsecond,
+		traceID:   trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+		spanID:    trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
+		userAgent: chromeUA, country: "AU", ja4: chromeJA4, ja3: chromeJA3, continent: "OC", locale: "en", authSub: "user-1",
+		referer: "https://shop.example.com/cart?token=secret#frag", viewerVersion: "2.0", ssl: true, hasSSL: true, reqBytes: 0, respBytes: 5120,
+		ver: v, hdrRules: []int{0}, blockIdx: -1, nRL: 1,
+	}
+	rec.rlOut[0] = rlResult{Allowed: true, Remaining: 99}
+	copy(rec.hdr[:], []string{`"Chromium";v="124"`, "?0", `"Windows"`, "same-origin", "navigate", "document", "?1", "text/html", "en-AU,en;q=0.9", "gzip, br", "Sydney"})
+	return rec
+}
+
+// newGoldenLog writes through the JSON handler the edge uses, sampling 1 in 4
+// allowed requests, with one CDN header.
+func newGoldenLog(w io.Writer) *accessLog {
+	return newAccessLog(slog.New(slog.NewJSONHandler(w, nil)), &metrics{}, 0.25, 1, []string{"CloudFront-Viewer-City"})
+}
+
+// An access line keeps its exact bytes: the attributes, their names, order
+// and values are what log searches and dashboards read.
+func TestAccessLogLineBytes(t *testing.T) {
+	v := goldenVersion()
+	banStart, banEnd := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC).UnixMilli(), time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC).UnixMilli()
+	// The lines share buffers, as one writer's lines do, so nothing of a
+	// longer line shows on the next.
+	var attrs []slog.Attr
+	var keys []string
+	for _, tc := range []struct {
+		name string
+		rec  accessRecord
+		want string
+	}{
+		{"a sampled browser page view", browserRecord(v), `{"level":"INFO","msg":"access","http.request.method":"GET","server.address":"shop.example.com","url.path":"/products/42","http.response.status_code":200,"request_id":"req-1","edge.action":"allow","edge.upstream_answered":true,"duration_ms":1.534,"edge.query_keys":["ab","id","ref","utm_source"],"edge.query_keys_dropped":2,"edge.auth":"verified","edge.matched_rules":[{"rule":"per-ip","type":"rate_limit","result":"under","left":99},{"rule":"add-locale","type":"headers","result":"matched"}],"edge.sample_rate":0.25,"client.address":"2001:db8::7","user_agent.original":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36","client.as.number":13335,"client.geo.country_iso_code":"AU","tls.client.ja4":"t13d1516h2_8daaf6152771_02713d6af862","client.signals":["browser_outdated"],"client.ip_lists":["office"],"tls.client.ja3":"e7d705a3286e19ea42f587b344ee6865","client.geo.continent_code":"OC","network.protocol.version":"2","url.scheme":"https","http.request.body.size":0,"http.response.body.size":5120,"edge.locale":"en","edge.auth_sub":"user-1","http.request.header.sec-ch-ua":"\"Chromium\";v=\"124\"","http.request.header.sec-ch-ua-mobile":"?0","http.request.header.sec-ch-ua-platform":"\"Windows\"","http.request.header.sec-fetch-site":"same-origin","http.request.header.sec-fetch-mode":"navigate","http.request.header.sec-fetch-dest":"document","http.request.header.sec-fetch-user":"?1","http.request.header.accept":"text/html","http.request.header.accept-language":"en-AU,en;q=0.9","http.request.header.accept-encoding":"gzip, br","http.request.header.cloudfront-viewer-city":"Sydney","http.request.header.referer":"https://shop.example.com/cart","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","edge.config_version":7,"edge.cohort":"active"}`},
+		{"an allowlisted client", accessRecord{
+			method: "GET", host: "shop.example.com", path: "/admin", status: 200, action: "allow", allowlist: "office-vpn", requestID: "req-6", upstream: true,
+			client: netip.MustParseAddr("203.0.113.9"), reqBytes: 0, respBytes: 2048, version: 7, cohort: "active", ver: v, blockIdx: -1,
+		}, `{"level":"INFO","msg":"access","http.request.method":"GET","server.address":"shop.example.com","url.path":"/admin","http.response.status_code":200,"request_id":"req-6","edge.action":"allow","edge.upstream_answered":true,"duration_ms":0,"edge.allowlist":"office-vpn","edge.sample_rate":0.25,"client.address":"203.0.113.9","http.request.body.size":0,"http.response.body.size":2048,"edge.config_version":7,"edge.cohort":"active"}`},
+		{"a client still banned by a trap", accessRecord{
+			method: "GET", host: "shop.example.com", path: "/", status: 403, action: "banned", decidedBy: "trap", requestID: "req-2",
+			client: netip.MustParseAddr("198.51.100.7"), reqBytes: -1, respBytes: 120, version: 7, cohort: "active", ver: v, blockIdx: -1,
+			ban: ratelimit.Ban{Rule: "trap", Start: banStart, End: banEnd, Host: "Shop.example.com:443", Path: "/.env"},
+		}, `{"level":"INFO","msg":"access","http.request.method":"GET","server.address":"shop.example.com","url.path":"/","http.response.status_code":403,"request_id":"req-2","edge.action":"banned","edge.upstream_answered":false,"duration_ms":0,"edge.decided_by":"trap","edge.ban.rule":"trap","edge.ban.since":"2026-11-22T10:00:00Z","edge.ban.host":"shop.example.com","edge.ban.path":"/.env","edge.ban.until":"2026-11-22T11:00:00Z","client.address":"198.51.100.7","http.response.body.size":120,"edge.config_version":7,"edge.cohort":"active"}`},
+		{"a trap that bans the client", accessRecord{
+			method: "GET", host: "shop.example.com", path: "/.env", status: 403, action: "blocked", decidedBy: "trap", requestID: "req-3",
+			client: netip.MustParseAddr("198.51.100.7"), reqBytes: -1, respBytes: 120, version: 7, cohort: "active", ver: v, matched: []int{1}, blockIdx: 1, blocked: true,
+			ban: ratelimit.Ban{Rule: "trap", Start: banStart, End: banEnd, Host: "shop.example.com", Path: "/.env"},
+		}, `{"level":"INFO","msg":"access","http.request.method":"GET","server.address":"shop.example.com","url.path":"/.env","http.response.status_code":403,"request_id":"req-3","edge.action":"blocked","edge.upstream_answered":false,"duration_ms":0,"edge.decided_by":"trap","edge.matched_rules":[{"rule":"trap","type":"access","result":"blocked"}],"edge.ban.until":"2026-11-22T11:00:00Z","client.address":"198.51.100.7","http.response.body.size":120,"edge.config_version":7,"edge.cohort":"active"}`},
+		{"a trap whose ban the full table dropped", accessRecord{
+			method: "GET", host: "shop.example.com", path: "/.git/config", status: 403, action: "blocked", decidedBy: "trap", requestID: "req-4",
+			client: netip.MustParseAddr("198.51.100.7"), reqBytes: -1, respBytes: 120, version: 7, cohort: "active", ver: v, matched: []int{1}, blockIdx: 1, blocked: true, banDropped: true,
+		}, `{"level":"INFO","msg":"access","http.request.method":"GET","server.address":"shop.example.com","url.path":"/.git/config","http.response.status_code":403,"request_id":"req-4","edge.action":"blocked","edge.upstream_answered":false,"duration_ms":0,"edge.decided_by":"trap","edge.matched_rules":[{"rule":"trap","type":"access","result":"blocked"}],"edge.ban.dropped":true,"client.address":"198.51.100.7","http.response.body.size":120,"edge.config_version":7,"edge.cohort":"active"}`},
+		{"an upstream error while a log-only rule matched", accessRecord{
+			method: "POST", host: "shop.example.com", path: "/checkout", query: "step=2", status: 502, action: "upstream_error", requestID: "req-5",
+			client: netip.MustParseAddr("198.51.100.7"), reqBytes: 18, respBytes: 90, version: 7, cohort: "candidate", ver: v, matched: []int{0}, blockIdx: 0, logged: true,
+			upErr: errors.New(`net/http: invalid header "Cookie: session=secret"`), cause: causeOther,
+		}, `{"level":"INFO","msg":"access","http.request.method":"POST","server.address":"shop.example.com","url.path":"/checkout","http.response.status_code":502,"request_id":"req-5","edge.action":"upstream_error","edge.upstream_answered":false,"duration_ms":0,"edge.query_keys":["step"],"edge.matched_rules":[{"rule":"watch-tools","type":"access","result":"logged"}],"edge.logged_rules":["watch-tools"],"client.address":"198.51.100.7","http.request.body.size":18,"http.response.body.size":90,"edge.upstream_error":"net/http: invalid header \"…\"","edge.upstream_error_kind":"other","edge.config_version":7,"edge.cohort":"candidate"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			attrs, keys = newGoldenLog(&buf).emit(tc.rec, attrs, keys)
+			// The time is the clock's; everything after it is fixed.
+			_, rest, ok := strings.Cut(buf.String(), `,"level":`)
+			if got := `{"level":` + rest; !ok || got != tc.want+"\n" {
+				t.Fatalf("line\n%s\nwant\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+var referenceParamName = regexp.MustCompile(`^[A-Za-z0-9_.\[\]-]{1,64}$`)
+
+// referenceQueryKeys is the slow, obviously correct queryKeys: a regexp, a
+// set and a sort.
+func referenceQueryKeys(raw string) (keys []string, dropped int) {
+	seen := map[string]bool{}
+	for pair := range strings.SplitSeq(raw, "&") {
+		if pair == "" {
+			continue
+		}
+		k, _, ok := strings.Cut(pair, "=")
+		k, err := url.QueryUnescape(k)
+		switch {
+		case !ok || err != nil || !referenceParamName.MatchString(k):
+			dropped++
+		case seen[k]:
+		case len(seen) == maxQueryKeys:
+			dropped++
+		default:
+			seen[k] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(seen)), dropped
+}
+
+// The client writes the query, so any raw query gives the same key list and
+// dropped count as the reference.
+func FuzzQueryKeysMatchReference(f *testing.F) {
+	many := make([]string, 40)
+	for i := range many {
+		many[i] = fmt.Sprintf("k%02d=1", 39-i)
+	}
+	for _, s := range []string{
+		"", "token=secret&b=1&a=2&a=3&&secretbare&secret" + strings.Repeat("x", 59) + "=1&%zz=1",
+		strings.Join(many, "&"), strings.Join(many, "&") + "&k00=2&k39=2",
+		"%61=1&a=2", "=1&==&a==b", "k%5B%5D=1&k[]=2", "a+b=1&+=2&%2B=3", "q%20x=1&cb/url=1",
+		strings.Repeat("y", 64) + "=1&" + strings.Repeat("z", 65) + "=1",
+		"\xff=1&\xc3\xa9=1&%C3%A9=1&%=1&%4=1",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		keys, dropped := queryKeys(nil, raw)
+		wantKeys, wantDropped := referenceQueryKeys(raw)
+		if !slices.Equal(keys, wantKeys) || dropped != wantDropped {
+			t.Fatalf("queryKeys(%q) = %q, %d; reference %q, %d", raw, keys, dropped, wantKeys, wantDropped)
+		}
+	})
+}
+
+// One browser-shaped line through the JSON handler, as the writer goroutine
+// formats it.
+func BenchmarkAccessLogEmit(b *testing.B) {
+	a := newGoldenLog(io.Discard)
+	rec := browserRecord(goldenVersion())
+	var attrs []slog.Attr
+	var keys []string
+	b.ReportAllocs()
+	for b.Loop() {
+		attrs, keys = a.emit(rec, attrs, keys)
 	}
 }

@@ -2,6 +2,8 @@ package edge
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -54,6 +56,59 @@ func TestHTTPSUpstreamIsNamedByTheRequestHost(t *testing.T) {
 		}
 	}
 	edgeError(t, h.do("GET", "/", nil, "Host", "other.example.com"), 502, "bad_gateway")
+}
+
+// The upstream compresses only when the client asks. The edge forwards the
+// client's Accept-Encoding as sent and the upstream's body as it came, so a
+// client that asks for nothing gets an identity body with its length, and
+// one that asks for gzip gets the upstream's gzip bytes.
+func TestUpstreamContentEncodingFollowsTheClient(t *testing.T) {
+	plain := strings.Repeat("upstream ok ", 100)
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = io.WriteString(zw, plain)
+	_ = zw.Close()
+
+	h := newHarness(t, nil)
+	h.load(envelope(testConfig(1)))
+	h.appHandler = func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") == "gzip" {
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write(gz.Bytes())
+			return
+		}
+		_, _ = io.WriteString(w, plain)
+	}
+	// The test client would otherwise add Accept-Encoding: gzip itself.
+	h.front.Client().Transport.(*http.Transport).DisableCompression = true
+
+	for _, tc := range []struct {
+		name, acceptEncoding, contentEncoding, body string
+	}{
+		{"a client that asks for no encoding gets the identity body with its length", "", "", plain},
+		{"a client that asks for gzip gets the upstream's gzip bytes", "gzip", "gzip", gz.String()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var headers []string
+			if tc.acceptEncoding != "" {
+				headers = []string{"Accept-Encoding", tc.acceptEncoding}
+			}
+			resp := h.do("GET", "/", nil, headers...)
+			body := readBody(t, resp)
+			h.mu.Lock()
+			got := h.lastApp.Header.Values("Accept-Encoding")
+			h.mu.Unlock()
+			if strings.Join(got, ",") != tc.acceptEncoding {
+				t.Errorf("upstream saw Accept-Encoding %q, want %q", got, tc.acceptEncoding)
+			}
+			if got := resp.Header.Get("Content-Encoding"); got != tc.contentEncoding {
+				t.Errorf("Content-Encoding %q, want %q", got, tc.contentEncoding)
+			}
+			if resp.ContentLength != int64(len(tc.body)) || body != tc.body {
+				t.Errorf("Content-Length %d and %d body bytes, want the upstream's %d bytes as sent", resp.ContentLength, len(body), len(tc.body))
+			}
+		})
+	}
 }
 
 // A client can send any Host. One the load balancer has no certificate for

@@ -48,19 +48,37 @@ func compileWildcard(pattern string, foldCase bool) (wildcard, error) {
 	return w, nil
 }
 
+func (w wildcard) match(s string) bool { return wildcards{w}.match(s) }
+
+// wildcards matches when any of its patterns does. The patterns share one
+// copy and fold of the value, so a value list costs one fold, not one per
+// pattern. All patterns have the same foldCase.
+type wildcards []wildcard
+
 // match copies the value into a stack buffer so case folding needs no
-// allocation. The first segment must be a prefix, middle segments are found
-// left to right, and the last must be a suffix of what remains. Leftmost
-// matching is correct when "*" is the only metacharacter.
-func (w wildcard) match(s string) bool {
+// allocation.
+func (ws wildcards) match(s string) bool {
 	var buf [512]byte
 	// ponytail: values over 512 bytes allocate once; raise if paths get longer.
 	b := append(buf[:0], s...)
-	if w.foldCase {
+	if ws[0].foldCase {
 		for i, c := range b {
 			b[i] = lowerASCII(c)
 		}
 	}
+	for _, w := range ws {
+		if w.matchFolded(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchFolded matches an already folded value. It only reslices b, so
+// patterns can share it. The first segment must be a prefix, middle segments
+// are found left to right, and the last must be a suffix of what remains.
+// Leftmost matching is correct when "*" is the only metacharacter.
+func (w wildcard) matchFolded(b []byte) bool {
 	if len(w.segs) == 1 {
 		return bytes.Equal(b, w.segs[0])
 	}

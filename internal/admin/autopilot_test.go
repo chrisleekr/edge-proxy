@@ -321,6 +321,7 @@ func TestAutopilotPermissions(t *testing.T) {
 		in           any
 	}{
 		{"the runner's token can't read the draft", "GET", "/api/draft", nil},
+		{"the runner's token can't preview a template", "POST", "/api/templates/preview", map[string]any{"status": 403, "content_type": "text/plain; charset=utf-8", "body": "x"}},
 		{"the runner's token can't read the autopilot page", "GET", "/api/autopilot", nil},
 		{"the runner's token can't read the settings", "GET", "/api/settings/autopilot", nil},
 		{"the runner's token can't change the settings", "PUT", "/api/settings/autopilot", map[string]any{"mode": "auto"}},

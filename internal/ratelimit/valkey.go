@@ -258,7 +258,13 @@ type topology struct {
 	addrs []string
 }
 
-func (t *topology) breaker(key string) *breaker { return t.nodes[t.slots[slot(key)]] }
+func (t *topology) breaker(key string) *breaker {
+	// One node owns every slot, so the hash would pick it anyway.
+	if len(t.nodes) == 1 {
+		return t.nodes[0]
+	}
+	return t.nodes[t.slots[slot(key)]]
+}
 
 // refresh reads the slot map, keeping breaker state for nodes that remain.
 func (v *Valkey) refresh(ctx context.Context, c *client) error {
@@ -317,7 +323,16 @@ func slot(key string) uint16 {
 	}
 	var crc uint16
 	for i := 0; i < len(key); i++ {
-		crc ^= uint16(key[i]) << 8
+		crc = crc<<8 ^ crc16Table[byte(crc>>8)^key[i]]
+	}
+	return crc % 16384
+}
+
+// crc16Table is the CRC16-XMODEM (polynomial 0x1021) of each byte value,
+// so slot does one lookup per byte instead of eight shifts.
+var crc16Table = func() (t [256]uint16) {
+	for b := range t {
+		crc := uint16(b) << 8
 		for range 8 {
 			if crc&0x8000 != 0 {
 				crc = crc<<1 ^ 0x1021
@@ -325,6 +340,7 @@ func slot(key string) uint16 {
 				crc <<= 1
 			}
 		}
+		t[b] = crc
 	}
-	return crc % 16384
-}
+	return t
+}()

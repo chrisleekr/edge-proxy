@@ -36,9 +36,17 @@ func newTransport(c *Config) *http.Transport {
 		TLSClientConfig: &tls.Config{RootCAs: upstreamRoots, MinVersion: tls.VersionTLS12},
 		// Pools are per Host for an https upstream, and a client picks the
 		// Host, so the total is capped too.
-		MaxIdleConns:          c.MaxIdleConns,
-		MaxIdleConnsPerHost:   c.MaxIdleConns,
-		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:        c.MaxIdleConns,
+		MaxIdleConnsPerHost: c.MaxIdleConns,
+		// Below the 60s idle timeout common to load balancers and gateways,
+		// so the edge closes idle upstream connections first. Go does not
+		// resend a non-idempotent request, such as a POST, that meets a
+		// connection the upstream just closed, and the client gets a 502.
+		IdleConnTimeout: 50 * time.Second,
+		// The edge forwards the client's Accept-Encoding as sent. Otherwise
+		// the transport asks for gzip itself and decompresses the response,
+		// dropping its Content-Length.
+		DisableCompression:    true,
 		TLSHandshakeTimeout:   c.DialTimeout,
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,

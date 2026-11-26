@@ -222,6 +222,7 @@ func TestValueListMatchingDoesNotAllocate(t *testing.T) {
 	for _, n := range []Node{
 		valueListRule("http.user_agent", "contains", "agents"),
 		valueListRule("http.user_agent", "not_contains", "agents"),
+		valueListRule("http.user_agent", "wildcard", "agents"),
 		valueListRule("ip.src.country", "in", "eu"),
 		valueListRule("ip.src.asnum", "in", "asns"),
 	} {
@@ -231,6 +232,35 @@ func TestValueListMatchingDoesNotAllocate(t *testing.T) {
 		}
 		if allocs := testing.AllocsPerRun(100, func() { m(req) }); allocs != 0 {
 			t.Errorf("%s: %v allocations per match", Render(n), allocs)
+		}
+	}
+}
+
+// botAgents is a 32-pattern user agent wildcard list, none of which matches
+// chromeUA, so a match tries every pattern.
+var botAgents = []string{
+	"*bot*", "*crawler*", "*spider*", "*scraper*", "curl/*", "wget/*", "python-requests/*", "python-urllib/*",
+	"go-http-client/*", "java/*", "okhttp/*", "libwww-perl/*", "scrapy/*", "httpclient/*", "axios/*", "node-fetch/*",
+	"*headlesschrome*", "*phantomjs*", "*selenium*", "*puppeteer*", "*playwright*", "*zgrab*", "*masscan*", "*nikto*",
+	"*sqlmap*", "*nmap*", "*httrack*", "*ahrefs*", "*semrush*", "*mj12*", "*dotbot*", "*petalbot*",
+}
+
+const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+// Cost of one rule matching a real browser user agent against a 32-pattern
+// wildcard value list, the shape of a bot-blocking rule.
+func BenchmarkMatchUserAgentWildcardList(b *testing.B) {
+	env := valueListEnv
+	env.Lists = map[string]ValueList{"bots": {Field: "http.user_agent", Values: botAgents}}
+	m, is := Compile(valueListRule("http.user_agent", "wildcard", "bots"), env)
+	if is != nil {
+		b.Fatalf("Compile: %v", Issues(is))
+	}
+	req := &fakeReq{str: map[string]string{"http.user_agent": chromeUA}}
+	b.ReportAllocs()
+	for b.Loop() {
+		if m(req) {
+			b.Fatal("matched")
 		}
 	}
 }

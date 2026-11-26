@@ -186,7 +186,8 @@ func Simulate(c *snapshot.Compiled, req SimRequest) (SimResult, error) {
 	}
 	// A trusted client skips step 8 but still gets the header phase.
 	if !set.allowed() {
-		checks, capped, reject := st.planChecks(&version{c: c, rules: ratelimit.Compile(c.Config.RateLimitRules)}, nil)
+		rules := ratelimit.Compile(c.Config.RateLimitRules)
+		checks, capped, reject := st.planChecks(&version{c: c, rules: rules, order: rlOrder(rules, c.SiteWide)}, nil)
 		for _, ch := range checks {
 			res.RateLimitRules = append(res.RateLimitRules, ch.rule.ID)
 		}

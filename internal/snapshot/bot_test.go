@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -209,7 +210,7 @@ func TestForbiddenTemplateNameCollision(t *testing.T) {
 				t.Fatalf("forbidden maps to %q (%+v), want %q", got, out.Config.Global.Responses[got], tc.want)
 			}
 			for n, r := range tc.existing {
-				if out.Config.Global.Responses[n] != r {
+				if !reflect.DeepEqual(out.Config.Global.Responses[n], r) {
 					t.Fatalf("template %q changed to %+v", n, out.Config.Global.Responses[n])
 				}
 			}

@@ -197,28 +197,31 @@ func (id *identity) fromXFF(vals []string) (netip.Addr, error) {
 // viewer reads trusted viewer fields. A malformed value counts as absent:
 // it can't be matched on, and the request still goes through (P1).
 func (id *identity) viewer(h http.Header, c *client) {
+	// The names are canonical, so a map read skips the canonicalization
+	// Header.Get repeats on every request.
+	get := func(name string) string { v, _ := first(h[name]); return v }
 	if id.country != "" {
-		c.country = isoCode(h.Get(id.country))
+		c.country = isoCode(get(id.country))
 	}
 	if id.continent != "" {
-		c.continent = isoCode(h.Get(id.continent))
+		c.continent = isoCode(get(id.continent))
 	}
 	// An absent header skips parsing: ParseInt("") allocates its error.
-	if v := h.Get(id.asn); id.asn != "" && v != "" {
+	if v := get(id.asn); id.asn != "" && v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			c.asn, c.hasASN = n, true
 		}
 	}
 	if id.ssl != "" {
 		// A scheme from most CDNs, true or false from GCP's {client_encrypted}.
-		v := h.Get(id.ssl)
+		v := get(id.ssl)
 		c.ssl, c.hasSSL = strings.EqualFold(v, "https") || strings.EqualFold(v, "true"), true
 	}
 	if id.version != "" {
-		c.version = expr.HTTPVersion(h.Get(id.version))
+		c.version = expr.HTTPVersion(get(id.version))
 	}
 	if id.cert != "" {
-		c.certVerified = strings.EqualFold(h.Get(id.cert), "true")
+		c.certVerified = strings.EqualFold(get(id.cert), "true")
 	}
 	// A fingerprint exists only for TLS: on a request the CDN saw as plain
 	// HTTP, any value came from the client.
@@ -226,10 +229,10 @@ func (id *identity) viewer(h http.Header, c *client) {
 		return
 	}
 	// A CDN sends "" when it can't tell; any other malformed value is absent too.
-	if v := h.Get(id.ja4); id.ja4 != "" && expr.ValidJA4(v) {
+	if v := get(id.ja4); id.ja4 != "" && expr.ValidJA4(v) {
 		c.ja4 = v
 	}
-	if v := h.Get(id.ja3); id.ja3 != "" && expr.ValidJA3(v) {
+	if v := get(id.ja3); id.ja3 != "" && expr.ValidJA3(v) {
 		c.ja3 = v
 	}
 }

@@ -45,6 +45,8 @@ export interface RuleChoices {
   header_ops: string[];
   response_kinds: { name: string; status: number }[];
   content_types: string[];
+  // Each kind's default bodies, problem+json first, which new bodies start from.
+  response_bodies: Record<string, { content_type: string; body: string }[]>;
   jwt_algorithms: string[];
   methods: string[];
   block_modes: string[];

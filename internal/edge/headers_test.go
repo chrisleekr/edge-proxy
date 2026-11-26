@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,6 +50,35 @@ func TestForwardFilterKeepsTraceContext(t *testing.T) {
 		if got.Get("Traceparent") != tp || got.Get("Tracestate") != "vendor=abc" {
 			t.Errorf("%s: upstream trace context %q %q", path, got.Get("Traceparent"), got.Get("Tracestate"))
 		}
+	}
+}
+
+// An allowlist runs on every request it covers, and a browser sends about
+// twenty headers it drops: dropping them costs one map read each.
+func TestForwardAllowlistAllocatesNothing(t *testing.T) {
+	f := compileForward(snapshot.Forward{Mode: "allowlist", Names: []string{"accept", "authorization", "user-agent"}})
+	browser := http.Header{}
+	for _, k := range []string{
+		"Accept", "Authorization", "User-Agent", "Traceparent", "Tracestate", "X-Request-Id", "Te", "Forwarded", // kept
+		"Accept-Encoding", "Accept-Language", "Cache-Control", "Cookie", "Dnt", "Origin", "Pragma", "Priority", "Referer",
+		"Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform", "Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site",
+		"Sec-Fetch-User", "Upgrade-Insecure-Requests", "If-None-Match", "If-Modified-Since", "Sec-Gpc",
+	} {
+		browser.Set(k, "v")
+	}
+	const runs = 100
+	hs := make([]http.Header, runs+1) // AllocsPerRun calls once more to warm up
+	for i := range hs {
+		hs[i] = browser.Clone()
+	}
+	f.apply(browser)
+	want := []string{"Accept", "Authorization", "Forwarded", "Te", "Traceparent", "Tracestate", "User-Agent", "X-Request-Id"}
+	if got := slices.Sorted(maps.Keys(browser)); !slices.Equal(got, want) {
+		t.Fatalf("kept %v, want %v", got, want)
+	}
+	i := 0
+	if n := testing.AllocsPerRun(runs, func() { f.apply(hs[i]); i++ }); n != 0 {
+		t.Fatalf("%v allocations per request", n)
 	}
 }
 

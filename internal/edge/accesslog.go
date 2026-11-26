@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
-	"maps"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -211,10 +210,14 @@ func (a *accessLog) write(st *reqState, r *http.Request, elapsed time.Duration, 
 // select picks either ready case at random, so buffered lines are written
 // by the same case either way and run returns only when the buffer is empty.
 func (a *accessLog) run(ctx context.Context) {
+	// Lines reuse these buffers: they are local to this goroutine, and slog
+	// copies the attrs into its Record and writes it before LogAttrs returns.
+	var attrs []slog.Attr
+	var keys []string
 	for {
 		select {
 		case rec := <-a.ch:
-			guard(a.m, a.log, "access log", func() { a.emit(rec) })
+			guard(a.m, a.log, "access log", func() { attrs, keys = a.emit(rec, attrs, keys) })
 		case <-ctx.Done():
 			if len(a.ch) == 0 {
 				return
@@ -223,16 +226,30 @@ func (a *accessLog) run(ctx context.Context) {
 	}
 }
 
-// paramName is what a query key must look like to be logged.
-var paramName = regexp.MustCompile(`^[A-Za-z0-9_.\[\]-]{1,64}$`)
+// paramName reports whether a query key may be logged: 1 to 64 of
+// A-Z a-z 0-9 _ . [ ] -.
+func paramName(k string) bool {
+	if len(k) == 0 || len(k) > 64 {
+		return false
+	}
+	for i := range len(k) {
+		c := k[i]
+		ok := 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("_.[]-", c) >= 0
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
 
 const maxQueryKeys = 32
 
-// queryKeys returns the unique parameter names in a raw query, sorted. A
-// pair without "=" can be a bare token, and an odd or long key can be a
-// secret, so those, and keys past maxQueryKeys, are only counted.
-func queryKeys(raw string) (keys []string, dropped int) {
-	seen := map[string]bool{}
+// queryKeys appends the unique parameter names in a raw query to the empty
+// dst, sorted. A pair without "=" can be a bare token, and an odd or long key
+// can be a secret, so those, and keys past maxQueryKeys, are only counted.
+// At most maxQueryKeys are kept, so a linear search finds duplicates.
+func queryKeys(dst []string, raw string) (keys []string, dropped int) {
+	keys = dst
 	for pair := range strings.SplitSeq(raw, "&") {
 		if pair == "" {
 			continue
@@ -240,16 +257,17 @@ func queryKeys(raw string) (keys []string, dropped int) {
 		k, _, ok := strings.Cut(pair, "=")
 		k, err := url.QueryUnescape(k)
 		switch {
-		case !ok || err != nil || !paramName.MatchString(k):
+		case !ok || err != nil || !paramName(k):
 			dropped++
-		case seen[k]:
-		case len(seen) == maxQueryKeys:
+		case slices.Contains(keys, k):
+		case len(keys) == maxQueryKeys:
 			dropped++
 		default:
-			seen[k] = true
+			keys = append(keys, k)
 		}
 	}
-	return slices.Sorted(maps.Keys(seen)), dropped
+	slices.Sort(keys)
+	return keys, dropped
 }
 
 // maxUpstreamError bounds the logged error message. A TLS error names the
@@ -311,9 +329,10 @@ func otelHTTPVersion(v string) string {
 // MAX_HEADER_BYTES, and rejections are always logged.
 const maxUserAgent = 512
 
-// emit uses OTel HTTP semantic-convention names where they exist.
-func (a *accessLog) emit(rec accessRecord) {
-	attrs := []slog.Attr{
+// emit uses OTel HTTP semantic-convention names where they exist. It writes
+// the line from attrs and keys reset to empty, and returns them for reuse.
+func (a *accessLog) emit(rec accessRecord, attrs []slog.Attr, keys []string) ([]slog.Attr, []string) {
+	attrs = append(attrs[:0],
 		slog.String("http.request.method", rec.method),
 		slog.String("server.address", hostOnly(rec.host)),
 		slog.String("url.path", rec.path),
@@ -322,8 +341,8 @@ func (a *accessLog) emit(rec accessRecord) {
 		slog.String("edge.action", rec.action),
 		slog.Bool("edge.upstream_answered", rec.upstream),
 		slog.Float64("duration_ms", float64(rec.duration)/float64(time.Millisecond)),
-	}
-	keys, dropped := queryKeys(rec.query)
+	)
+	keys, dropped := queryKeys(keys[:0], rec.query)
 	if len(keys) > 0 {
 		attrs = append(attrs, slog.Any("edge.query_keys", keys))
 	}
@@ -428,6 +447,7 @@ func (a *accessLog) emit(rec accessRecord) {
 		attrs = append(attrs, slog.Int64("edge.config_version", rec.version), slog.String("edge.cohort", rec.cohort))
 	}
 	a.log.LogAttrs(context.Background(), slog.LevelInfo, "access", attrs...)
+	return attrs, keys
 }
 
 // ruleEntry is one matched rule on the access line: what it did, and for a
