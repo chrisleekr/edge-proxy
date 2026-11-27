@@ -27,11 +27,15 @@ The edge and admin are static Go binaries on distroless, and the runner is Node 
 |---|---|---|
 | CDN, WAF or load balancer in front | edge | Must set a client-IP header the edge can trust: CloudFront, Cloudflare, a named header, or `X-Forwarded-For` |
 | Load balancer or gateway behind | edge | `UPSTREAM_URL`. It routes each host and path to a service. Over HTTPS it must present a certificate for every host it serves, because the edge names the request's host in TLS |
-| Valkey, standalone or cluster (tested with 9.1) | edge | Rate-limit state only. No persistence needed; every key has a TTL. A cluster must set `cluster-require-full-coverage no`: with the default `yes`, one failed primary makes [every node refuse every key](https://github.com/valkey-io/valkey/blob/unstable/valkey.conf), while the edge's per-node breaker can only contain a failure that stays on that node's keys |
-| Postgres (tested with 18.6) | admin | Source of truth for policy, versions, users, stats and audit |
+| Valkey, standalone or cluster (tested with 9.2) | edge | Rate-limit state only. No persistence needed; every key has a TTL. A cluster must set `cluster-require-full-coverage no`, as explained below |
+| Postgres (tested with 19.0) | admin | Source of truth for policy, versions, users, stats and audit |
 | HTTPS in front of admin | admin | The session cookie is `Secure`; browsers allow it over plain HTTP only on `localhost` |
 
-The images don't set `GOMEMLIMIT`. Under a container memory limit, set it to about 90% of the limit (for 256 MiB, `GOMEMLIMIT=230MiB`), so the Go garbage collector [works harder before the container is killed](https://go.dev/doc/gc-guide#Memory_limit). The Helm chart sets it for both deployables. Go [takes `GOMAXPROCS` from the container's CPU limit](https://go.dev/doc/go1.25#container-aware-gomaxprocs), or uses every host CPU without one. Admin runs that many sign-in hashes at once (at least 2), 19 MiB each, so without a CPU limit set `GOMAXPROCS` on admin low enough to fit its memory limit; the chart sets `2`.
+**Valkey cluster:** with the default `yes`, one failed primary makes [every node refuse every key](https://github.com/valkey-io/valkey/blob/unstable/valkey.conf), while the edge's per-node breaker can only contain a failure that stays on that node's keys.
+
+The images don't set `GOMEMLIMIT`. Under a container memory limit, set it to about 90% of the limit (for 256 MiB, `GOMEMLIMIT=230MiB`), so the Go garbage collector [works harder before the container is killed](https://go.dev/doc/gc-guide#Memory_limit). The Helm chart sets it for both deployables.
+
+Go [takes `GOMAXPROCS` from the container's CPU limit](https://go.dev/doc/go1.25#container-aware-gomaxprocs), or uses every host CPU without one. Admin runs that many sign-in hashes at once (at least 2), 19 MiB each, so without a CPU limit set `GOMAXPROCS` on admin low enough to fit its memory limit; the chart sets `2`.
 
 ## Install
 
@@ -90,7 +94,11 @@ Admin needs the edge's `CLIENT_IP_SOURCE`, and `VIEWER_HEADERS`, `CDN_HEADERS`, 
 docker run -d --env-file admin.env -p 127.0.0.1:8081:8081 chrisleekr/edge-proxy-admin
 ```
 
-It listens on `:8081` for the API and UI, and on `:9091` for `/metrics`, which has no authentication: let only your metrics scraper reach `:9091`, and never publish it. Docker [publishes ports on all interfaces](https://docs.docker.com/engine/network/port-publishing/) unless given an address, hence `127.0.0.1`; if the proxy runs in a container, put both on a private Docker network and publish no port instead. Put it behind an internal HTTPS proxy that appends `X-Forwarded-For`, and set `ADMIN_TRUSTED_PROXIES` to that proxy's addresses so login throttling sees each client rather than the proxy.
+It listens on `:8081` for the API and UI, and on `:9091` for `/metrics`, which has no authentication: let only your metrics scraper reach `:9091`, and never publish it.
+
+Docker [publishes ports on all interfaces](https://docs.docker.com/engine/network/port-publishing/) unless given an address, hence `127.0.0.1`; if the proxy runs in a container, put both on a private Docker network and publish no port instead.
+
+Put it behind an internal HTTPS proxy that appends `X-Forwarded-For`, and set `ADMIN_TRUSTED_PROXIES` to that proxy's addresses so login throttling sees each client rather than the proxy.
 
 ### 4. First admin user
 
@@ -129,12 +137,36 @@ Ports: `:8080` for traffic, `:9090` for `/livez`, `/readyz` and `/metrics`. Neve
 
 | Setting | Value |
 |---|---|
-| Readiness / target health check | `GET :9090/readyz`. It is 200 once a policy is loaded and the edge isn't draining. It never reflects Valkey, admin or IdP health, so an outage of those can't take edges out of rotation |
+| Readiness / target health check | `GET :9090/readyz`: 200 once a policy is loaded and the edge isn't draining. It never reflects Valkey, admin or IdP health |
 | Liveness | `GET :9090/livez` |
 | Idle timeout | Below the edge's `IDLE_TIMEOUT` (75s) |
 | Termination grace period | More than `DRAIN_DELAY` + `SHUTDOWN_TIMEOUT` (10s + 30s by default), plus `TRACE_SHUTDOWN_TIMEOUT` (5s) with tracing on |
 
+Because `/readyz` ignores those dependencies, an outage of them can't take edges out of rotation.
+
 On SIGTERM the edge fails `/readyz`, waits `DRAIN_DELAY` for the load balancer to notice, then finishes in-flight requests for up to `SHUTDOWN_TIMEOUT`. With tracing on, it then flushes buffered spans for up to `TRACE_SHUTDOWN_TIMEOUT`.
+
+### Check it works
+
+Run these from a host that can reach the edge. `EDGE_HOST` is an edge's address, and the first two checks need no sign-in.
+
+1. Readiness. The internal port answers 200 with `ready` once the edge has loaded a policy. Before the first publish, or while the edge drains, it answers 503 with `not ready`. `/livez` answers `ok` while the first policy is still loading.
+
+    ```bash
+    curl -i http://EDGE_HOST:9090/readyz
+    ```
+
+2. A request through the edge. Send it from an address in `TRUSTED_PROXIES`, with the client-IP header your `CLIENT_IP_SOURCE` reads (here the `cloudfront` form, `ip:port`; use `CF-Connecting-IP: 203.0.113.7` for `cloudflare`), and add your `INGRESS_SECRET_HEADER` if you set one. Use a host and path your upstream serves. You should get the upstream's answer. A 400 means the peer isn't in `TRUSTED_PROXIES` or the client-IP header is missing or malformed. With `CLIENT_IP_SOURCE=remote_addr` the client IP is the TCP peer, so send the request directly, with no client-IP header and no `TRUSTED_PROXIES` entry.
+
+    ```bash
+    curl -i -H 'Host: app.example.com' -H 'CloudFront-Viewer-Address: 203.0.113.7:4711' -H 'X-Request-Id: check-1' http://EDGE_HOST:8080/
+    ```
+
+3. The request ID. A trusted peer's `X-Request-Id` is kept when it uses only letters, digits, `.`, `_` and `-` and is at most 128 bytes; otherwise the edge generates one. The edge sends it to the upstream in the `X-Request-Id` request header and writes it as `request_id` on the edge's access line (the JSON log line whose `msg` is `access`), so look for `check-1` in both. With `CLIENT_IP_SOURCE=remote_addr` and a sender outside `TRUSTED_PROXIES`, the edge replaces `check-1` with its own ID, so compare the `request_id` on the access line with the `X-Request-Id` the upstream received. With `LOG_SAMPLE_RATE` below 1 an allowed request may not be logged, so check the upstream's copy then. Proxied responses carry whatever the upstream sent; the edge sets `X-Request-Id` itself only on responses it generates, such as a rejection.
+
+4. The fleet. Sign in to admin and open **Fleet**. The edge's row shows the **reporting** badge, **Versions loaded** reads `v1 live` (the version you published), and **Config from** reads `admin`. A row marked **settings differ** means the edge's `CLIENT_IP_SOURCE`, `VIEWER_HEADERS`, `INGRESS_SECRET_HEADER`, `CDN_HEADERS` or `ALLOW_REGEX` differs from admin's, which holds publishing. With no edge listed, check `ADMIN_URL` and the edge token.
+
+5. One rule. Open **Tests and simulate**, pick **Run against** a published version, set the method, host and path of a request one of your rules should act on, and press **Simulate**. **Outcome** reads **sent to the upstream** or says why the edge would refuse it (for example "rejected with 403: an access rule blocks the request"), and **Access rules** and **Rate limit rules** list the rules that matched. Simulated rate limits are matched but not counted. To keep the check, add a test under **Policy tests** and press **Run tests on the saved draft**: each shows **pass** or **fail**, and failing tests block publish. See [Tests and simulate](../tour/release.md#tests-and-simulate).
 
 ### 8. Ship edge access logs to admin (optional)
 

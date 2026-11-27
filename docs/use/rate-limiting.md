@@ -4,6 +4,8 @@ Each rule keeps one counter per key in Valkey, shared by every edge, so a limit 
 
 ## A rule
 
+![Rule editor](../assets/screenshots/rule-editor.png)
+
 ```json
 {
   "id": "login",
@@ -36,7 +38,13 @@ This is the rule's **Then** block in the UI; its expression (here `http.request.
 
 ## Before you block: shadow mode
 
-Start every rule in shadow mode, `"action": "log"`: it counts the requests it would have limited and lets them through. A rule added in the UI starts that way. **Stats** shows its **Logged instead of limited** count against real traffic, with the clients it would hit, and **Needs attention** on the dashboard lists log-only rules with requests over their limit. Each request it would have limited is also written to the [access log](../operate/monitoring.md#logs), whatever `LOG_SAMPLE_RATE` is, with the rule in `edge.logged_rules` and its entry in `edge.matched_rules` (`result` `logged`). Switch it to `block` once the numbers look right, and publish that change through a [canary](publishing.md#canary) so only part of the traffic sees it first. The [rollback guard](publishing.md#rollback-guard) compares a changed rule with what it found while it only logged.
+Start every rule in shadow mode, `"action": "log"`: it counts the requests it would have limited and lets them through. A rule added in the UI starts that way. Switch it to `block` once the numbers look right.
+
+- **Stats** shows its **Logged instead of limited** count against real traffic, with the clients it would hit.
+- **Needs attention** on the dashboard lists log-only rules with requests over their limit.
+- Each request it would have limited is also written to the [access log](../operate/monitoring.md#logs), whatever `LOG_SAMPLE_RATE` is, with the rule in `edge.logged_rules` and its entry in `edge.matched_rules` (`result` `logged`).
+- Publish the switch to `block` through a [canary](publishing.md#canary) so only part of the traffic sees it first.
+- The [rollback guard](publishing.md#rollback-guard) compares a changed rule with what it found while it only logged.
 
 ## How a request is checked
 
@@ -284,7 +292,7 @@ sequenceDiagram
 A rule with `expires_at` stops running at that time, with no second publish. From then on every edge skips it: it takes no slot among the 5 rules a request runs, a client serving its penalty is let through, and `/metrics` counts the request as `expired` for the rule. Policy tests judge the expiry at the time they run.
 
 - **Each edge uses its own clock.** Edges whose clocks differ end the rule that much apart; run NTP on every host.
-- **It needs schema 5 edges.** Admin holds the publish while a live edge reads an older schema, naming it.
+- **It needs schema 5 edges.** Admin refuses the publish while a live edge reads an older schema, naming that edge.
 - **An expired rule stays valid.** It is skipped, not rejected, so a bootstrap file exported while it ran still loads. A save or check of the draft warns about a rule of yours whose `expires_at` has passed: the rule will not run.
 
 [Autopilot rules](publishing.md#autopilot-rules) always expire, at most 24 hours after they are published.
@@ -356,6 +364,13 @@ Every rule then follows its `fail_mode`.
 Before any shared limit, each edge applies a per-IP token bucket in memory (**Settings → Backstop**). It absorbs floods without touching Valkey and works even when Valkey is down. It is per edge, so the effective ceiling is about the number of edges × the setting. Set it well above any real client's rate.
 
 When its table is full, new IPs pass the backstop untracked rather than share one bucket; the shared limits still apply to them.
+
+| Field (`global.backstop`) | Card label | Starter value | Allowed |
+|---|---|---|---|
+| `limit` | Allow each IP … requests | 100 | 1 to 1,000,000,000 |
+| `period` | … every | `1s` | whole seconds, 1 second to 1 hour |
+| `burst` | Burst | 200 | 1 to 1,000,000,000 |
+| `max_entries` | IPs tracked per edge | 100,000 | 1 to 10,000,000 |
 
 ## Trusted clients
 

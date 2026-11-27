@@ -58,13 +58,41 @@ make demo-outage
 
 ## 3. Change the policy
 
-1. Open the admin UI and sign in.
-2. On **Rules**, open `login-per-ip`. In **Then**, set **Limit** to `5`, then **Apply to draft** and **Save draft**.
-3. On **Publish**, enter a message and press **Publish to all traffic**.
-4. Within a few seconds the edge loads the new version. Run the loop again with a new IP, such as `203.0.113.10`, and `seq 1 7`: five requests get through.
-5. On **Versions**, open the new version and **Revert** it if you want the old limit back. A revert is itself a new version.
+Open the admin UI at `http://127.0.0.1:8081` and sign in.
 
-Every step you took is on **Audit log**.
+### Dashboard
+
+The first screen after sign-in: what needs attention, how traffic is doing and what changed.
+
+![Dashboard](assets/screenshots/dashboard.png)
+
+### Rules: raise the login limit
+
+Every rule, by phase, with what it matched and blocked. Open `login-per-ip`. In **Then**, set **Limit** to `5`, then **Apply to draft** and **Save draft**.
+
+![Rule editor](assets/screenshots/rule-editor.png)
+
+### Publish: send it to the edges
+
+Compare the saved draft with the live version and publish it. Enter a message and press **Publish to all traffic**.
+
+![Publish](assets/screenshots/publish.png)
+
+Within a few seconds the edge loads the new version. Run the loop again with a new IP, such as `203.0.113.10`, and `seq 1 7`: five requests get through.
+
+### Versions: undo it
+
+Every publish as a numbered version, with its author and message. Open the new version and **Revert** it if you want the old limit back.
+
+![Versions](assets/screenshots/versions.png)
+
+### Audit log: see what you did
+
+Every change, by whom and when, with its diff.
+
+![Audit log](assets/screenshots/audit.png)
+
+Every page of the admin UI, with what it is for, is in the [admin UI tour](tour/index.md).
 
 ## 4. Clean up
 
@@ -77,5 +105,6 @@ make demo-down
 
 ## Next
 
+- [Use cases](use/cases/index.md): a ready rule for each common job, with a flow diagram and a policy test.
 - [Policy](use/policy.md): what rules can match and do.
-- [Dashboard](use/dashboard.md): every page of the admin UI.
+- [Admin UI tour](tour/index.md): every page of the admin UI, with what it is for.

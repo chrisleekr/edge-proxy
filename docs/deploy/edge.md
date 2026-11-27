@@ -11,9 +11,15 @@ These decide whom the edge believes. They come only from the deployment, never f
 | `CLIENT_IP_SOURCE` | required | `cloudfront`, `cloudflare`, `gcp`, `header:<Name>:ip`, `header:<Name>:ip_port`, `xff` or `remote_addr`. See [Client IP presets](#client-ip-presets) |
 | `TRUSTED_PROXIES` | required unless `remote_addr` | IPs or CIDRs of the hop directly in front of the edge, usually your LB. A request from any other peer is rejected; the edge never falls back to the peer address. See [which hop to list](#client-ip-presets) |
 | `VIEWER_HEADERS` | from the preset | `field=Header,...` for country, continent, ASN, scheme, HTTP version, client-certificate verification and the JA4 and JA3 TLS fingerprints. A rule can use a viewer field only if a trusted source is configured |
-| `CDN_HEADERS` | from the preset | Comma-separated names of the headers your CDN sets, or `none` (case-insensitive). Each is logged on every access line and offered to rules (except source and edge-managed headers), and admin must have the same value. Which of them rules may trust is [policy](#cdn-headers). The `cloudfront` and `cloudflare` presets list their CDN's documented headers; `gcp` and the other sources list none. A list replaces the preset's. Refused at startup: `Authorization`, `Proxy-Authorization`, `Cookie`, `Referer`, `Cf-Access-Jwt-Assertion`, `Cf-Access-Client-Id`, `Cf-Access-Client-Secret`, `X-Goog-Iap-Jwt-Assertion`, `X-Amzn-Oidc-Accesstoken`, `X-Amzn-Oidc-Data`, `CloudFront-Error-Args`, `CloudFront-Error-Uri`, the `INGRESS_SECRET_HEADER`, a header every access line already logs, more than 48 names and any list with `remote_addr`. See [CDN headers](#cdn-headers) |
+| `CDN_HEADERS` | from the preset | Comma-separated names of the headers your CDN sets, or `none` (case-insensitive). Each is logged on every access line and offered to rules, and admin must have the same value. See [CDN headers](#cdn-headers) and the refusals below |
 | `INGRESS_SECRET_HEADER`, `INGRESS_SECRET_VALUES` | off | A header your CDN adds with a secret value. Requests without a matching value are rejected, and the header is removed before forwarding. Several values allow rotation |
 | `ALLOW_REGEX` | `false` | Allows the `matches` operator in rules |
+
+**`CDN_HEADERS`**:
+
+- Source and edge-managed headers are logged but not offered to rules. Which listed headers rules may trust is [policy](#cdn-headers).
+- The `cloudfront` and `cloudflare` presets list their CDN's documented headers; `gcp` and the other sources list none. A list replaces the preset's.
+- Refused at startup: `Authorization`, `Proxy-Authorization`, `Cookie`, `Referer`, `Cf-Access-Jwt-Assertion`, `Cf-Access-Client-Id`, `Cf-Access-Client-Secret`, `X-Goog-Iap-Jwt-Assertion`, `X-Amzn-Oidc-Accesstoken`, `X-Amzn-Oidc-Data`, `CloudFront-Error-Args`, `CloudFront-Error-Uri`, the `INGRESS_SECRET_HEADER`, a header every access line already logs, more than 48 names and any list with `remote_addr`.
 
 ### Client IP presets
 
@@ -28,9 +34,16 @@ These decide whom the edge believes. They come only from the deployment, never f
 | `xff` | `X-Forwarded-For`, the rightmost entry not in `TRUSTED_PROXIES`, or the leftmost if every entry is trusted | none |
 | `remote_addr` | The TCP peer. Use it only when nothing sits in front of the edge | none; `VIEWER_HEADERS` and `CDN_HEADERS` are refused |
 
-The viewer fields are `ip.src.country`, `ip.src.continent`, `ip.src.asnum`, `ssl`, `http.request.version`, `client_cert.verified`, `tls.client.ja4` and `tls.client.ja3`. `ssl` is true when its header is `https` or `true`; `client_cert.verified` when its header is `true`. The HTTP version is read as `1.0`, `1.1`, `2.0` or `3.0` from either CloudFront's form or the `HTTP/2` form, for every source; any other value is absent. A rule comparing it with any other literal gets a validation warning, since it can never match. A fingerprint header that is empty or not a well-formed JA4 or JA3 is absent. With an `ssl` source, a fingerprint on a request that wasn't HTTPS is absent too: TLS fingerprints exist only for TLS, so any such value came from the client. On those requests no `X-Edge-TLS-JA4` is sent and `browser_tls_mismatch` can't fire. Map `ssl` whenever you map a fingerprint.
+The viewer fields are `ip.src.country`, `ip.src.continent`, `ip.src.asnum`, `ssl`, `http.request.version`, `client_cert.verified`, `tls.client.ja4` and `tls.client.ja3`.
 
-**`gcp`:** a Google Cloud external Application Load Balancer has no fixed viewer headers, so add these [custom request headers](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers-global) to the backend service: `X-Gclb-Client-Ip: {client_ip_address}`, `X-Gclb-Region: {client_region}`, `X-Gclb-Protocol: {client_protocol}` and `X-Gclb-Encrypted: {client_encrypted}`. The load balancer overwrites only the headers it adds: any other header reaches the edge exactly as the client sent it. So every header the edge reads must be a custom header on the load balancer, including any you add to `VIEWER_HEADERS`. Send `INGRESS_SECRET_HEADER` as a custom header too. It is required when the edge can be reached through an internet NEG, or by any path not limited to your own VPC; see the [production checklist](index.md#production-checklist).
+- `ssl` is true when its header is `https` or `true`; `client_cert.verified` when its header is `true`.
+- The HTTP version is read as `1.0`, `1.1`, `2.0` or `3.0` from either CloudFront's form or the `HTTP/2` form, for every source; any other value is absent. A rule comparing it with any other literal gets a validation warning, since it can never match.
+- A fingerprint header that is empty or not a well-formed JA4 or JA3 is absent.
+- With an `ssl` source, a fingerprint on a request that wasn't HTTPS is absent too: TLS fingerprints exist only for TLS, so any such value came from the client. On those requests no `X-Edge-TLS-JA4` is sent and `browser_tls_mismatch` can't fire. Map `ssl` whenever you map a fingerprint.
+
+**`gcp`:** a Google Cloud external Application Load Balancer has no fixed viewer headers, so add these [custom request headers](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers-global) to the backend service: `X-Gclb-Client-Ip: {client_ip_address}`, `X-Gclb-Region: {client_region}`, `X-Gclb-Protocol: {client_protocol}` and `X-Gclb-Encrypted: {client_encrypted}`. The load balancer overwrites only the headers it adds: any other header reaches the edge exactly as the client sent it. So every header the edge reads must be a custom header on the load balancer, including any you add to `VIEWER_HEADERS`.
+
+Send `INGRESS_SECRET_HEADER` as a custom header too. It is required when the edge can be reached through an internet NEG, or by any path not limited to your own VPC; see the [production checklist](index.md#production-checklist).
 
 ASN and the TLS fingerprints are opt-in. Add `X-Gclb-Asn: {asn}`, `X-Gclb-Ja4: {tls_ja4_fingerprint}` and `X-Gclb-Ja3: {tls_ja3_fingerprint}` as custom headers first, and only then set `VIEWER_HEADERS=ip.src.asnum=X-Gclb-Asn,tls.client.ja4=X-Gclb-Ja4,tls.client.ja3=X-Gclb-Ja3`. Use only the variables Google documents for your load balancer type: the global external and [classic](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers) Application Load Balancers have all three, and the [regional external Application Load Balancer](https://docs.cloud.google.com/load-balancing/docs/https/custom-headers-regional) has the fingerprints but no `{asn}`.
 
@@ -38,8 +51,12 @@ ASN and the TLS fingerprints are opt-in. Add `X-Gclb-Asn: {asn}`, `X-Gclb-Ja4: {
 
 | CDN | Add to `VIEWER_HEADERS` | Also needed |
 |---|---|---|
-| CloudFront | `tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint,tls.client.ja3=CloudFront-Viewer-JA3-Fingerprint` | Add both headers to the cache behavior's [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html#tls-related-versions); a cache policy can't carry them. They are present only for HTTPS requests, and the edge ignores them on a request whose `ssl` is false. The preset's viewer headers need the same policy |
-| Cloudflare | `tls.client.ja4=cf-ja4` | [JA4 fingerprints](https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/) need Enterprise Bot Management, and the ["Add bot protection headers" Managed Transform](https://developers.cloudflare.com/rules/transform/managed-transforms/reference/) is what sets `CF-JA4`. Turn it on before mapping the header: whether Cloudflare replaces a client-sent copy isn't documented, so without the transform a client's own value could be read as the fingerprint. Name another header here if you have Cloudflare set one from the fingerprint |
+| CloudFront | `tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint,tls.client.ja3=CloudFront-Viewer-JA3-Fingerprint` | An origin request policy that carries both headers, as below |
+| Cloudflare | `tls.client.ja4=cf-ja4` | The Managed Transform that sets `CF-JA4`, as below |
+
+- **CloudFront:** add both headers to the cache behavior's [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html#tls-related-versions); a cache policy can't carry them. They are present only for HTTPS requests, and the edge ignores them on a request whose `ssl` is false. The preset's viewer headers need the same policy.
+- **Cloudflare:** [JA4 fingerprints](https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/) need Enterprise Bot Management, and the ["Add bot protection headers" Managed Transform](https://developers.cloudflare.com/rules/transform/managed-transforms/reference/) is what sets `CF-JA4`.
+- **Cloudflare, before mapping the header:** turn the transform on. Whether Cloudflare replaces a client-sent copy isn't documented, so without the transform a client's own value could be read as the fingerprint. Name another header here if you have Cloudflare set one from the fingerprint.
 
 A preset can be extended this way, such as `VIEWER_HEADERS=tls.client.ja4=CloudFront-Viewer-JA4-Fingerprint`, which keeps the preset's other headers.
 
@@ -62,11 +79,21 @@ The edge refuses to start with a name that carries credentials or query values: 
 What a listed header does:
 
 - **Logged.** Every access line carries it raw as `http.request.header.<lower-case name>`, as received, capped like the other logged headers ([Monitoring](../operate/monitoring.md#logs)). When the CDN doesn't set a header, the logged value is the client's.
-- **Readable in rules.** As `http.request.headers["cf-ipcity"]`, with no new field. A condition that excludes traffic on a header the policy trusts gets no [client-controlled warning](../reference/expressions.md#fields), because it is the CDN's value; on an untrusted one it does. Admin suggests the names in the rule builder and lists them on **Fleet** ([Dashboard](../use/dashboard.md#fleet-and-stats)). The exceptions are logged but not readable: a source header (read it through its typed field, such as `ip.src.country`) and an edge-managed name, such as `X-Edge-*`, `X-Forwarded-*`, `Host` and the other [reserved headers](../use/policy.md#header-rules).
+- **Readable in rules.** As `http.request.headers["cf-ipcity"]`, with no new field.
+  - A condition that excludes traffic on a header the policy trusts gets no [client-controlled warning](../reference/expressions.md#fields), because it is the CDN's value; on an untrusted one it does.
+  - Admin suggests the names in the rule builder and lists them on **Fleet** ([Fleet](../tour/monitor.md#fleet)).
+  - The exceptions are logged but not readable: a source header (read it through its typed field, such as `ip.src.country`) and an edge-managed name, such as `X-Edge-*`, `X-Forwarded-*`, `Host` and the other [reserved headers](../use/policy.md#header-rules).
 - **Forwarded.** Reaches the upstream unchanged, unless it is also a source header (a client-IP, `VIEWER_HEADERS` or ingress secret header, such as `CF-IPCountry` on the `cloudflare` preset), which the edge always removes. The edge also strips a client-sent `X-Edge-*` header and sets the edge-managed headers itself.
-- **Signals.** `cdn_likely_automated`, `crawler_impersonated` and `browser_tls_old` read `CF-Bot-Score`, `CF-Verified-Bot` and `CloudFront-Viewer-TLS` when they are listed and trusted, and `cdn_tor` reads `ip.src.country` when `CF-IPCountry` is listed and is the header `ip.src.country` comes from, as on the `cloudflare` preset ([client signals](../reference/expressions.md#client-signals)). A rule naming one of these signals is refused when the deployment or policy doesn't meet that: the error names the header it needs listed in `CDN_HEADERS`, and for a header other than a source header, trusted in `global.cdn_trusted_headers`; for `cdn_tor`, it says when `ip.src.country` isn't read from `CF-IPCountry`. Admin judges every stored minute under the current deployment, so after a change to `CDN_HEADERS` or to the header `ip.src.country` comes from makes one of these signals readable, minutes stored before it count its zeros as normal traffic: until they age out of the baselines, [`signal_surge`](../operate/notifications.md#signals) can fire on it, and a [shared-key autopilot rule](../use/autopilot.md#rule-states) on it reads a low baseline for up to 7 days.
+- **Signals.** `cdn_likely_automated`, `crawler_impersonated` and `browser_tls_old` read `CF-Bot-Score`, `CF-Verified-Bot` and `CloudFront-Viewer-TLS` when they are listed and trusted. `cdn_tor` reads `ip.src.country` when `CF-IPCountry` is listed and is the header `ip.src.country` comes from, as on the `cloudflare` preset ([client signals](../reference/expressions.md#client-signals)).
+  - A rule naming one of these signals is refused when the deployment or policy doesn't meet that. The error names the header it needs listed in `CDN_HEADERS`, and for a header other than a source header, trusted in `global.cdn_trusted_headers`. For `cdn_tor`, it says when `ip.src.country` isn't read from `CF-IPCountry`.
+  - Admin judges every stored minute under the current deployment. After a change to `CDN_HEADERS`, or to the header `ip.src.country` comes from, makes one of these signals readable, minutes stored before it count its zeros as normal traffic.
+  - Until those minutes age out of the baselines, [`signal_surge`](../operate/notifications.md#signals) can fire on it, and a [shared-key autopilot rule](../use/autopilot.md#rule-states) on it reads a low baseline for up to 7 days.
 
-**Trust.** Listing a header only logs it and offers it to rules. Whether rules may treat it as the CDN's value is policy: **Settings → Trusted CDN headers** (`global.cdn_trusted_headers`), set by whoever edits policy, who knows which CDN features are on. Trusting a header declares that the CDN sets it on every request. The edge doesn't check. Cloudflare [passes client request headers through to the origin](https://developers.cloudflare.com/fundamentals/reference/http-headers/), and whether it replaces a client-sent copy of one of its own headers isn't documented, so a client can send a header whose feature is off. Trusting one only silences the client-controlled warning and lets rules name the CDN signals, which only narrow a match; it relaxes no check.
+**Trust.** Listing a header only logs it and offers it to rules. Whether rules may treat it as the CDN's value is policy: **Settings → Trusted CDN headers** (`global.cdn_trusted_headers`), set by whoever edits policy, who knows which CDN features are on.
+
+Trusting a header declares that the CDN sets it on every request. The edge doesn't check. Cloudflare [passes client request headers through to the origin](https://developers.cloudflare.com/fundamentals/reference/http-headers/), and whether it replaces a client-sent copy of one of its own headers isn't documented, so a client can send a header whose feature is off.
+
+Trusting one only silences the client-controlled warning and lets rules name the CDN signals, which only narrow a match; it relaxes no check.
 
 - **Default.** While the setting is unset, the trusted headers are the ones the preset's CDN adds to every proxied request with no optional feature, and only when they are in `CDN_HEADERS`: `CF-Ray` and `CF-Visitor` on `cloudflare`, none on `cloudfront` and `gcp`. Whether Cloudflare replaces a client-sent copy of them isn't documented; trusting them only silences the warning and lets rules name the signals. A list in the policy replaces the default, and an empty list trusts none.
 - **Source headers.** A listed header that is also a source header, such as `CF-IPCountry` on the `cloudflare` preset, is always trusted, because the deployment already trusts it as `ip.src.country`. Naming one in the setting is saved with a warning and does nothing.
@@ -79,7 +106,9 @@ Turn on the feature that sets each header before trusting it:
 - **CloudFront:** an [origin request policy](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html) that adds the headers.
 - **Reach:** `TRUSTED_PROXIES`, or a NetworkPolicy, limited to the CDN's connector, so no client reaches the edge directly.
 
-Edge and admin must have the same `CDN_HEADERS`, because a non-empty list, and a non-empty default trust, are part of the deployment fingerprint: [publishing](../use/publishing.md#publish) is held while a live edge differs. A deployment with no CDN headers keeps the fingerprint it had before `CDN_HEADERS` existed. A `cloudfront` or `cloudflare` deployment gets a new one from its preset list, so on an upgrade from a release without `CDN_HEADERS`, publishing is held until admin and every live edge run the new release; reverts and guard rollbacks still work.
+Edge and admin must have the same `CDN_HEADERS`, because a non-empty list, and a non-empty default trust, are part of the deployment fingerprint: [publishing](../use/publishing.md#publish) is held while a live edge differs. A deployment with no CDN headers keeps the fingerprint it had before `CDN_HEADERS` existed.
+
+A `cloudfront` or `cloudflare` deployment gets a new fingerprint from its preset list, so on an upgrade from a release without `CDN_HEADERS`, publishing is held until admin and every live edge run the new release; reverts and guard rollbacks still work.
 
 ## Upstream
 
@@ -87,9 +116,13 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `UPSTREAM_URL` | required | `http(s)://host[:port][/path]` of your load balancer or gateway, such as an ALB or an Istio gateway Service, with no query or fragment. `Host` is forwarded unchanged so it can route. Over HTTPS the edge sends the request's host as the TLS server name and checks the certificate against it, so the upstream must present a certificate for each host it serves; the connection still goes to this URL's address. Only the deployment sets it: policy can't, and admin shows it read-only on **Fleet** |
+| `UPSTREAM_URL` | required | `http(s)://host[:port][/path]` of your load balancer or gateway, such as an ALB or an Istio gateway Service, with no query or fragment. `Host` is forwarded unchanged so it can route. Only the deployment sets it: policy can't, and admin shows it read-only on **Fleet** |
 | `UPSTREAM_DIAL_TIMEOUT` | `5s` | Connect and TLS handshake timeout |
-| `UPSTREAM_MAX_IDLE` | `256` | Idle connections kept to the upstream, in total. Over HTTPS each host has its own pool within this total. Each is closed after 50s idle, so keep the upstream's idle timeout above that |
+| `UPSTREAM_MAX_IDLE` | `256` | Idle connections kept to the upstream, in total. Each is closed after 50s idle, so keep the upstream's idle timeout above that |
+
+**`UPSTREAM_URL` over HTTPS:** the edge sends the request's host as the TLS server name and checks the certificate against it, so the upstream must present a certificate for each host it serves. The connection still goes to this URL's address.
+
+**`UPSTREAM_MAX_IDLE` over HTTPS:** each host has its own pool within the total.
 
 ## Policy source
 
@@ -104,7 +137,9 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 | `BOOTSTRAP_ALLOW_STALE` | `false` | Serve an old bootstrap anyway. Logged at error level and shown in **Fleet** |
 | `STATS_INTERVAL` | `10s` | How often stats are sent to admin. At most `30s`: admin counts an edge toward the fleet size, which divides local fallback limits, for a minute after its last report |
 | `INSTANCE` | hostname | The name shown in **Fleet** |
-| `JWKS_ALLOWED_HOSTS` | none | JWKS hosts (as in the URL) allowed to resolve to private addresses. JWKS URLs are entered in admin, so every JWKS fetch goes through the SSRF (server-side request forgery) guard: it is HTTPS only, uses no proxy and follows redirects only to the same host. Except for the listed hosts, it is also refused when the address actually dialed is loopback, private, link-local (cloud metadata), shared (`100.64.0.0/10`), multicast, unspecified, or a NAT64 (`64:ff9b::/96`) form of one of those |
+| `JWKS_ALLOWED_HOSTS` | none | JWKS hosts (as in the URL) allowed to resolve to private addresses. JWKS URLs are entered in admin, so every JWKS fetch goes through the SSRF (server-side request forgery) guard, described below |
+
+**`JWKS_ALLOWED_HOSTS` and the SSRF guard:** a fetch is HTTPS only, uses no proxy and follows redirects only to the same host. Except for the listed hosts, it is also refused when the address actually dialed is loopback, private, link-local (cloud metadata), shared (`100.64.0.0/10`), multicast, unspecified, or a NAT64 (`64:ff9b::/96`) form of one of those.
 
 ## Valkey
 
@@ -120,7 +155,7 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 |---|---|---|
 | `LISTEN_ADDR` | `:8080` | Traffic |
 | `INTERNAL_ADDR` | `:9090` | `/livez`, `/readyz`, `/metrics` |
-| `MAX_INFLIGHT` | `GOMEMLIMIT` ÷ 256 KiB, at most `10000`; `10000` without `GOMEMLIMIT` | Concurrent ordinary requests per replica; more get `503 overloaded`. Each in-flight proxied request holds memory, about 100 KiB in a load test on Kubernetes, kernel socket buffers included, which `GOMEMLIMIT` doesn't cap. The default keeps that, plus streams and headroom, under `GOMEMLIMIT`, so set `GOMEMLIMIT` to about 90% of the container's memory limit. Past what memory holds, a slow upstream gets the edge OOM-killed instead of answering 503. **Settings → Requests in progress** in admin can lower it for every edge, never raise it |
+| `MAX_INFLIGHT` | `GOMEMLIMIT` ÷ 256 KiB, at most `10000`; `10000` without `GOMEMLIMIT` | Concurrent ordinary requests per replica; more get `503 overloaded`. **Settings → Requests in progress** in admin can lower it for every edge, never raise it. See below |
 | `MAX_STREAMS` | `1000` | Concurrent WebSocket and SSE requests per replica |
 | `TOKEN_CACHE_SIZE` | `10000` | Verified tokens kept per replica so repeat requests skip the signature check. When full, new tokens are verified on every request but not stored. Raise it when `edge_auth_total{result="verified"}` stays high next to `cached` |
 | `MAX_HEADER_BYTES` | `65536` | |
@@ -130,7 +165,9 @@ The edge forwards every request it allows to one upstream: the load balancer or 
 | `SHUTDOWN_TIMEOUT` | `30s` | How long in-flight requests get to finish |
 | `LOG_SAMPLE_RATE` | `1` | Share of allowed, non-5xx requests to log (0 to 1). Rejections, 5xx, lines with a log-only rule's match and requests an always-allow rule or the allowlist let through past a block are always logged |
 
-Per-route body limits and upstream timeouts are policy, not deployment settings; see [Policy](../use/policy.md#settings).
+**`MAX_INFLIGHT` and memory:** each in-flight proxied request holds memory, about 100 KiB in a load test on Kubernetes, kernel socket buffers included, which `GOMEMLIMIT` doesn't cap. The default keeps that, plus streams and headroom, under `GOMEMLIMIT`, so set `GOMEMLIMIT` to about 90% of the container's memory limit. Past what memory holds, a slow upstream gets the edge OOM-killed instead of answering 503.
+
+Per-route body limits and upstream timeouts are policy, not deployment settings; see [Settings](../use/settings.md#defaults).
 
 ## Tracing
 

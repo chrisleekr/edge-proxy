@@ -46,8 +46,8 @@ true
 | `tls.client.ja3` | string | The client's [JA3](https://github.com/salesforce/ja3) TLS fingerprint, 32 lowercase hex characters, with the same rules as JA4, including absent on a request that wasn't HTTPS. Needs a trusted viewer header |
 | `client.signals` | list | Names of the [client signals](#client-signals) the request shows. Only `eq`, `ne`, `in` and `not_in` apply, with signal names as values |
 | `client.verified_bot` | bool | True when `ip.src` is in a crawler range admin fetched from `VERIFIED_BOT_SOURCES`. Needs `VERIFIED_BOT_SOURCES` on admin, or validation refuses the rule; false until admin's first fetch succeeds |
-| `client.ip_lists` | list | Names of the [IP lists](../use/bots.md#ip-lists) that hold `ip.src`, from the lists admin serves to edges. Only `eq`, `ne`, `in` and `not_in` apply, with list names as values: 1 to 63 lowercase letters, digits and hyphens, not starting with a hyphen. A name is checked for its form only, since which lists exist is admin state, not config, so the editor warns about a name that matches no one. Empty until the edge's first poll after it starts, as `client.verified_bot` is false until admin's first fetch |
-| `client.denylisted` | bool | True when any [IP list](../use/bots.md#ip-lists) that is on holds `ip.src`, provider, crawler and monitor lists included. Kept for policies written before `client.ip_lists`; saving warns on a rule that reads it. Use `client.ip_lists` |
+| `client.ip_lists` | list | Names of the [IP lists](../use/ip-lists.md) that hold `ip.src`, from the lists admin serves to edges. Only `eq`, `ne`, `in` and `not_in` apply, with list names as values: 1 to 63 lowercase letters, digits and hyphens, not starting with a hyphen. A name is checked for its form only, since which lists exist is admin state, not config, so the editor warns about a name that matches no one. Empty until the edge's first poll after it starts, as `client.verified_bot` is false until admin's first fetch |
+| `client.denylisted` | bool | True when any [IP list](../use/ip-lists.md) that is on holds `ip.src`, provider, crawler and monitor lists included. Kept for policies written before `client.ip_lists`; saving warns on a rule that reads it. Use `client.ip_lists` |
 | `http.request.jwt.claims["name"]` | list | Verified claims only. Not in the `config` phase |
 | `edge.locale` | string | The detected locale. Not in the `config` phase; values must be in the supported list |
 
@@ -74,7 +74,12 @@ A field marked "needs a trusted viewer header" is refused by validation unless t
 | `cdn_tor` | `ip.src.country` is `T1`, the code Cloudflare uses for Tor. Set only when `cf-ipcountry` is listed in `CDN_HEADERS` and is the `ip.src.country` header, as on the `cloudflare` preset; a listed source header is always trusted. A fact about the address, not a verdict on the client. `T1` is not an ISO 3166 country code | `cf-ipcountry` listed and the `ip.src.country` header |
 | `browser_tls_old` | A modern browser whose `CloudFront-Viewer-TLS` doesn't start with `TLSv1.3:`, since modern browsers negotiate TLS 1.3 and [CloudFront offers it](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html). Not set on a request the CDN saw as plain HTTP when `ssl` is mapped, like the TLS fingerprints. Known false positive: a corporate TLS-inspecting proxy that only speaks TLS 1.2 | `cloudfront-viewer-tls` trusted |
 
-A modern browser is one whose `User-Agent` claims a version that sends `Sec-Fetch-Mode`, from [MDN's compatibility data](https://github.com/mdn/browser-compat-data/blob/main/http/headers/Sec-Fetch-Mode.json): Chrome 76 (and Edge, Opera and other Chromium browsers, which report a `Chrome/` version), Firefox 90 and Safari 16.4. Chrome, Firefox and Edge on iOS are never counted, since they send what Safari sends. Browsers send `Sec-Fetch-*` and client hints only over HTTPS, so those signals need an `ssl` source. A signal whose source field isn't configured or whose CDN header isn't [trusted](../deploy/edge.md#cdn-headers), or `browser_outdated` without a floor, can never fire, and validation refuses a rule that names it. A config naming any of the four CDN signals needs schema 8 edges: admin waits for them.
+A modern browser is one whose `User-Agent` claims a version that sends `Sec-Fetch-Mode`, from [MDN's compatibility data](https://github.com/mdn/browser-compat-data/blob/main/http/headers/Sec-Fetch-Mode.json): Chrome 76 (and Edge, Opera and other Chromium browsers, which report a `Chrome/` version), Firefox 90 and Safari 16.4.
+
+- Chrome, Firefox and Edge on iOS are never counted, since they send what Safari sends.
+- Browsers send `Sec-Fetch-*` and client hints only over HTTPS, so those signals need an `ssl` source.
+- A signal whose source field isn't configured or whose CDN header isn't [trusted](../deploy/edge.md#cdn-headers), or `browser_outdated` without a floor, can never fire, and validation refuses a rule that names it.
+- A config naming any of the four CDN signals needs schema 8 edges: admin waits for them.
 
 ## Operators
 
@@ -96,33 +101,7 @@ In wildcards, `*` matches any characters and the pattern must match the whole va
 
 ## Value lists
 
-A value list is a named set of values for one field, kept in the policy at `global.lists` and managed on the **Value lists** page: it lists each value list with the rules that use it, **New value list** adds one, and a value list's own page edits its name, field and values. Renaming a value list changes `$name` in every rule that uses it, in the same draft edit. A condition names it with `$name` where a value or a list would go:
-
-```text
-http.user_agent contains $bad-agents
-ip.src.country in $eu-only
-not starts_with(http.request.uri.path, $public-paths)
-```
-
-`in $name` matches when the field equals any value of the value list, as `in {...}` does. A value list replaces the whole set, so a bare `$name` inside `{...}` is a syntax error; quote it for a literal. A pattern operator (`contains`, `starts_with`, `ends_with`, `wildcard`, `strict_wildcard`, `matches`) matches when any value matches, and its negated form when none does. A value list belongs to one field and is used only with that field, and its values are checked as that field's when the policy is saved and again where a rule uses it, with that rule's operator: a URL paths value list holding `.php` works with `ends_with` and is refused with `in`, since a path starts with `/`.
-
-| Value list kind | Field | Operators |
-|---|---|---|
-| User agents | `http.user_agent` | `in` and the pattern operators |
-| URL paths | `http.request.uri.path` | `in` and the pattern operators |
-| Hostnames | `http.host` | `in` and the pattern operators |
-| Referers | `http.referer` | `in` and the pattern operators |
-| Header values | `http.request.headers` | `in` and the pattern operators |
-| Cookie values | `http.request.cookies` | `in` and the pattern operators |
-| Query values | `http.request.uri.args` | `in` and the pattern operators |
-| JWT claim values | `http.request.jwt.claims` | `in` and the pattern operators |
-| Countries | `ip.src.country` | `in`, `not_in` |
-| Continents | `ip.src.continent` | `in`, `not_in` |
-| AS numbers | `ip.src.asnum` | `in`, `not_in` |
-| JA4 fingerprints | `tls.client.ja4` | `in`, `not_in` |
-| JA3 fingerprints | `tls.client.ja3` | `in`, `not_in` |
-
-Addresses go in an [IP list](../use/bots.md#ip-lists), read through `client.ip_lists`, not in a value list. A value list is part of the policy, so a change takes effect when you publish, and it needs schema 13 edges. A value list no rule uses is warned about, and removing one a rule still uses is refused at that rule.
+A condition names a [value list](../use/value-lists.md) with `$name` where a value or a list would go, such as `http.user_agent contains $bad-agents`. A value list replaces the whole set, so a bare `$name` inside `{...}` is a syntax error; quote it for a literal. Kinds, operators, limits and how to manage them are in [Value lists](../use/value-lists.md).
 
 ## Limits
 

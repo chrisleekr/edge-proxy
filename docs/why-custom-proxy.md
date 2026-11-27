@@ -2,6 +2,14 @@
 
 Edge Proxy is a small Go proxy built for one job: applying policy to every request before it reaches your services. This page explains why it doesn't build on an existing gateway and how it compares with the common ones. For more on content delivery networks (CDNs) and cloud web application firewalls (WAFs), see [Compared with vendors](vendor-comparison.md).
 
+## In short
+
+- The problem: content delivery network (CDN) and web application firewall (WAF) limits are counted per data centre, NGINX counts per server, and per-service limiters differ by team, so no limit holds across all traffic ([why the usual places don't work](#why-the-usual-places-dont-work)).
+- Other gateways: each one falls short on the algorithm, the default limiter, Redis calls, Redis outages or limiting by JSON Web Token (JWT) claim, so you would be rewriting its limiter ([why not another gateway](#why-not-another-gateway)).
+- What Edge Proxy does: one count in Valkey for all replicas, four algorithms, limits on verified JWT claims, a client IP address clients can't fake, and traffic that keeps flowing when a dependency is down ([what it needed](#what-it-needed), [what Edge Proxy does](#what-edge-proxy-does)).
+- What it gives up: you patch it yourself, observability is logs, metrics and traces only, HTTP/3, client HTTPS, retries and routing are left to the CDN and load balancer, and there are no third-party plugins ([what Edge Proxy gives up](#what-edge-proxy-gives-up)).
+- When something else is better: use Envoy's rate-limit service if fixed windows are enough, or your CDN or NGINX if rough per-IP limits are enough ([when something else is better](#when-something-else-is-better)).
+
 ## What it needed
 
 - One rate limiter in front of every service, so no microservice has to build its own.
@@ -15,7 +23,9 @@ Edge Proxy is a small Go proxy built for one job: applying policy to every reque
 
 ## Why the usual places don't work
 
-Rate limits in a CDN or WAF are counted where the request lands. Cloudflare, for example, keeps a separate counter in each data centre and has no global counter, so the same limit applies once per data centre ([request rate](https://developers.cloudflare.com/waf/rate-limiting-rules/request-rate/)). Which request details you can count by depends on your plan ([parameters](https://developers.cloudflare.com/waf/rate-limiting-rules/parameters/)), and limiting by a JWT claim needs Enterprise ([JWT validation](https://developers.cloudflare.com/api-shield/security/jwt-validation/)). Keep the CDN in front for distributed denial-of-service (DDoS) protection, bot rules and HTTPS. Edge Proxy adds one count for all your traffic behind it.
+Rate limits in a CDN or WAF are counted where the request lands. Cloudflare, for example, keeps a separate counter in each data centre and has no global counter, so the same limit applies once per data centre ([request rate](https://developers.cloudflare.com/waf/rate-limiting-rules/request-rate/)). Which request details you can count by depends on your plan ([parameters](https://developers.cloudflare.com/waf/rate-limiting-rules/parameters/)), and limiting by a JWT claim needs Enterprise ([JWT validation](https://developers.cloudflare.com/api-shield/security/jwt-validation/)).
+
+Keep the CDN in front for distributed denial-of-service (DDoS) protection, bot rules and HTTPS. Edge Proxy adds one count for all your traffic behind it.
 
 A proxy such as NGINX counts on each server separately, so three servers enforce three limits. Its rules live in a config file, so changing one means a reload or a deploy ([limit_req](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html)).
 
@@ -33,7 +43,11 @@ Envoy, APISIX, Kong, Tyk and Traefik can all share a rate limit across replicas.
 - A Redis outage blocks traffic and there is no setting to change that (Traefik).
 - The free edition can limit by a JWT claim only when the claim names a consumer registered in the gateway ahead of time, so a user or tenant ID can't be the key ([APISIX][apx-jwt], [Kong][kong-jwt]). [Traefik's JWT middleware][tr-jwt] is in Traefik Hub only.
 
-Replacing a gateway's limiter and failure handling is most of what this project is. For APISIX, Kong, Tyk and Traefik it would be a plugin in the gateway's own plugin system. Envoy instead calls a separate rate-limit service over gRPC, which you could write in Go, but then every rate-limited request makes an extra network call to that service before it reaches Valkey, you run and scale Envoy and the service side by side, and Envoy's failure setting covers the whole filter rather than one rule ([global rate limiting][env-rl], [failure mode][env-fail]). Forwarding requests is the easy part, and Go's standard library already does it.
+Replacing a gateway's limiter and failure handling is most of what this project is. For APISIX, Kong, Tyk and Traefik it would be a plugin in the gateway's own plugin system.
+
+Envoy instead calls a separate rate-limit service over gRPC, which you could write in Go, but then every rate-limited request makes an extra network call to that service before it reaches Valkey, you run and scale Envoy and the service side by side, and Envoy's failure setting covers the whole filter rather than one rule ([global rate limiting][env-rl], [failure mode][env-fail]).
+
+Forwarding requests is the easy part, and Go's standard library already does it.
 
 | Mark | Meaning |
 |---|---|
@@ -75,7 +89,7 @@ Replacing a gateway's limiter and failure handling is most of what this project 
 - Header rules can set, append, remove, copy or rename request headers, and choose which headers are forwarded at all. A value can include the client IP address, a verified JWT claim, the country, the locale or the request ID ([header rules](use/policy.md#header-rules)).
 - On a route with a cross-origin resource sharing (CORS) policy, Edge Proxy answers preflight requests itself. On other responses it replaces the service's CORS headers with its own, including on its own `401` and `429` responses ([CORS](use/policy.md#cors)).
 - It picks a language from `Accept-Language` out of the ones you support and sends it to your services in a header ([locale](use/policy.md#locale)).
-- Its own error responses, such as a `401` or a `429`, use templates you write in JSON, problem+json, HTML or text ([settings](use/policy.md#settings)).
+- Its own error responses, such as a `401` or a `429`, use templates you write in JSON, problem+json, HTML or text ([response templates](use/templates.md)).
 - Rules match on the path, host, method, headers, cookies, query arguments, client IP address, country or verified JWT claims ([expressions](reference/expressions.md)). Paths are normalized before matching, and ambiguous encodings are rejected.
 
 ### Keeps running
@@ -89,7 +103,7 @@ On a laptop, with no rate-limit rules, the median request took 0.77 ms through E
 
 Rules are edited in a web UI. Admin checks each change with the same Go code Edge Proxy runs, runs your policy tests against it, and keeps every version. A new version can go to part of the traffic first, and it rolls back on its own if errors rise or a changed rule blocks far more than expected. Every change is recorded in an audit log ([publish and roll back](use/publishing.md)).
 
-The UI also shows what is happening. **Stats** shows how many requests each rule checked and blocked, and **Routes** lists every route Edge Proxy served, with its traffic and what each rule does to it ([dashboard](use/dashboard.md)).
+The UI also shows what is happening. **Stats** shows how many requests each rule checked and blocked, and **Routes** lists every route Edge Proxy served, with its traffic and what each rule does to it ([admin UI tour](tour/index.md)).
 
 ## What Edge Proxy gives up
 

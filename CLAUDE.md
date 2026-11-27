@@ -189,7 +189,7 @@ Every change is verified locally, end to end, before it is pushed or an MR is op
 | Container build + smoke | Edge image becomes ready from a bootstrap snapshot; runner image starts on a read-only root and refuses to run without its settings |
 | Runner contract (`scripts/ci/autopilot.sh`) | The real autopilot runner claims, runs, reports, times out, refuses an answer without a verdict, drops a lapsed lease and shuts down as admin expects |
 | Docs screenshots match the UI (`scripts/ci/screenshots.sh`) | A UI change can't leave the docs showing the old UI |
-| Docs reference tables match the code (`TestDocsListEvery*` in `internal/admin/docs_test.go`) | Every env var (edge, admin and runner), admin API route with its permission, and expression field is documented, and nothing documented is gone |
+| Docs match the code (`TestDocs*` in `internal/admin/docs_test.go`) | The reference tables match the code both ways: every env var (edge, admin and runner), admin API route with its permission, expression field, policy field and admin setting (`docs/reference/policy-fields.md`) is documented, and nothing documented is gone. The tour check is one-way: every admin UI page in the sidebar has a section in the tour (`docs/tour/`). Every recipe in `docs/use` saves without unmentioned warnings and its policy tests pass, and every other policy test there is valid |
 
 ## Writing rules
 
