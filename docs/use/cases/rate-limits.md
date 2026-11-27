@@ -414,7 +414,7 @@ Then:
 
 ## Set a site-wide ceiling per IP
 
-One rule for every request that reaches rate limiting: no client IP gets more than 600 requests a minute, whatever the path. Clients on the trusted allowlist or matched by an always-allow rule skip rate-limit rules, and a CORS preflight the edge answers itself is never counted.
+One rule for every request that reaches rate limiting: each client IP gets about 600 requests a minute, whatever the path. The cap is approximate because the [sliding window](../rate-limiting.md#sliding-window) estimates the last minute from two fixed windows. Clients on the trusted allowlist or matched by an always-allow rule skip rate-limit rules, and a CORS preflight the edge answers itself is never counted. While Valkey can't answer, `fail_mode: "open"` lets every request pass this rule.
 
 ```mermaid
 flowchart TD
