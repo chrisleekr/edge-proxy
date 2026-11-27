@@ -236,6 +236,15 @@ func FuzzParseRenderRoundTrip(f *testing.F) {
 		if len(text) > MaxTextLen {
 			return
 		}
+		// Precedence adds groups the parser's parenthesis count doesn't see,
+		// and Render writes each in parentheses, so an AST deeper than Check
+		// allows can render past the parser's limit. Check rejects those ASTs;
+		// every one it allows renders within the limit.
+		for _, is := range Check(n, testEnv) {
+			if strings.HasPrefix(is.Msg, "nesting deeper than") {
+				return
+			}
+		}
 		again, err := Parse(text)
 		if err != nil {
 			t.Fatalf("Parse(Render(%q)) = %q: %v", src, text, err)
