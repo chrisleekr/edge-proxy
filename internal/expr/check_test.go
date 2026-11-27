@@ -163,6 +163,25 @@ func repeatRule(n int) []Node {
 	return out
 }
 
+// Admin shows a stored expression as text and parses it back on save, so the
+// deepest expression Check allows must render within the parser's nesting
+// limit. A negated top group adds "not (", the most parentheses Render writes.
+func TestDeepestAllowedExpressionRendersToParseableText(t *testing.T) {
+	n := deepAST(MaxDepth)
+	n.Not = true
+	if is := Check(n, testEnv); is != nil {
+		t.Fatalf("Check = %v, want none", is)
+	}
+	text := Render(n)
+	again, err := Parse(text)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", text, err)
+	}
+	if Render(again) != text {
+		t.Fatalf("round trip changed %q to %q", text, Render(again))
+	}
+}
+
 // deepAST nests groups with two children each, so Normalize can't collapse them.
 func deepAST(depth int) Node {
 	n := and(rule("http.host", "eq", "a"), rule("http.host", "eq", "b"))
