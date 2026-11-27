@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/chrisleekr/edge-proxy/compare/v1.4.0...v1.5.0) (2026-11-27)
+
+
+### Features
+
+* pick a template body by Accept, warn on CORS origins browsers never send, and trim request-path work ([#47](https://github.com/chrisleekr/edge-proxy/issues/47)) ([fdc197c](https://github.com/chrisleekr/edge-proxy/commit/fdc197ccaa698cf5d9f0ea63b1b65161957b34a3))
+
 ## [1.4.0](https://github.com/chrisleekr/edge-proxy/compare/v1.3.0...v1.4.0) (2026-11-21)
 
 
