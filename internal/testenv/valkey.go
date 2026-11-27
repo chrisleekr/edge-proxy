@@ -20,7 +20,7 @@ import (
 )
 
 // ValkeyImage matches compose.yaml.
-const ValkeyImage = "valkey/valkey:9.2.0-alpine"
+const ValkeyImage = "valkey/valkey:9.2.1-alpine"
 
 var (
 	standaloneOnce sync.Once
